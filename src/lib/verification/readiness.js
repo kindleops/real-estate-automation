@@ -111,6 +111,29 @@ export async function getVerificationReadiness({
   deps = {},
 } = {}) {
   const snapshot = buildVerificationReadinessSnapshot(env);
+  let podio_latest_rate_limit = {
+    observed: false,
+  };
+
+  if (snapshot.podio.configured) {
+    try {
+      if (deps.getLatestPodioRateLimitStatus) {
+        podio_latest_rate_limit = deps.getLatestPodioRateLimitStatus();
+      } else {
+        const podioProvider = await import("@/lib/providers/podio.js");
+        podio_latest_rate_limit = podioProvider.getLatestPodioRateLimitStatus();
+      }
+    } catch {
+      podio_latest_rate_limit = {
+        observed: false,
+      };
+    }
+  }
+
+  snapshot.podio = {
+    ...snapshot.podio,
+    latest_rate_limit: podio_latest_rate_limit,
+  };
 
   if (!perform_live) {
     return {

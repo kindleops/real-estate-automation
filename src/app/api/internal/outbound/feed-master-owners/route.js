@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { child } from "@/lib/logging/logger.js";
+import { getPodioRetryAfterSeconds, isPodioRateLimitError } from "@/lib/providers/podio.js";
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import {
   capFeederBatch,
@@ -39,7 +40,26 @@ function asNumber(value, fallback = null) {
 }
 
 function statusForResult(result) {
+  if (result?.reason === "master_owner_feeder_rate_limited") return 429;
   return result?.ok === false ? 400 : 200;
+}
+
+function buildRateLimitResponse(error) {
+  const retry_after_seconds = getPodioRetryAfterSeconds(error, null);
+  const retry_after_at =
+    Number.isFinite(retry_after_seconds) && retry_after_seconds > 0
+      ? new Date(Date.now() + retry_after_seconds * 1000).toISOString()
+      : null;
+
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "master_owner_feeder_rate_limited",
+      retry_after_seconds,
+      retry_after_at,
+    },
+    { status: 429 }
+  );
 }
 
 async function executeRun({
@@ -273,6 +293,10 @@ export async function GET(request) {
   } catch (error) {
     logger.error("master_owner_feeder.failed", { error });
 
+    if (isPodioRateLimitError(error)) {
+      return buildRateLimitResponse(error);
+    }
+
     return NextResponse.json(
       {
         ok: false,
@@ -334,6 +358,10 @@ export async function POST(request) {
     );
   } catch (error) {
     logger.error("master_owner_feeder.failed", { error });
+
+    if (isPodioRateLimitError(error)) {
+      return buildRateLimitResponse(error);
+    }
 
     return NextResponse.json(
       {

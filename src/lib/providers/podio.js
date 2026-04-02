@@ -1,5 +1,6 @@
 import axios from "axios";
 import APP_IDS from "@/lib/config/app-ids.js";
+import { child } from "@/lib/logging/logger.js";
 import {
   hasAttachedSchema,
   normalizePodioFieldMap,
@@ -8,6 +9,10 @@ import {
 function clean(value) {
   return String(value ?? "").trim();
 }
+
+const logger = child({
+  module: "providers.podio",
+});
 
 // ══════════════════════════════════════════════════════════════════════════
 // CONFIG & ENV VALIDATION
@@ -26,6 +31,7 @@ const TOKEN_REFRESH_BUFFER_MS = 15_000;
 const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_DELAY_MS = 15_000;
+const LOW_RATE_LIMIT_THRESHOLDS = [250, 100, 50];
 
 const REQUIRED_ENV = {
   PODIO_CLIENT_ID,
@@ -73,6 +79,21 @@ let _access_token = null;
 let _expires_at = 0;
 let _refresh_promise = null;
 const _item_app_id_cache = new Map();
+let _latest_rate_limit_status = {
+  observed: false,
+  observed_at: null,
+  method: null,
+  path: null,
+  operation: null,
+  status: null,
+  duration_ms: null,
+  attempt: null,
+  rate_limit_limit: null,
+  rate_limit_remaining: null,
+  retry_after_seconds: null,
+  low_remaining_threshold: null,
+};
+let _last_low_rate_limit_warning_threshold = null;
 
 function _isTokenExpired() {
   return !_access_token || Date.now() >= _expires_at - TOKEN_REFRESH_BUFFER_MS;
@@ -164,6 +185,106 @@ function isRetryable(status) {
   return RETRYABLE_STATUSES.has(status);
 }
 
+function toHeaderNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getHeaderValue(headers = {}, target = "") {
+  if (!headers || typeof headers !== "object") return null;
+  const wanted = clean(target).toLowerCase();
+  if (!wanted) return null;
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (clean(key).toLowerCase() === wanted) {
+      if (Array.isArray(value)) return value[0] ?? null;
+      return value ?? null;
+    }
+  }
+
+  return null;
+}
+
+function derivePodioOperation(method = "", path = "") {
+  const normalized_method = clean(method).toUpperCase();
+  const normalized_path = clean(path);
+
+  if (normalized_method === "GET" && /^\/item\/\d+$/.test(normalized_path)) {
+    return "get_item";
+  }
+
+  if (normalized_method === "DELETE" && /^\/item\/\d+$/.test(normalized_path)) {
+    return "delete_item";
+  }
+
+  if (normalized_method === "PUT" && /^\/item\/\d+$/.test(normalized_path)) {
+    return "update_item";
+  }
+
+  if (normalized_method === "POST" && /^\/item\/app\/\d+\/$/.test(normalized_path)) {
+    return "create_item";
+  }
+
+  if (normalized_method === "POST" && /^\/item\/app\/\d+\/filter\/[^/]+\/$/.test(normalized_path)) {
+    return "filter_items_by_view";
+  }
+
+  if (normalized_method === "POST" && /^\/item\/app\/\d+\/filter\/$/.test(normalized_path)) {
+    return "filter_items";
+  }
+
+  if (normalized_method === "GET" && /^\/view\/app\/\d+\/$/.test(normalized_path)) {
+    return "list_app_views";
+  }
+
+  if (normalized_method === "GET" && /^\/view\/app\/\d+\/[^/]+$/.test(normalized_path)) {
+    return "get_app_view";
+  }
+
+  return `${normalized_method.toLowerCase() || "request"}:${normalized_path || "/"}`;
+}
+
+function extractRateLimitMeta(headers = {}) {
+  return {
+    rate_limit_limit: toHeaderNumber(getHeaderValue(headers, "x-rate-limit-limit")),
+    rate_limit_remaining: toHeaderNumber(getHeaderValue(headers, "x-rate-limit-remaining")),
+  };
+}
+
+function resolveLowRateLimitThreshold(remaining = null) {
+  if (!Number.isFinite(Number(remaining))) return null;
+
+  for (const threshold of [...LOW_RATE_LIMIT_THRESHOLDS].sort((left, right) => left - right)) {
+    if (Number(remaining) <= threshold) {
+      return threshold;
+    }
+  }
+
+  return null;
+}
+
+export function resetPodioRateLimitObservability() {
+  _latest_rate_limit_status = {
+    observed: false,
+    observed_at: null,
+    method: null,
+    path: null,
+    operation: null,
+    status: null,
+    duration_ms: null,
+    attempt: null,
+    rate_limit_limit: null,
+    rate_limit_remaining: null,
+    retry_after_seconds: null,
+    low_remaining_threshold: null,
+  };
+  _last_low_rate_limit_warning_threshold = null;
+}
+
+export function getLatestPodioRateLimitStatus() {
+  return { ..._latest_rate_limit_status };
+}
+
 function cleanRetryMessage(value) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -200,6 +321,144 @@ export function isRetryablePodioRequestError(err) {
   });
 }
 
+export function isPodioRateLimitError(err) {
+  const status = err?.response?.status ?? err?.status ?? 0;
+  if (status === 420 || status === 429) return true;
+
+  const message_candidates = [
+    err?.response?.data?.error_description,
+    err?.response?.data?.error,
+    err?.message,
+    err?.cause?.message,
+  ];
+
+  return message_candidates.some((candidate) =>
+    /hit the rate limit/i.test(String(candidate ?? ""))
+  );
+}
+
+export function getPodioRetryAfterSeconds(err, fallback = null) {
+  const message_candidates = [
+    err?.response?.data?.error_description,
+    err?.response?.data?.error,
+    err?.message,
+    err?.cause?.message,
+  ];
+
+  for (const candidate of message_candidates) {
+    const match = String(candidate ?? "").match(/wait\s+(\d+)\s+seconds/i);
+    if (match) {
+      const seconds = Number(match[1]);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return seconds;
+      }
+    }
+  }
+
+  return fallback;
+}
+
+export function recordPodioRateLimitObservation({
+  method = "",
+  path = "",
+  status = null,
+  duration_ms = null,
+  attempt = null,
+  headers = {},
+  retry_after_seconds = null,
+} = {}) {
+  const operation = derivePodioOperation(method, path);
+  const rate_limit = extractRateLimitMeta(headers);
+  const low_remaining_threshold = resolveLowRateLimitThreshold(rate_limit.rate_limit_remaining);
+  const observation = {
+    observed: Boolean(
+      rate_limit.rate_limit_limit !== null ||
+        rate_limit.rate_limit_remaining !== null ||
+        retry_after_seconds !== null
+    ),
+    observed_at: new Date().toISOString(),
+    method: clean(method).toUpperCase() || null,
+    path: clean(path) || null,
+    operation,
+    status: Number.isFinite(Number(status)) ? Number(status) : null,
+    duration_ms: Number.isFinite(Number(duration_ms)) ? Number(duration_ms) : null,
+    attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : null,
+    rate_limit_limit: rate_limit.rate_limit_limit,
+    rate_limit_remaining: rate_limit.rate_limit_remaining,
+    retry_after_seconds:
+      Number.isFinite(Number(retry_after_seconds)) ? Number(retry_after_seconds) : null,
+    low_remaining_threshold,
+  };
+
+  if (observation.observed) {
+    _latest_rate_limit_status = observation;
+  }
+
+  if (
+    observation.rate_limit_remaining !== null &&
+    observation.rate_limit_remaining > LOW_RATE_LIMIT_THRESHOLDS[0]
+  ) {
+    _last_low_rate_limit_warning_threshold = null;
+  }
+
+  return observation;
+}
+
+function maybeWarnOnLowRateLimit(observation) {
+  const threshold = observation?.low_remaining_threshold ?? null;
+  if (threshold === null) return;
+
+  if (
+    _last_low_rate_limit_warning_threshold === null ||
+    threshold < _last_low_rate_limit_warning_threshold
+  ) {
+    _last_low_rate_limit_warning_threshold = threshold;
+    logger.warn("podio.rate_limit_low", observation);
+  }
+}
+
+function logPodioResponse({
+  level = "info",
+  event = "podio.request_completed",
+  method = "",
+  path = "",
+  status = null,
+  duration_ms = null,
+  attempt = null,
+  headers = {},
+  retry_after_seconds = null,
+  retryable = false,
+  will_retry = false,
+  error = null,
+} = {}) {
+  const observation = recordPodioRateLimitObservation({
+    method,
+    path,
+    status,
+    duration_ms,
+    attempt,
+    headers,
+    retry_after_seconds,
+  });
+
+  const meta = {
+    ...observation,
+    retryable: Boolean(retryable),
+    will_retry: Boolean(will_retry),
+    ...(error ? { error } : {}),
+  };
+
+  if (level === "warn") {
+    logger.warn(event, meta);
+  } else if (level === "error") {
+    logger.error(event, meta);
+  } else {
+    logger.info(event, meta);
+  }
+
+  maybeWarnOnLowRateLimit(observation);
+}
+
 function calcBackoff(attempt) {
   const exponential = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
   const capped = Math.min(RETRY_MAX_DELAY_MS, exponential);
@@ -208,11 +467,50 @@ function calcBackoff(attempt) {
 
 async function _executeWithRetry(buildConfig, attempt = 0) {
   const config = await buildConfig();
+  const started_at = Date.now();
 
   try {
-    return await axios({ timeout: REQUEST_TIMEOUT_MS, ...config });
+    const response = await axios({ timeout: REQUEST_TIMEOUT_MS, ...config });
+    logPodioResponse({
+      level: "info",
+      event: "podio.request_completed",
+      method: config.method,
+      path: config.path,
+      status: response?.status ?? null,
+      duration_ms: Date.now() - started_at,
+      attempt: attempt + 1,
+      headers: response?.headers || {},
+    });
+    return response;
   } catch (err) {
-    if (attempt < MAX_RETRIES && isRetryablePodioRequestError(err)) {
+    const retry_after_seconds = getPodioRetryAfterSeconds(err, null);
+    const retryable = isRetryablePodioRequestError(err);
+    const rate_limited = isPodioRateLimitError(err);
+    const will_retry = attempt < MAX_RETRIES && retryable && !rate_limited;
+
+    logPodioResponse({
+      level: "warn",
+      event: "podio.request_failed",
+      method: config.method,
+      path: config.path,
+      status: err?.response?.status ?? null,
+      duration_ms: Date.now() - started_at,
+      attempt: attempt + 1,
+      headers: err?.response?.headers || {},
+      retry_after_seconds,
+      retryable,
+      will_retry,
+      error: {
+        message: err?.message || null,
+        code: err?.code || null,
+      },
+    });
+
+    if (rate_limited) {
+      throw err;
+    }
+
+    if (will_retry) {
       await sleep(calcBackoff(attempt));
       return _executeWithRetry(buildConfig, attempt + 1);
     }
@@ -229,6 +527,7 @@ export async function podioRequest(method, path, data = null, params = null) {
   const buildConfig = async () => ({
     method,
     url: `${PODIO_API_BASE}${path}`,
+    path,
     headers: {
       Authorization: `OAuth2 ${await getToken()}`,
     },
@@ -615,7 +914,13 @@ export function safeCategoryEquals(value, expected) {
 export default {
   PodioError,
   invalidateToken,
+  getLatestPodioRateLimitStatus,
+  getPodioRetryAfterSeconds,
+  isPodioRateLimitError,
+  isRetryablePodioRequestError,
   podioRequest,
+  recordPodioRateLimitObservation,
+  resetPodioRateLimitObservability,
   getItem,
   deleteItem,
   createItem,

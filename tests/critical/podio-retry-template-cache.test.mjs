@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isRetryablePodioRequestError } from "@/lib/providers/podio.js";
+import {
+  getPodioRetryAfterSeconds,
+  getLatestPodioRateLimitStatus,
+  isPodioRateLimitError,
+  isRetryablePodioRequestError,
+  recordPodioRateLimitObservation,
+  resetPodioRateLimitObservability,
+} from "@/lib/providers/podio.js";
 import {
   clearTemplateBatchCache,
   fetchTemplatesCached,
@@ -35,6 +42,46 @@ test("Podio retry logic still rejects non-transient validation failures", () => 
     }),
     false
   );
+});
+
+test("Podio rate-limit helpers classify wait-window responses", () => {
+  const error = {
+    status: 420,
+    message:
+      "You have hit the rate limit. Please wait 3600 seconds before trying again.",
+  };
+
+  assert.equal(isPodioRateLimitError(error), true);
+  assert.equal(getPodioRetryAfterSeconds(error), 3600);
+});
+
+test("Podio rate-limit observability tracks the latest quota snapshot", () => {
+  resetPodioRateLimitObservability();
+
+  const observation = recordPodioRateLimitObservation({
+    method: "post",
+    path: "/item/app/123/filter/",
+    status: 200,
+    duration_ms: 187,
+    attempt: 1,
+    headers: {
+      "x-rate-limit-limit": "1000",
+      "x-rate-limit-remaining": "90",
+    },
+  });
+
+  const latest = getLatestPodioRateLimitStatus();
+
+  assert.equal(observation.operation, "filter_items");
+  assert.equal(observation.rate_limit_limit, 1000);
+  assert.equal(observation.rate_limit_remaining, 90);
+  assert.equal(observation.low_remaining_threshold, 100);
+  assert.equal(latest.observed, true);
+  assert.equal(latest.path, "/item/app/123/filter/");
+  assert.equal(latest.rate_limit_remaining, 90);
+  assert.equal(latest.low_remaining_threshold, 100);
+
+  resetPodioRateLimitObservability();
 });
 
 test("template batch cache reuses identical filter fetches", async () => {

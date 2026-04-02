@@ -37,7 +37,9 @@ import {
   getFirstAppReferenceId,
   getItem,
   getNumberValue,
+  getPodioRetryAfterSeconds,
   getPhoneValue,
+  isPodioRateLimitError,
   getTextValue,
   normalizeLanguage,
 } from "@/lib/providers/podio.js";
@@ -2812,9 +2814,14 @@ export async function runMasterOwnerOutboundFeeder({
         (diagnostics.stage === "master_owner_feeder.resolve_source_view" &&
         diagnostics.podio_status === 404)
           ? "master_owner_view_not_found"
+          : isPodioRateLimitError(error)
+            ? "master_owner_feeder_rate_limited"
           : diagnostics.timeout
             ? "master_owner_feeder_timeout"
             : "master_owner_feeder_failed",
+      retry_after_seconds: isPodioRateLimitError(error)
+        ? getPodioRetryAfterSeconds(error, null)
+        : null,
       diagnostics,
       scanned_count: 0,
       queued_count: 0,
