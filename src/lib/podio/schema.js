@@ -1,3 +1,4 @@
+import APP_IDS from "@/lib/config/app-ids.js";
 import PODIO_ATTACHED_BASE_SCHEMA from "@/lib/podio/schema-attached.generated.js";
 import PODIO_ATTACHED_SCHEMA_SUPPLEMENT from "@/lib/podio/schema-attached-supplement.generated.js";
 import { toPodioDateTimeString } from "@/lib/utils/dates.js";
@@ -6,6 +7,15 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
   ...PODIO_ATTACHED_BASE_SCHEMA,
   ...PODIO_ATTACHED_SCHEMA_SUPPLEMENT,
 });
+
+const MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES = new Set([
+  "buyer disposition",
+  "buyer thread",
+  "contracts",
+  "internal verification",
+  "runtime lock",
+  "system alert",
+]);
 
 function normalizeCategoryText(value) {
   return String(value ?? "")
@@ -75,6 +85,18 @@ export function getCategoryOptionId(app_id, external_id, value) {
   );
 }
 
+function shouldAllowRawCategoryCompatibility(app_id, external_id, value) {
+  if (Number(app_id) !== APP_IDS.message_events) return false;
+  if (cleanExternalId(external_id) !== "source-app") return false;
+
+  const normalized = normalizeCategoryText(value);
+  return MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES.has(normalized);
+}
+
+function cleanExternalId(value) {
+  return String(value ?? "").trim();
+}
+
 function normalizeCategoryValue(app_id, external_id, value) {
   if (value === null) return null;
   if (value === undefined || value === "") return undefined;
@@ -88,6 +110,10 @@ function normalizeCategoryValue(app_id, external_id, value) {
     .filter((entry) => entry !== null);
 
   if (!option_ids.length) {
+    if (rawValues.every((entry) => shouldAllowRawCategoryCompatibility(app_id, external_id, entry))) {
+      return field.multiple ? rawValues : rawValues[0];
+    }
+
     throw new Error(
       `[Podio] Invalid category value "${value}" for ${getAttachedAppSchema(app_id)?.app_name}::${external_id}`
     );
