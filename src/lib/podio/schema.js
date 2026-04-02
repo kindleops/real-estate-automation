@@ -17,6 +17,74 @@ const MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES = new Set([
   "system alert",
 ]);
 
+const SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES = new Set([
+  "9AM-8PM CT",
+  "9AM-11AM ET",
+  "12PM-1PM ET",
+  "5PM-9PM PT",
+  "9AM-11AM PT",
+  "11AM-1PM PT",
+  "8AM-10AM ET",
+  "9AM-8PM PT",
+  "11AM-1PM ET",
+  "5PM-8PM PT",
+  "9AM-8PM ET",
+  "7AM-9AM ET",
+  "5PM-8PM ET",
+  "12PM-1PM PT",
+  "8AM-10AM PT",
+  "10AM-12PM PT",
+  "5PM-9PM ET",
+  "6PM-9PM PT",
+  "7AM-9AM PT",
+  "6AM-8AM PT",
+  "10AM-12PM ET",
+  "12PM-1PM Local",
+  "6PM-9PM MT",
+  "9AM-8PM Local",
+  "8AM-10AM CT",
+  "8AM-10AM Local",
+  "7AM-9AM CT",
+  "6AM-8AM ET",
+  "6PM-9PM ET",
+  "9AM-8PM MT",
+  "5PM-9PM Local",
+  "12PM-1PM CT",
+  "12PM-1PM MT",
+  "10AM-12PM CT",
+  "11AM-1PM MT",
+  "5PM-8PM CT",
+  "10AM-12PM MT",
+  "11AM-1PM CT",
+  "12PM-2PM ET",
+  "6PM-9PM Local",
+  "12PM-2PM CT",
+  "12PM-2PM PT",
+  "3PM-6PM PT",
+  "6AM-8AM CT",
+  "3PM-6PM ET",
+  "11AM-1PM Local",
+  "3PM-6PM CT",
+  "9AM-11AM Local",
+  "12PM-2PM Local",
+  "9AM-11AM CT",
+  "3PM-6PM MT",
+  "3PM-6PM Local",
+  "9AM-11AM MT",
+  "12PM-2PM MT",
+  "5PM-8PM MT",
+  "10AM-12PM Local",
+  "5PM-9PM CT",
+  "7AM-9AM Local",
+  "7AM-9AM MT",
+  "8AM-10AM MT",
+  "6PM-9PM CT",
+  "6AM-8AM MT",
+  "5PM-9PM MT",
+  "6AM-8AM Local",
+  "5PM-8PM Local",
+].map((value) => normalizeCategoryText(value)));
+
 function normalizeCategoryText(value) {
   return String(value ?? "")
     .normalize("NFKD")
@@ -86,11 +154,19 @@ export function getCategoryOptionId(app_id, external_id, value) {
 }
 
 function shouldAllowRawCategoryCompatibility(app_id, external_id, value) {
-  if (Number(app_id) !== APP_IDS.message_events) return false;
-  if (cleanExternalId(external_id) !== "source-app") return false;
-
+  const normalized_app_id = Number(app_id);
+  const normalized_external_id = cleanExternalId(external_id);
   const normalized = normalizeCategoryText(value);
-  return MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES.has(normalized);
+
+  if (normalized_app_id === APP_IDS.message_events && normalized_external_id === "source-app") {
+    return MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES.has(normalized);
+  }
+
+  if (normalized_app_id === APP_IDS.send_queue && normalized_external_id === "contact-window") {
+    return SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES.has(normalized);
+  }
+
+  return false;
 }
 
 function cleanExternalId(value) {
