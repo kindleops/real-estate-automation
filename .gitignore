@@ -1,0 +1,14 @@
+.DS_Store
+.next/
+.data/
+.vercel/
+coverage/
+dist/
+node_modules/
+*.log
+
+.env
+.env.local
+.env.*.local
+
+.readme

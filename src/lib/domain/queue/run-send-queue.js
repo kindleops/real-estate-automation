@@ -1,0 +1,430 @@
+import APP_IDS from "@/lib/config/app-ids.js";
+
+import {
+  fetchAllItems,
+  getCategoryValue,
+  getDateValue,
+  getFirstAppReferenceId,
+} from "@/lib/providers/podio.js";
+
+import { processSendQueueItem } from "@/lib/domain/queue/process-send-queue.js";
+import { recordSystemAlert, resolveSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
+import { withRunLock } from "@/lib/domain/runs/run-locks.js";
+import { info, warn } from "@/lib/logging/logger.js";
+
+const DEFAULT_BATCH_SIZE = 50;
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
+function lower(value) {
+  return clean(value).toLowerCase();
+}
+
+function toTimestamp(value) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function isDue(queue_item, now_ts) {
+  const scheduled_utc =
+    getDateValue(queue_item, "scheduled-for-utc", null) ||
+    getDateValue(queue_item, "scheduled-for-local", null);
+
+  if (!scheduled_utc) return true;
+
+  const scheduled_ts = toTimestamp(scheduled_utc);
+  if (scheduled_ts === null) return false;
+
+  return scheduled_ts <= now_ts;
+}
+
+function sortByScheduledAtAsc(items) {
+  return [...items].sort((a, b) => {
+    const a_date =
+      getDateValue(a, "scheduled-for-utc", null) ||
+      getDateValue(a, "scheduled-for-local", null) ||
+      "9999-12-31T23:59:59.999Z";
+
+    const b_date =
+      getDateValue(b, "scheduled-for-utc", null) ||
+      getDateValue(b, "scheduled-for-local", null) ||
+      "9999-12-31T23:59:59.999Z";
+
+    const a_ts = toTimestamp(a_date) ?? Number.MAX_SAFE_INTEGER;
+    const b_ts = toTimestamp(b_date) ?? Number.MAX_SAFE_INTEGER;
+
+    return a_ts - b_ts;
+  });
+}
+
+function isRunnableStatus(status) {
+  const normalized = lower(status);
+  return normalized === "queued";
+}
+
+function mapTimezoneToIana(value) {
+  const raw = lower(value);
+
+  if (raw === "eastern" || raw === "et" || raw === "est" || raw === "edt") {
+    return "America/New_York";
+  }
+
+  if (raw === "central" || raw === "ct" || raw === "cst" || raw === "cdt") {
+    return "America/Chicago";
+  }
+
+  if (raw === "mountain" || raw === "mt" || raw === "mst" || raw === "mdt") {
+    return "America/Denver";
+  }
+
+  if (raw === "pacific" || raw === "pt" || raw === "pst" || raw === "pdt") {
+    return "America/Los_Angeles";
+  }
+
+  if (raw === "alaska") {
+    return "America/Anchorage";
+  }
+
+  if (raw === "hawaii") {
+    return "Pacific/Honolulu";
+  }
+
+  return "America/Chicago";
+}
+
+function getLocalParts(date, timezone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type)?.value || "00";
+
+  const hour = Number(get("hour"));
+  const minute = Number(get("minute"));
+
+  return {
+    hour,
+    minute,
+    minutes_since_midnight: hour * 60 + minute,
+  };
+}
+
+function parseTimeToken(token) {
+  const raw = clean(token).toUpperCase();
+  const match = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/);
+
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] || "0");
+  const meridiem = match[3];
+
+  if (hour === 12) hour = 0;
+  if (meridiem === "PM") hour += 12;
+
+  return hour * 60 + minute;
+}
+
+function parseContactWindow(window_value) {
+  const raw = clean(window_value);
+  if (!raw) return null;
+
+  const normalized = raw.toUpperCase();
+
+  const range_match = normalized.match(
+    /(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))/
+  );
+
+  if (!range_match) return null;
+
+  const start = parseTimeToken(range_match[1]);
+  const end = parseTimeToken(range_match[2]);
+
+  if (start === null || end === null) return null;
+
+  return { start, end };
+}
+
+function isWithinContactWindow(queue_item, now_date) {
+  const timezone_label = getCategoryValue(queue_item, "timezone", "Central");
+  const contact_window = getCategoryValue(queue_item, "contact-window", null);
+
+  if (!contact_window) {
+    return {
+      allowed: true,
+      timezone_label,
+      contact_window: null,
+      reason: "no_contact_window",
+    };
+  }
+
+  const parsed_window = parseContactWindow(contact_window);
+  if (!parsed_window) {
+    return {
+      allowed: true,
+      timezone_label,
+      contact_window,
+      reason: "unparseable_contact_window",
+    };
+  }
+
+  const timezone = mapTimezoneToIana(timezone_label);
+  const local = getLocalParts(now_date, timezone);
+
+  const { start, end } = parsed_window;
+  const current = local.minutes_since_midnight;
+
+  const allowed =
+    end >= start
+      ? current >= start && current <= end
+      : current >= start || current <= end;
+
+  return {
+    allowed,
+    timezone_label,
+    timezone,
+    contact_window,
+    local_minutes_since_midnight: current,
+    reason: allowed ? "inside_window" : "outside_window",
+  };
+}
+
+export async function runSendQueue({
+  limit = DEFAULT_BATCH_SIZE,
+  now = null,
+  dry_run = false,
+  master_owner_id = null,
+} = {}) {
+  const run_started_at = now || nowIso();
+  const now_ts = toTimestamp(run_started_at) ?? Date.now();
+  const now_date = new Date(run_started_at);
+  const scoped_master_owner_id = Number(master_owner_id || 0) || null;
+
+  async function executeRun() {
+    info("queue.run_started", {
+      limit,
+      run_started_at,
+      dry_run,
+      master_owner_id: scoped_master_owner_id,
+    });
+
+    const queued_items = await fetchAllItems(
+      APP_IDS.send_queue,
+      {
+        "queue-status": "Queued",
+      },
+      {
+        page_size: Math.max(limit, 50),
+        sort_by: "scheduled-for-utc",
+        sort_desc: false,
+      }
+    );
+
+    const runnable_items = sortByScheduledAtAsc(
+      queued_items.filter((item) => {
+        const status = getCategoryValue(item, "queue-status", null);
+        if (!isRunnableStatus(status)) return false;
+
+        if (
+          scoped_master_owner_id &&
+          Number(getFirstAppReferenceId(item, "master-owner", 0) || 0) !==
+            scoped_master_owner_id
+        ) {
+          return false;
+        }
+
+        if (!isDue(item, now_ts)) return false;
+
+        const contact_window_check = isWithinContactWindow(item, now_date);
+        return contact_window_check.allowed;
+      })
+    ).slice(0, limit);
+
+    info("queue.run_candidates_loaded", {
+      total_queued: queued_items.length,
+      runnable_count: runnable_items.length,
+      master_owner_id: scoped_master_owner_id,
+    });
+
+    if (dry_run) {
+      const summary = {
+        ok: true,
+        dry_run: true,
+        run_started_at,
+        processed_count: runnable_items.length,
+        sent_count: 0,
+        failed_count: 0,
+        skipped_count: 0,
+        master_owner_id: scoped_master_owner_id,
+        results: runnable_items.map((item) => ({
+          queue_item_id: item?.item_id || null,
+          ok: true,
+          dry_run: true,
+          action: "would_process",
+        })),
+      };
+
+      info("queue.run_completed", {
+        run_started_at,
+        processed_count: summary.processed_count,
+        sent_count: summary.sent_count,
+        failed_count: summary.failed_count,
+        skipped_count: summary.skipped_count,
+        dry_run: true,
+        master_owner_id: scoped_master_owner_id,
+      });
+
+      return summary;
+    }
+
+    const results = [];
+    let sent_count = 0;
+    let failed_count = 0;
+    let skipped_count = 0;
+
+    for (const item of runnable_items) {
+      const queue_item_id = item?.item_id;
+
+      try {
+        const result = await processSendQueueItem(queue_item_id);
+
+        results.push({
+          queue_item_id,
+          ...result,
+        });
+
+        if (result?.skipped) {
+          skipped_count += 1;
+        } else if (result?.ok) {
+          sent_count += 1;
+        } else {
+          failed_count += 1;
+        }
+      } catch (err) {
+        warn("queue.run_item_crashed", {
+          queue_item_id,
+          message: err?.message || "Unknown queue processing error",
+        });
+
+        failed_count += 1;
+        results.push({
+          queue_item_id,
+          ok: false,
+          reason: err?.message || "queue_processing_crash",
+        });
+      }
+    }
+
+    const summary = {
+      ok: failed_count === 0,
+      dry_run: false,
+      run_started_at,
+      processed_count: runnable_items.length,
+      sent_count,
+      failed_count,
+      skipped_count,
+      master_owner_id: scoped_master_owner_id,
+      results,
+    };
+
+    if (failed_count > 0) {
+      await recordSystemAlert({
+        subsystem: "queue",
+        code: "runner_failed_items",
+        severity: "warning",
+        retryable: true,
+        summary: `Queue runner completed with ${failed_count} failed item(s).`,
+        dedupe_key: scoped_master_owner_id
+          ? `queue-run:${scoped_master_owner_id}`
+          : "queue-run",
+        affected_ids: results
+          .filter((result) => result?.ok === false)
+          .map((result) => result?.queue_item_id),
+        metadata: {
+          run_started_at,
+          processed_count: summary.processed_count,
+          failed_count,
+          sent_count,
+          skipped_count,
+          master_owner_id: scoped_master_owner_id,
+        },
+      });
+    } else {
+      await resolveSystemAlert({
+        subsystem: "queue",
+        code: "runner_failed_items",
+        dedupe_key: scoped_master_owner_id
+          ? `queue-run:${scoped_master_owner_id}`
+          : "queue-run",
+        resolution_message: "Queue runner completed without failed items.",
+      });
+    }
+
+    info("queue.run_completed", {
+      run_started_at,
+      processed_count: summary.processed_count,
+      sent_count,
+      failed_count,
+      skipped_count,
+      master_owner_id: scoped_master_owner_id,
+    });
+
+    return summary;
+  }
+
+  return withRunLock({
+    scope: scoped_master_owner_id
+      ? `queue-run:${scoped_master_owner_id}`
+      : "queue-run",
+    enabled: !dry_run,
+    lease_ms: 10 * 60_000,
+    owner: "queue_runner",
+    metadata: {
+      limit,
+      master_owner_id: scoped_master_owner_id,
+    },
+    onLocked: async (lock) => {
+      await recordSystemAlert({
+        subsystem: "queue",
+        code: "runner_overlap",
+        severity: "warning",
+        retryable: true,
+        summary: "Queue runner skipped because an active lease is already in progress.",
+        dedupe_key: scoped_master_owner_id
+          ? `queue-run:${scoped_master_owner_id}`
+          : "queue-run",
+        metadata: {
+          run_started_at,
+          limit,
+          master_owner_id: scoped_master_owner_id,
+          lock,
+        },
+      });
+
+      return {
+        ok: true,
+        dry_run: false,
+        skipped: true,
+        reason: "queue_runner_lock_active",
+        run_started_at,
+        limit,
+        master_owner_id: scoped_master_owner_id,
+        lock,
+      };
+    },
+    fn: executeRun,
+  });
+}
+
+export default runSendQueue;

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/internal/autopilot/run",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/internal/outbound/feed-master-owners",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/internal/queue/run",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/queue/retry",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/internal/queue/reconcile",
+      "schedule": "*/15 * * * *"
+    }
+  ]
+}

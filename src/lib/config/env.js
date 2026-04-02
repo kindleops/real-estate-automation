@@ -1,0 +1,141 @@
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
+function getEnv(name, fallback = "") {
+  return clean(process.env[name] ?? fallback);
+}
+
+function getBooleanEnv(name, fallback = false) {
+  const value = getEnv(name);
+
+  if (!value) return fallback;
+
+  const normalized = value.toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+
+  return fallback;
+}
+
+function getNumberEnv(name, fallback = null) {
+  const value = getEnv(name);
+  if (!value) return fallback;
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export const ENV = {
+  NODE_ENV: getEnv("NODE_ENV", "development"),
+  LOG_LEVEL: getEnv("LOG_LEVEL", "info"),
+  ROLLOUT_MODE: (() => {
+    const value = getEnv("ROLLOUT_MODE");
+    if (value) return value.toLowerCase();
+    return getBooleanEnv("ENABLE_LIVE_SENDING", false) ? "live" : "beta";
+  })(),
+
+  OPENAI_KEY: getEnv("OPENAI_KEY"),
+
+  APP_BASE_URL: getEnv("APP_BASE_URL"),
+
+  INTERNAL_API_SECRET: getEnv("INTERNAL_API_SECRET"),
+  OPS_DASHBOARD_SECRET: getEnv("OPS_DASHBOARD_SECRET"),
+  BUYER_WEBHOOK_SECRET: getEnv("BUYER_WEBHOOK_SECRET"),
+
+  PODIO_CLIENT_ID: getEnv("PODIO_CLIENT_ID"),
+  PODIO_CLIENT_SECRET: getEnv("PODIO_CLIENT_SECRET"),
+  PODIO_USERNAME: getEnv("PODIO_USERNAME"),
+  PODIO_PASSWORD: getEnv("PODIO_PASSWORD"),
+  PODIO_APP_TOKEN: getEnv("PODIO_APP_TOKEN"),
+
+  TEXTGRID_ACCOUNT_SID: getEnv("TEXTGRID_ACCOUNT_SID"),
+  TEXTGRID_AUTH_TOKEN: getEnv("TEXTGRID_AUTH_TOKEN"),
+  TEXTGRID_WEBHOOK_SECRET: getEnv("TEXTGRID_WEBHOOK_SECRET"),
+  TEXTGRID_API_BASE_URL: getEnv("TEXTGRID_API_BASE_URL"),
+
+  DOCUSIGN_API_KEY: getEnv("DOCUSIGN_API_KEY"),
+  DOCUSIGN_WEBHOOK_SECRET: getEnv("DOCUSIGN_WEBHOOK_SECRET"),
+  DOCUSIGN_BASE_URL: getEnv("DOCUSIGN_BASE_URL"),
+  DOCUSIGN_DEFAULT_TEMPLATE_ID: getEnv("DOCUSIGN_DEFAULT_TEMPLATE_ID"),
+  DOCUSIGN_SELLER_ROLE_NAME: getEnv("DOCUSIGN_SELLER_ROLE_NAME", "Seller"),
+  DOCUSIGN_BUYER_NAME: getEnv("DOCUSIGN_BUYER_NAME"),
+  DOCUSIGN_BUYER_EMAIL: getEnv("DOCUSIGN_BUYER_EMAIL"),
+  DOCUSIGN_BUYER_ROLE_NAME: getEnv("DOCUSIGN_BUYER_ROLE_NAME", "Buyer"),
+
+  SMTP_HOST: getEnv("SMTP_HOST"),
+  SMTP_PORT: getNumberEnv("SMTP_PORT", 587),
+  SMTP_USERNAME: getEnv("SMTP_USERNAME"),
+  SMTP_PASSWORD: getEnv("SMTP_PASSWORD"),
+  SMTP_FROM: getEnv("SMTP_FROM"),
+  SMTP_FROM_NAME: getEnv("SMTP_FROM_NAME", "Acquisitions Team"),
+
+  ALERT_WEBHOOK_URL: getEnv("ALERT_WEBHOOK_URL"),
+  ALERT_WEBHOOK_BEARER_TOKEN: getEnv("ALERT_WEBHOOK_BEARER_TOKEN"),
+  ALERT_SLACK_WEBHOOK_URL: getEnv("ALERT_SLACK_WEBHOOK_URL"),
+  ALERT_EMAIL_TO: getEnv("ALERT_EMAIL_TO"),
+  ALERT_MIN_SEVERITY_WEBHOOK: getEnv("ALERT_MIN_SEVERITY_WEBHOOK", "high"),
+  ALERT_MIN_SEVERITY_SLACK: getEnv("ALERT_MIN_SEVERITY_SLACK", "high"),
+  ALERT_MIN_SEVERITY_EMAIL: getEnv("ALERT_MIN_SEVERITY_EMAIL", "critical"),
+  ALERT_DELIVERY_COOLDOWN_MINUTES: getNumberEnv("ALERT_DELIVERY_COOLDOWN_MINUTES", 60),
+  ALERT_RENOTIFY_EVERY_OCCURRENCES: getNumberEnv("ALERT_RENOTIFY_EVERY_OCCURRENCES", 10),
+  ALERT_EMAIL_SUBJECT_PREFIX: getEnv("ALERT_EMAIL_SUBJECT_PREFIX", "[REA Alert]"),
+  ALERT_HTTP_TIMEOUT_MS: getNumberEnv("ALERT_HTTP_TIMEOUT_MS", 15000),
+
+  TITLE_WEBHOOK_SECRET: getEnv("TITLE_WEBHOOK_SECRET"),
+  CLOSINGS_WEBHOOK_SECRET: getEnv("CLOSINGS_WEBHOOK_SECRET"),
+
+  STORAGE_PROVIDER: getEnv("STORAGE_PROVIDER", "local"),
+  STORAGE_LOCAL_ROOT: getEnv("STORAGE_LOCAL_ROOT"),
+  STORAGE_SIGNING_SECRET: getEnv("STORAGE_SIGNING_SECRET"),
+  STORAGE_BUCKET: getEnv("STORAGE_BUCKET"),
+  STORAGE_REGION: getEnv("STORAGE_REGION"),
+  STORAGE_S3_ENDPOINT: getEnv("STORAGE_S3_ENDPOINT"),
+  STORAGE_S3_ACCESS_KEY_ID: getEnv("STORAGE_S3_ACCESS_KEY_ID"),
+  STORAGE_S3_SECRET_ACCESS_KEY: getEnv("STORAGE_S3_SECRET_ACCESS_KEY"),
+  STORAGE_S3_FORCE_PATH_STYLE: getBooleanEnv("STORAGE_S3_FORCE_PATH_STYLE", false),
+
+  ENABLE_DEALS_AUTOPILOT: getBooleanEnv("ENABLE_DEALS_AUTOPILOT", true),
+  ENABLE_LIVE_SENDING: getBooleanEnv("ENABLE_LIVE_SENDING", false),
+  ENABLE_AI_ASSIST: getBooleanEnv("ENABLE_AI_ASSIST", true),
+  ENABLE_AUTO_OFFER_FLOW: getBooleanEnv("ENABLE_AUTO_OFFER_FLOW", true),
+  ENABLE_AUTO_CONTRACT_FLOW: getBooleanEnv("ENABLE_AUTO_CONTRACT_FLOW", true),
+  ENABLE_AUTO_CONTRACT_SEND: getBooleanEnv("ENABLE_AUTO_CONTRACT_SEND", false),
+  ENABLE_AUTO_TITLE_ROUTING: getBooleanEnv("ENABLE_AUTO_TITLE_ROUTING", true),
+  ENABLE_AUTO_TITLE_COMPANY_ASSIGNMENT: getBooleanEnv(
+    "ENABLE_AUTO_TITLE_COMPANY_ASSIGNMENT",
+    true
+  ),
+  ENABLE_AUTO_TITLE_INTRO: getBooleanEnv("ENABLE_AUTO_TITLE_INTRO", true),
+  ENABLE_AUTO_CLOSING_FLOW: getBooleanEnv("ENABLE_AUTO_CLOSING_FLOW", true),
+  ENABLE_AUTO_BUYER_MATCH: getBooleanEnv("ENABLE_AUTO_BUYER_MATCH", false),
+  ENABLE_AUTO_BUYER_BLAST: getBooleanEnv("ENABLE_AUTO_BUYER_BLAST", false),
+  ENABLE_BUYER_SMS_BLAST: getBooleanEnv("ENABLE_BUYER_SMS_BLAST", false),
+  ENABLE_AUTO_REVENUE_SYNC: getBooleanEnv("ENABLE_AUTO_REVENUE_SYNC", true),
+  DEALS_AUTOPILOT_SCAN_LIMIT: getNumberEnv("DEALS_AUTOPILOT_SCAN_LIMIT", 25),
+
+  ROLLOUT_FEEDER_MAX_BATCH: getNumberEnv("ROLLOUT_FEEDER_MAX_BATCH", 25),
+  ROLLOUT_QUEUE_MAX_BATCH: getNumberEnv("ROLLOUT_QUEUE_MAX_BATCH", 50),
+  ROLLOUT_RETRY_MAX_BATCH: getNumberEnv("ROLLOUT_RETRY_MAX_BATCH", 50),
+  ROLLOUT_RECONCILE_MAX_BATCH: getNumberEnv("ROLLOUT_RECONCILE_MAX_BATCH", 50),
+  ROLLOUT_AUTOPILOT_MAX_SCAN: getNumberEnv("ROLLOUT_AUTOPILOT_MAX_SCAN", 25),
+  ROLLOUT_BUYER_BLAST_MAX_RECIPIENTS: getNumberEnv(
+    "ROLLOUT_BUYER_BLAST_MAX_RECIPIENTS",
+    5
+  ),
+  ROLLOUT_FEEDER_VIEW_ONLY_ID: getEnv("ROLLOUT_FEEDER_VIEW_ONLY_ID"),
+  ROLLOUT_FEEDER_VIEW_ONLY_NAME: getEnv("ROLLOUT_FEEDER_VIEW_ONLY_NAME"),
+  ROLLOUT_SINGLE_MASTER_OWNER_ID: getNumberEnv("ROLLOUT_SINGLE_MASTER_OWNER_ID", null),
+  ROLLOUT_SINGLE_CONTRACT_ID: getNumberEnv("ROLLOUT_SINGLE_CONTRACT_ID", null),
+  ROLLOUT_SINGLE_BUYER_MATCH_ID: getNumberEnv("ROLLOUT_SINGLE_BUYER_MATCH_ID", null),
+};
+
+export function requireEnv(name) {
+  const value = getEnv(name);
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+export default ENV;
