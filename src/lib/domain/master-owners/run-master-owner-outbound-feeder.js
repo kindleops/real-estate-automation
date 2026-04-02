@@ -12,6 +12,8 @@ import {
 import { PHONE_FIELDS } from "@/lib/podio/apps/phone-numbers.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
+import { loadTemplate } from "@/lib/domain/templates/load-template.js";
+import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { validateActivePhone } from "@/lib/domain/compliance/validate-active-phone.js";
 import {
   deriveOutreachSuppressionSignals,
@@ -25,6 +27,7 @@ import {
 } from "@/lib/domain/routing/choose-textgrid-number.js";
 import { resolveMarketSendingProfile } from "@/lib/config/market-sending-zones.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
+import { resolveQueueSchedule } from "@/lib/domain/queue/queue-schedule.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
   fetchAllItems,
@@ -729,11 +732,13 @@ async function selectBestPhone(owner_item, { runtime = null, log = logger } = {}
 async function selectBestProperty(
   selected_phone_record,
   phone_records = [],
-  { runtime = null, log = logger } = {}
+  { owner_item = null, runtime = null, log = logger } = {}
 ) {
+  const related_property_ids = collectRelatedItemIdsByApp(owner_item, APP_IDS.properties);
   const candidate_ids = uniq([
     selected_phone_record?.primary_property_id,
     ...phone_records.map((record) => record?.primary_property_id),
+    ...related_property_ids,
   ]);
 
   for (const property_id of candidate_ids) {
@@ -751,6 +756,48 @@ async function selectBestProperty(
   }
 
   return null;
+}
+
+function collectRelatedItemIdsByApp(root, target_app_id, depth = 0, seen = new Set()) {
+  if (!root || depth > 4) return [];
+
+  if (Array.isArray(root)) {
+    return uniq(
+      root.flatMap((entry) => collectRelatedItemIdsByApp(entry, target_app_id, depth + 1, seen))
+    );
+  }
+
+  if (typeof root !== "object") return [];
+
+  const object_key = `${depth}:${root?.item_id || ""}:${root?.app?.app_id || root?.app_id || ""}`;
+  if (seen.has(object_key)) return [];
+  seen.add(object_key);
+
+  const matches = [];
+  const candidate_item_id = Number(root?.item_id || 0) || null;
+  const candidate_app_id =
+    Number(root?.app?.app_id || root?.app_id || root?.appId || 0) || null;
+
+  if (candidate_item_id && candidate_app_id === Number(target_app_id)) {
+    matches.push(candidate_item_id);
+  }
+
+  const nested = [
+    root.refs,
+    root.references,
+    root.related_items,
+    root.linked_items,
+    root.items,
+    root.item,
+    root.value,
+  ];
+
+  return uniq([
+    ...matches,
+    ...nested.flatMap((entry) =>
+      collectRelatedItemIdsByApp(entry, target_app_id, depth + 1, seen)
+    ),
+  ]);
 }
 
 function getHistoryTimestampFromQueueItem(queue_item) {
@@ -1532,6 +1579,7 @@ async function evaluateOwner({
     },
     () =>
       selectBestProperty(selected_phone_record, phone_selection.phone_records, {
+        owner_item,
         runtime,
         log,
       })
@@ -1591,6 +1639,14 @@ async function evaluateOwner({
   const message_variant_seed = clean(
     getCategoryValue(owner_item, MASTER_OWNER_FIELDS.message_variant_seed, null)
   );
+  const resolved_timezone =
+    getCategoryValue(owner_item, MASTER_OWNER_FIELDS.timezone, null) ||
+    context.summary.timezone ||
+    "Central";
+  const resolved_contact_window =
+    getCategoryValue(owner_item, MASTER_OWNER_FIELDS.best_contact_window, null) ||
+    context.summary.contact_window ||
+    "9AM-8PM CT";
   const rotation_key = [
     master_owner_id || "no-owner",
     selected_phone_record.phone_item_id || "no-phone",
@@ -1631,6 +1687,76 @@ async function evaluateOwner({
     };
   }
 
+  const selected_template = await timedStage(
+    log,
+    "master_owner_feeder.template_selection",
+    {
+      evaluation_depth,
+    },
+    () =>
+      loadTemplate({
+        category: primary_category,
+        secondary_category,
+        use_case: route?.use_case || "ownership_check",
+        variant_group: route?.variant_group || "Stage 1 — Ownership Confirmation",
+        tone: route?.tone || "Warm",
+        gender_variant: "Neutral",
+        language,
+        sequence_position,
+        paired_with_agent_type:
+          route?.template_filters?.paired_with_agent_type ||
+          route?.persona ||
+          "Warm Professional",
+        recently_used_template_ids: context?.recent?.recently_used_template_ids || [],
+        rotation_key,
+        fallback_agent_type:
+          route?.template_filters?.fallback_agent_type || "Warm Professional",
+      })
+  );
+
+  if (!selected_template?.item_id) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "template_not_found",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      property: summarizeProperty(property_item),
+      outbound_number_source: outbound_number.source,
+      outbound_number_diagnostics: outbound_number.diagnostics || null,
+    };
+  }
+
+  const render_result = renderTemplate({
+    template_text: selected_template.text,
+    context,
+    overrides: {
+      language,
+      conversation_stage: route?.stage || stage_hint,
+      lifecycle_stage: route?.lifecycle_stage || null,
+      ai_route: route?.brain_ai_route || context.summary?.brain_ai_route || null,
+    },
+  });
+  const rendered_message_text = clean(render_result?.rendered_text || "");
+
+  if (!rendered_message_text) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "rendered_message_empty",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      property: summarizeProperty(property_item),
+      template_id: selected_template.item_id,
+    };
+  }
+
+  const schedule = resolveQueueSchedule({
+    now,
+    timezone_label: resolved_timezone,
+    contact_window: resolved_contact_window,
+  });
+
   const plan = {
     master_owner_id,
     seller_id: owner_summary.seller_id,
@@ -1644,8 +1770,13 @@ async function evaluateOwner({
     textgrid_number_item_id: outbound_number.textgrid_number_item_id,
     outbound_number_source: outbound_number.source,
     outbound_number_diagnostics: outbound_number.diagnostics || null,
-    deferred_template_resolution: true,
+    template_id: selected_template.item_id,
+    template_title: selected_template.title || null,
+    rendered_message_text,
+    rendered_character_count: rendered_message_text.length,
+    deferred_template_resolution: false,
     deferred_brain_suppression: true,
+    schedule,
     route: {
       stage: route?.stage || stage_hint,
       lifecycle_stage: route?.lifecycle_stage || null,
@@ -1682,21 +1813,15 @@ async function evaluateOwner({
 
   const queue_result = await buildSendQueueItem({
     context,
-    rendered_message_text: null,
-    template_id: null,
-    template_item: null,
-    defer_message_resolution: true,
+    rendered_message_text,
+    template_id: selected_template.item_id,
+    template_item: selected_template,
+    defer_message_resolution: false,
     textgrid_number_item_id: outbound_number.textgrid_number_item_id,
-    scheduled_for_local: { start: now },
-    scheduled_for_utc: { start: now },
-    timezone:
-      getCategoryValue(owner_item, MASTER_OWNER_FIELDS.timezone, null) ||
-      context.summary.timezone ||
-      "Central",
-    contact_window:
-      getCategoryValue(owner_item, MASTER_OWNER_FIELDS.best_contact_window, null) ||
-      context.summary.contact_window ||
-      "9AM-8PM CT",
+    scheduled_for_local: { start: schedule.scheduled_for_local },
+    scheduled_for_utc: { start: schedule.scheduled_for_utc },
+    timezone: resolved_timezone,
+    contact_window: resolved_contact_window,
     send_priority,
     message_type: deriveQueueMessageType(
       route?.stage || stage_hint,

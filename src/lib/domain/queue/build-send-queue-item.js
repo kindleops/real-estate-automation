@@ -6,6 +6,8 @@ import {
   getCategoryValue,
   getFirstAppReferenceId,
   getTextValue,
+  updateItem,
+  PodioError,
 } from "@/lib/providers/podio.js";
 
 import { normalizePhone } from "@/lib/providers/textgrid.js";
@@ -197,8 +199,27 @@ function maybeTemplateFieldValue(template_id, template_item = null) {
     return asArrayAppRef(template_id);
   }
 
+  if (template_app_id === APP_IDS.templates) {
+    return asArrayAppRef(template_id);
+  }
+
   // live Templates app mismatch — skip linking instead of failing queue creation
   return undefined;
+}
+
+function shouldRetryQueueCreateWithoutTemplate(error) {
+  if (!(error instanceof PodioError)) return false;
+
+  const message = clean(error?.message).toLowerCase();
+  return (
+    error.status === 400 &&
+    (
+      message.includes("template") ||
+      message.includes("referenced") ||
+      message.includes("item") ||
+      message.includes("value")
+    )
+  );
 }
 
 export async function buildSendQueueItem({
@@ -371,15 +392,43 @@ export async function buildSendQueueItem({
     }
   });
 
-  const created = await createItem(APP_IDS.send_queue, fields);
+  let created = null;
+  let template_attach_warning = null;
+
+  try {
+    created = await createItem(APP_IDS.send_queue, fields);
+  } catch (error) {
+    if (!template_field_value || !shouldRetryQueueCreateWithoutTemplate(error)) {
+      throw error;
+    }
+
+    const retry_fields = { ...fields };
+    delete retry_fields[QUEUE_FIELDS.template];
+
+    created = await createItem(APP_IDS.send_queue, retry_fields);
+    template_attach_warning =
+      "Template relation was skipped because Send Queue.template rejected the selected template reference.";
+  }
+
+  const resolved_queue_id =
+    queue_id ||
+    (created?.item_id ? Number(created.item_id) : null) ||
+    null;
+
+  if (created?.item_id && resolved_queue_id && !queue_id) {
+    await updateItem(created.item_id, {
+      [QUEUE_FIELDS.queue_id]: resolved_queue_id,
+    });
+  }
 
   return {
     ok: true,
     queue_item_id: created?.item_id || null,
+    queue_id: resolved_queue_id,
     phone_item_id,
     textgrid_number_item_id,
     template_id,
-    template_attached: Boolean(template_field_value),
+    template_attached: Boolean(template_field_value) && !template_attach_warning,
     message_text: message_text || null,
     deferred_message_resolution: Boolean(defer_message_resolution && !message_text),
     normalized_target,
@@ -389,6 +438,7 @@ export async function buildSendQueueItem({
       ...(defer_message_resolution && !message_text
         ? ["Message text will be resolved during queue processing."]
         : []),
+      ...(template_attach_warning ? [template_attach_warning] : []),
       ...(!template_field_value && template_id
         ? [
             "Template relation was skipped because Send Queue.template may still reference an older Podio template app.",

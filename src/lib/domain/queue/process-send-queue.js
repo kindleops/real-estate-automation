@@ -60,6 +60,7 @@ const QUEUE_FIELDS = {
 
   message_type: "message-type",
   message_text: "message-text",
+  personalization_tags_used: "personalization-tags-used",
   character_count: "character-count",
 
   sent_at: "sent-at",
@@ -101,6 +102,21 @@ function clean(value) {
 
 function lower(value) {
   return clean(value).toLowerCase();
+}
+
+function shouldRetryQueueUpdateWithoutTemplate(error) {
+  if (!(error instanceof PodioError)) return false;
+
+  const message = clean(error?.message).toLowerCase();
+  return (
+    error.status === 400 &&
+    (
+      message.includes("template") ||
+      message.includes("referenced") ||
+      message.includes("item") ||
+      message.includes("value")
+    )
+  );
 }
 
 function getTouchNumber(queue_item) {
@@ -450,10 +466,25 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     };
   }
 
-  await updateItem(queue_item_id, {
+  const queue_resolution_payload = {
+    [QUEUE_FIELDS.template]: [selected_template.item_id],
     [QUEUE_FIELDS.message_text]: rendered_message_text,
     [QUEUE_FIELDS.character_count]: rendered_message_text.length,
-  });
+    ...(render_result.used_placeholders?.length
+      ? { [QUEUE_FIELDS.personalization_tags_used]: render_result.used_placeholders }
+      : {}),
+  };
+
+  try {
+    await updateItem(queue_item_id, queue_resolution_payload);
+  } catch (error) {
+    if (!shouldRetryQueueUpdateWithoutTemplate(error)) {
+      throw error;
+    }
+
+    delete queue_resolution_payload[QUEUE_FIELDS.template];
+    await updateItem(queue_item_id, queue_resolution_payload);
+  }
 
   const refreshed_queue_item = await getItem(queue_item_id);
 
