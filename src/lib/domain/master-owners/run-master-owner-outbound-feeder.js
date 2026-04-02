@@ -13,7 +13,10 @@ import { PHONE_FIELDS } from "@/lib/podio/apps/phone-numbers.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { validateActivePhone } from "@/lib/domain/compliance/validate-active-phone.js";
-import { shouldSuppressOutreach } from "@/lib/domain/compliance/should-suppress-outreach.js";
+import {
+  deriveOutreachSuppressionSignals,
+  shouldSuppressOutreach,
+} from "@/lib/domain/compliance/should-suppress-outreach.js";
 import { LIFECYCLE_STAGES, STAGES } from "@/lib/config/stages.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import {
@@ -558,6 +561,10 @@ async function loadCachedTextgridNumberPool({ runtime = null, log = logger } = {
 }
 
 function summarizePhone(phone_item, slot = null) {
+  const signals = deriveOutreachSuppressionSignals({
+    phone_item,
+  });
+
   return {
     slot,
     item_id: phone_item?.item_id ?? null,
@@ -565,6 +572,11 @@ function summarizePhone(phone_item, slot = null) {
     canonical_e164: getTextValue(phone_item, PHONE_FIELDS.canonical_e164, ""),
     activity_status: getCategoryValue(phone_item, PHONE_FIELDS.phone_activity_status, null),
     do_not_call: getCategoryValue(phone_item, PHONE_FIELDS.do_not_call, null),
+    dnc_source: signals.dnc_source || null,
+    opt_out_date: signals.opt_out_date || null,
+    pre_contact_phone_flag: signals.pre_contact_phone_flag,
+    true_post_contact_suppression: signals.phone_post_contact_suppression,
+    skip_reason: null,
     linked_master_owner_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.linked_master_owner, null),
     primary_property_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.primary_property, null),
   };

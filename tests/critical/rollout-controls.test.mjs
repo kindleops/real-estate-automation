@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import ENV from "@/lib/config/env.js";
 import {
   capBuyerBlastRecipients,
   capQueueBatch,
@@ -31,17 +32,34 @@ test("scoped ids reject requests outside configured safe scope", () => {
   assert.equal(result.effective_id, 123);
 });
 
-test("feeder view scope bypasses one-view lock during dry-run diagnostics", () => {
-  const result = resolveFeederViewScope({
-    requested_view_id: "987",
-    requested_view_name: "SMS Hot Leads",
-    dry_run: true,
-  });
+test("feeder view scope honors the configured rollout view in dry-run and live runs", () => {
+  const original = {
+    ROLLOUT_FEEDER_VIEW_ONLY_ID: ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID,
+    ROLLOUT_FEEDER_VIEW_ONLY_NAME: ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME,
+  };
 
-  assert.equal(result.ok, true);
-  assert.equal(result.enforced, false);
-  assert.equal(result.reason, "dry_run_view_scope_bypassed");
-  assert.equal(result.source_view_id, "987");
+  try {
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = "123";
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = "Launch Sellers";
+
+    const dry_run_result = resolveFeederViewScope();
+    const live_result = resolveFeederViewScope();
+
+    assert.equal(dry_run_result.ok, true);
+    assert.equal(dry_run_result.enforced, true);
+    assert.equal(dry_run_result.reason, "feeder_view_safe_scope_applied");
+    assert.equal(dry_run_result.source_view_id, "123");
+    assert.equal(dry_run_result.source_view_name, "Launch Sellers");
+
+    assert.equal(live_result.ok, true);
+    assert.equal(live_result.enforced, true);
+    assert.equal(live_result.reason, "feeder_view_safe_scope_applied");
+    assert.equal(live_result.source_view_id, "123");
+    assert.equal(live_result.source_view_name, "Launch Sellers");
+  } finally {
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = original.ROLLOUT_FEEDER_VIEW_ONLY_ID;
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = original.ROLLOUT_FEEDER_VIEW_ONLY_NAME;
+  }
 });
 
 test("rollout caps clamp batch sizes to safe configured ceilings", () => {

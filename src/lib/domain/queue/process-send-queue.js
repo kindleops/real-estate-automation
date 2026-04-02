@@ -869,7 +869,10 @@ export async function processSendQueueItem(queue_item_id) {
     await failQueueItem(queue_item_id, {
       queue_status: "Blocked",
       failed_reason:
-        suppression.reason === "phone_dnc" ? "Opt-Out" : "Network Error",
+        suppression.reason === "phone_post_contact_suppression" ||
+        suppression.reason === "classification_stop_texting"
+          ? "Opt-Out"
+          : "Network Error",
     });
 
     return {

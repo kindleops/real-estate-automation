@@ -122,19 +122,18 @@ export function resolveScopedId({
 export function resolveFeederViewScope({
   requested_view_id = null,
   requested_view_name = null,
-  dry_run = false,
 } = {}) {
   const controls = getRolloutControls();
   const enforced_view_id = controls.feeder_view_only_id;
   const enforced_view_name = controls.feeder_view_only_name;
 
-  if (dry_run || (!enforced_view_id && !enforced_view_name)) {
+  if (!enforced_view_id && !enforced_view_name) {
     return {
       ok: true,
       enforced: false,
       source_view_id: clean(requested_view_id) || null,
       source_view_name: clean(requested_view_name) || null,
-      reason: dry_run ? "dry_run_view_scope_bypassed" : "no_view_scope_configured",
+      reason: "no_view_scope_configured",
     };
   }
 

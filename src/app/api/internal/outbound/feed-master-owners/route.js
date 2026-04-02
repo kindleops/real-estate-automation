@@ -86,7 +86,6 @@ async function runFeederWithRollout({
   const view_scope = resolveFeederViewScope({
     requested_view_id: source_view_id,
     requested_view_name: source_view_name,
-    dry_run: dry_run_resolution.effective_dry_run,
   });
 
   if (!safe_owner_scope.ok) {
@@ -143,6 +142,8 @@ async function runFeederWithRollout({
         effective_master_owner_id,
         effective_source_view_id: view_scope.source_view_id,
         effective_source_view_name: view_scope.source_view_name,
+        resolved_source_view_id: result?.source?.view_id ?? view_scope.source_view_id,
+        resolved_source_view_name: result?.source?.view_name ?? view_scope.source_view_name,
       },
     }));
 
