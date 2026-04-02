@@ -20,6 +20,7 @@ import {
   chooseTextgridNumber,
   loadUsableTextgridNumbers,
 } from "@/lib/domain/routing/choose-textgrid-number.js";
+import { resolveMarketSendingProfile } from "@/lib/config/market-sending-zones.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
@@ -1207,6 +1208,7 @@ async function resolveOutboundNumber({
     MASTER_OWNER_FIELDS.outbound_number,
     null
   );
+  const market_resolution = resolveMarketSendingProfile(context?.summary?.market_name || null);
 
   if (explicit_outbound_number_id) {
     const explicit_item = await safeGetItem(explicit_outbound_number_id, {
@@ -1219,9 +1221,23 @@ async function resolveOutboundNumber({
     });
 
     if (isExplicitOutboundNumberUsable(explicit_item, now_ts)) {
+      const explicit_phone =
+        getPhoneValue(explicit_item, TEXTGRID_NUMBER_FIELDS.title, "") ||
+        getTextValue(explicit_item, TEXTGRID_NUMBER_FIELDS.title, "");
+
       return {
         textgrid_number_item_id: explicit_outbound_number_id,
         source: "master_owner.outbound-number",
+        diagnostics: {
+          raw_seller_market: context?.summary?.market_name || null,
+          normalized_seller_market: market_resolution.normalized_raw_market || null,
+          resolved_sending_zone: market_resolution.sending_zone || null,
+          allowed_phone_markets: market_resolution.allowed_phone_markets || [],
+          selected_phone_number: normalizePhone(explicit_phone) || null,
+          selected_phone_market: getCategoryValue(explicit_item, TEXTGRID_NUMBER_FIELDS.market, null),
+          selection_reason: "explicit_outbound_number_override",
+          fallback_reason: null,
+        },
       };
     }
 
@@ -1252,7 +1268,22 @@ async function resolveOutboundNumber({
       selected?.textgrid_number_item_id ||
       selected?.id ||
       null,
-    source: selected ? "chooseTextgridNumber" : null,
+    source:
+      selected?.item_id ||
+      selected?.textgrid_number_item_id ||
+      selected?.id
+        ? "chooseTextgridNumber"
+        : null,
+    diagnostics: selected?.selection_diagnostics || {
+      raw_seller_market: context?.summary?.market_name || null,
+      normalized_seller_market: market_resolution.normalized_raw_market || null,
+      resolved_sending_zone: market_resolution.sending_zone || null,
+      allowed_phone_markets: market_resolution.allowed_phone_markets || [],
+      selected_phone_number: null,
+      selected_phone_market: null,
+      selection_reason: selected?.selection_reason || market_resolution.reason || "textgrid_number_not_found",
+      fallback_reason: selected?.fallback_reason || null,
+    },
   };
 }
 
@@ -1584,6 +1615,7 @@ async function evaluateOwner({
       owner: owner_summary,
       phone: selected_phone_record.summary,
       outbound_number_source: outbound_number.source,
+      outbound_number_diagnostics: outbound_number.diagnostics || null,
     };
   }
 
@@ -1599,6 +1631,7 @@ async function evaluateOwner({
     market_id,
     textgrid_number_item_id: outbound_number.textgrid_number_item_id,
     outbound_number_source: outbound_number.source,
+    outbound_number_diagnostics: outbound_number.diagnostics || null,
     deferred_template_resolution: true,
     deferred_brain_suppression: true,
     route: {

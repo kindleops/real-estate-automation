@@ -1,5 +1,9 @@
 // ─── choose-textgrid-number.js ────────────────────────────────────────────
 import APP_IDS from "@/lib/config/app-ids.js";
+import {
+  normalizeMarketLabel,
+  resolveMarketSendingProfile,
+} from "@/lib/config/market-sending-zones.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 
 import {
@@ -10,7 +14,6 @@ import {
   getNumberValue,
   getPhoneValue,
   getTextValue,
-  safeCategoryEquals,
 } from "@/lib/providers/podio.js";
 
 import { normalizePhone } from "@/lib/providers/textgrid.js";
@@ -158,7 +161,6 @@ function isUsableNumber(record) {
 }
 
 function scoreNumber(record, {
-  preferred_market_id = null,
   preferred_market_name = null,
   preferred_area_code = null,
 } = {}) {
@@ -168,17 +170,9 @@ function scoreNumber(record, {
   if (record.priority) score += Number(record.priority) * 5;
 
   if (
-    preferred_market_id &&
-    record.market_id &&
-    String(record.market_id) === String(preferred_market_id)
-  ) {
-    score += 30;
-  }
-
-  if (
     preferred_market_name &&
     record.market_name &&
-    safeCategoryEquals(record.market_name, preferred_market_name)
+    normalizeMarketLabel(record.market_name) === normalizeMarketLabel(preferred_market_name)
   ) {
     score += 30;
   }
@@ -233,6 +227,68 @@ function chooseBestCandidate({
   return rotateCandidate(topCluster, rotation_key);
 }
 
+function buildSelectionDiagnostics({
+  market_id = null,
+  raw_seller_market = null,
+  resolution = null,
+  all_numbers = [],
+  allowed_candidates = [],
+  allowed_market_counts = [],
+  selected = null,
+  selection_reason = null,
+  fallback_reason = null,
+} = {}) {
+  return {
+    market_id: market_id || null,
+    raw_seller_market: clean(raw_seller_market) || null,
+    normalized_seller_market: resolution?.normalized_raw_market || null,
+    resolved_sending_zone: resolution?.sending_zone || null,
+    allowed_phone_markets: Array.isArray(resolution?.allowed_phone_markets)
+      ? [...resolution.allowed_phone_markets]
+      : [],
+    allowed_market_counts,
+    available_number_count: Array.isArray(all_numbers) ? all_numbers.length : 0,
+    allowed_candidate_count: Array.isArray(allowed_candidates) ? allowed_candidates.length : 0,
+    selected_item_id: selected?.item_id || null,
+    selected_phone_number: selected?.normalized_phone || null,
+    selected_phone_market: selected?.market_name || null,
+    selection_reason: clean(selection_reason) || null,
+    fallback_reason: clean(fallback_reason) || null,
+  };
+}
+
+function buildNoSelectionResult({
+  market_id = null,
+  raw_seller_market = null,
+  resolution = null,
+  all_numbers = [],
+  allowed_candidates = [],
+  allowed_market_counts = [],
+  selection_reason = null,
+} = {}) {
+  return {
+    item_id: null,
+    id: null,
+    textgrid_number_item_id: null,
+    normalized_phone: "",
+    phone_number: "",
+    market_name: null,
+    selection_reason: clean(selection_reason) || null,
+    fallback_reason: null,
+    selection_diagnostics: buildSelectionDiagnostics({
+      market_id,
+      raw_seller_market,
+      resolution,
+      all_numbers,
+      allowed_candidates,
+      allowed_market_counts,
+      selected: null,
+      selection_reason,
+      fallback_reason: null,
+    }),
+  };
+}
+
 export async function chooseTextgridNumber({
   context = null,
   classification = null,
@@ -245,7 +301,7 @@ export async function chooseTextgridNumber({
     context?.ids?.market_id ||
     null;
 
-  const market_name =
+  const raw_seller_market =
     context?.summary?.market_name ||
     null;
 
@@ -263,87 +319,163 @@ export async function chooseTextgridNumber({
   info("routing.choose_textgrid_number_started", {
     phone_item_id: context?.ids?.phone_item_id || null,
     market_id,
+    raw_seller_market,
     language,
   });
 
   const all_numbers = Array.isArray(candidate_records)
-    ? candidate_records
+    ? candidate_records.filter((record) => isUsableNumber(record))
     : await loadUsableTextgridNumbers();
 
   if (!all_numbers.length) {
     warn("routing.choose_textgrid_number_none_available", {
       market_id,
+      raw_seller_market,
       language,
     });
-    return null;
+    return buildNoSelectionResult({
+      market_id,
+      raw_seller_market,
+      resolution: null,
+      all_numbers,
+      allowed_candidates: [],
+      allowed_market_counts: [],
+      selection_reason: "no_textgrid_numbers_available",
+    });
+  }
+
+  const resolution = resolveMarketSendingProfile(raw_seller_market);
+
+  if (!resolution.ok) {
+    warn("routing.choose_textgrid_number_market_unmapped", {
+      market_id,
+      raw_seller_market,
+      reason: resolution.reason,
+      language,
+    });
+    return buildNoSelectionResult({
+      market_id,
+      raw_seller_market,
+      resolution,
+      all_numbers,
+      allowed_candidates: [],
+      allowed_market_counts: [],
+      selection_reason: resolution.reason,
+    });
   }
 
   const scored = all_numbers.map((record) => ({
     ...record,
     score: scoreNumber(record, {
-      preferred_market_id: market_id,
-      preferred_market_name: market_name,
+      preferred_market_name: raw_seller_market,
       preferred_area_code: market_area_code,
     }),
   }));
 
-  const market_exact = scored.filter(
-    (r) =>
-      (
-        market_id &&
-        r.market_id &&
-        String(r.market_id) === String(market_id)
-      ) ||
-      (
-        market_name &&
-        r.market_name &&
-        safeCategoryEquals(r.market_name, market_name)
-      )
+  const allowed_markets_by_key = new Map(
+    resolution.allowed_phone_markets.map((market_name, index) => [
+      lower(normalizeMarketLabel(market_name)),
+      {
+        market_name,
+        index,
+      },
+    ])
   );
-
-  const area_code_pool = scored.filter((r) =>
-    market_area_code && r.area_code && clean(r.area_code) === clean(market_area_code)
+  const allowed_candidates = scored.filter((record) =>
+    allowed_markets_by_key.has(lower(normalizeMarketLabel(record.market_name)))
   );
+  const allowed_market_counts = resolution.allowed_phone_markets.map((market_name) => ({
+    market_name,
+    candidate_count: allowed_candidates.filter(
+      (record) => lower(normalizeMarketLabel(record.market_name)) === lower(normalizeMarketLabel(market_name))
+    ).length,
+  }));
 
-  const selected =
-    chooseBestCandidate({
-      candidates: market_exact,
+  let selected = null;
+  let selection_reason = "no_usable_phone_numbers_in_allowed_markets";
+  let fallback_reason = null;
+
+  for (const { market_name, candidate_count } of allowed_market_counts) {
+    if (!candidate_count) continue;
+
+    const market_pool = allowed_candidates.filter(
+      (record) => lower(normalizeMarketLabel(record.market_name)) === lower(normalizeMarketLabel(market_name))
+    );
+
+    selected = chooseBestCandidate({
+      candidates: market_pool,
       rotation_key:
         rotation_key ||
-        `${context?.ids?.phone_item_id || "no-phone"}:${market_id || market_name || "no-market"}:market`,
-    }) ||
-    chooseBestCandidate({
-      candidates: area_code_pool,
-      rotation_key:
-        rotation_key ||
-        `${context?.ids?.phone_item_id || "no-phone"}:${market_area_code || "no-area"}:area`,
-    }) ||
-    chooseBestCandidate({
-      candidates: scored,
-      rotation_key:
-        rotation_key ||
-        `${context?.ids?.phone_item_id || "no-phone"}:fallback`,
+        `${context?.ids?.phone_item_id || "no-phone"}:${resolution.sending_zone}:${market_name}`,
     });
+
+    if (selected) {
+      const selected_market_index = allowed_markets_by_key.get(
+        lower(normalizeMarketLabel(selected.market_name))
+      )?.index ?? 0;
+      selection_reason =
+        selected_market_index === 0
+          ? "primary_allowed_phone_market_match"
+          : "fallback_allowed_phone_market_match";
+      fallback_reason =
+        selected_market_index === 0 ? null : "higher_priority_allowed_phone_markets_unavailable";
+      break;
+    }
+  }
 
   if (!selected) {
     warn("routing.choose_textgrid_number_no_match", {
       market_id,
+      raw_seller_market,
+      resolved_sending_zone: resolution.sending_zone,
+      allowed_phone_markets: resolution.allowed_phone_markets,
       language,
       available_count: scored.length,
+      allowed_candidate_count: allowed_candidates.length,
     });
-    return null;
+    return buildNoSelectionResult({
+      market_id,
+      raw_seller_market,
+      resolution,
+      all_numbers,
+      allowed_candidates,
+      allowed_market_counts,
+      selection_reason,
+    });
   }
+
+  const selection_diagnostics = buildSelectionDiagnostics({
+    market_id,
+    raw_seller_market,
+    resolution,
+    all_numbers,
+    allowed_candidates,
+    allowed_market_counts,
+    selected,
+    selection_reason,
+    fallback_reason,
+  });
 
   info("routing.choose_textgrid_number_completed", {
     selected_item_id: selected.item_id,
     market_id: selected.market_id,
     market_name: selected.market_name,
+    raw_seller_market,
+    resolved_sending_zone: resolution.sending_zone,
+    allowed_phone_markets: resolution.allowed_phone_markets,
     language,
     score: selected.score,
     phone_number: selected.normalized_phone,
+    selection_reason,
+    fallback_reason,
   });
 
-  return selected;
+  return {
+    ...selected,
+    selection_reason,
+    fallback_reason,
+    selection_diagnostics,
+  };
 }
 
 export default chooseTextgridNumber;

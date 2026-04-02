@@ -134,7 +134,7 @@ export async function dryRunOutbound({
       template_id: selected_template.item_id,
       rendered_message_text: render_result.rendered_text,
       missing_placeholders: render_result.missing_placeholders,
-      textgrid_number: null,
+      textgrid_number: selected_number || null,
     };
   }
 
