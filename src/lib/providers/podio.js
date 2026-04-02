@@ -164,6 +164,42 @@ function isRetryable(status) {
   return RETRYABLE_STATUSES.has(status);
 }
 
+function cleanRetryMessage(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+const RETRYABLE_MESSAGE_PATTERNS = [
+  /the server took too long to respond/i,
+  /timeout of \d+ms exceeded/i,
+  /\betimedout\b/i,
+  /\beconnreset\b/i,
+  /\beconnaborted\b/i,
+  /socket hang up/i,
+];
+
+export function isRetryablePodioRequestError(err) {
+  const status = err?.response?.status ?? 0;
+  if (isRetryable(status)) return true;
+
+  const code = cleanRetryMessage(err?.code);
+  if (["etimedout", "econnreset", "econnaborted"].includes(code)) {
+    return true;
+  }
+
+  const message_candidates = [
+    err?.response?.data?.error_description,
+    err?.response?.data?.error,
+    err?.message,
+    err?.cause?.message,
+  ];
+
+  return message_candidates.some((candidate) => {
+    const message = cleanRetryMessage(candidate);
+    if (!message) return false;
+    return RETRYABLE_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
+  });
+}
+
 function calcBackoff(attempt) {
   const exponential = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
   const capped = Math.min(RETRY_MAX_DELAY_MS, exponential);
@@ -176,9 +212,7 @@ async function _executeWithRetry(buildConfig, attempt = 0) {
   try {
     return await axios({ timeout: REQUEST_TIMEOUT_MS, ...config });
   } catch (err) {
-    const status = err?.response?.status ?? 0;
-
-    if (attempt < MAX_RETRIES && isRetryable(status)) {
+    if (attempt < MAX_RETRIES && isRetryablePodioRequestError(err)) {
       await sleep(calcBackoff(attempt));
       return _executeWithRetry(buildConfig, attempt + 1);
     }

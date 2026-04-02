@@ -120,7 +120,11 @@ function isTimeoutError(error) {
     error?.cause?.message ||
     "";
 
-  return /timeout of \d+ms exceeded/i.test(message) || /ETIMEDOUT/i.test(message);
+  return (
+    /timeout of \d+ms exceeded/i.test(message) ||
+    /ETIMEDOUT/i.test(message) ||
+    /The server took too long to respond/i.test(message)
+  );
 }
 
 function serializeFeederError(error) {

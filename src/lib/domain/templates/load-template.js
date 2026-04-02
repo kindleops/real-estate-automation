@@ -40,6 +40,8 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+const TEMPLATE_BATCH_CACHE = new Map();
+
 function normalizeCategoryText(value) {
   return clean(value)
     .normalize("NFKD")
@@ -506,6 +508,35 @@ function fetchLocalTemplates(filter_set = {}) {
   );
 }
 
+function stableTemplateBatchCacheKey(filter_set = {}) {
+  const entries = Object.entries(filter_set)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  return JSON.stringify(entries);
+}
+
+export function clearTemplateBatchCache() {
+  TEMPLATE_BATCH_CACHE.clear();
+}
+
+export async function fetchTemplatesCached(
+  filter_set = {},
+  {
+    fetcher = fetchTemplates,
+    cache = TEMPLATE_BATCH_CACHE,
+  } = {}
+) {
+  const cache_key = stableTemplateBatchCacheKey(filter_set);
+  if (cache.has(cache_key)) {
+    return cache.get(cache_key);
+  }
+
+  const batch = await fetcher(filter_set);
+  cache.set(cache_key, batch);
+  return batch;
+}
+
 export async function loadTemplateCandidates({
   category = "Residential",
   secondary_category = null,
@@ -559,7 +590,7 @@ export async function loadTemplateCandidates({
   let all_candidates = [];
 
   for (const filter_set of candidate_sets) {
-    const batch = await fetchTemplates(filter_set);
+    const batch = await fetchTemplatesCached(filter_set);
     all_candidates.push(...batch);
 
     if (batch.length > 0 && all_candidates.length >= 20) break;
