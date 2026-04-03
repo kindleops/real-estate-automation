@@ -134,10 +134,10 @@ const USE_CASE_ROUTE_OVERRIDES = Object.freeze({
     tone: "Neutral",
   }),
   send_package: Object.freeze({
-    category: "Residential",
+    category: "Corporate / Institutional",
     secondary_category: "Close / Handoff",
     variant_group: "Stage 6 — Package Send",
-    tone: "Neutral",
+    tone: "Corporate",
   }),
   title_intro: Object.freeze({
     category: "Residential",
@@ -325,6 +325,11 @@ function closeTemplateAgentType({
   seller_profile = null,
   use_case = null,
 } = {}) {
+  if (use_case === "send_package") {
+    if (language === "Spanish") return "Specialist-Corporate-Spanish";
+    return "Specialist-Corporate";
+  }
+
   if (use_case === "close_handoff") {
     return genericTemplateAgentType({
       language,
@@ -1063,8 +1068,10 @@ function secondaryCategoryFromSignals({
   objection,
   emotion,
   stage,
+  message = "",
   lifecycle_stage = null,
 }) {
+  if (!clean(message) && stage === STAGES.OWNERSHIP) return "Outbound Initial";
   if (compliance_flag === "stop_texting") return "Compliance";
   if (objection) return "Objection Handling";
   if (lifecycle_stage === LIFECYCLE_STAGES.DISPOSITION) return "Disposition";
@@ -1216,6 +1223,7 @@ export function resolveRoute({
       objection,
       emotion,
       stage,
+      message: resolved_message,
       lifecycle_stage,
     });
 

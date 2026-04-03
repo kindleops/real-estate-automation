@@ -192,17 +192,6 @@ function deriveTemplatePrimaryCategory(property_item, owner_item, fallback = "Re
 }
 
 function deriveTemplateSecondaryCategory(property_item, owner_item, fallback = null) {
-  const property_type = getCategoryValue(property_item, "property-type", null);
-  if (property_type) return property_type;
-
-  const majority = clean(getCategoryValue(owner_item, "property-type-majority", null)).toUpperCase();
-
-  if (majority === "SINGLE FAMILY") return "Single Family";
-  if (majority === "MULTI-FAMILY") return "Multi-Family";
-  if (majority === "APARTMENT") return "Apartment";
-  if (majority === "VACANT LAND") return "Vacant Land";
-  if (majority === "OTHER" || majority === "TOWNHOUSE") return "Other";
-
   return fallback;
 }
 

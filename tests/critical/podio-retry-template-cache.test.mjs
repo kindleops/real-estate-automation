@@ -12,6 +12,7 @@ import {
 import {
   clearTemplateBatchCache,
   fetchTemplatesCached,
+  loadTemplateCandidates,
 } from "@/lib/domain/templates/load-template.js";
 
 test("Podio retry logic treats server-too-long responses as transient", () => {
@@ -112,4 +113,53 @@ test("template batch cache reuses identical filter fetches", async () => {
   assert.equal(first, second);
 
   clearTemplateBatchCache();
+});
+
+test("template loader falls back to generic same-use-case templates when category matching fails", async () => {
+  const calls = [];
+  const generic_template = {
+    item_id: 7001,
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    tone: "Warm",
+    gender_variant: "Neutral",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    text: "Hi {{owner_name}}, are you the owner of {{property_address}}?",
+    active: "Yes",
+    category_primary: null,
+    category_secondary: null,
+    deliverability_score: 90,
+    spam_risk: 2,
+    historical_reply_rate: 20,
+    total_conversations: 0,
+    total_replies: 0,
+  };
+
+  const candidates = await loadTemplateCandidates({
+    category: "Residential",
+    secondary_category: "Single Family",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    tone: "Warm",
+    gender_variant: "Neutral",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    recently_used_template_ids: [],
+    fallback_agent_type: "Warm Professional",
+    remote_fetcher: async (filter_set) => {
+      calls.push(filter_set);
+      if (filter_set["property-type"] || filter_set.category_primary) return [];
+      if (filter_set["use-case"] === "ownership_check") return [generic_template];
+      return [];
+    },
+    local_fetcher: () => [],
+  });
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].item_id, 7001);
+  assert.ok(calls.some((filter_set) => filter_set["property-type"] === "Residential"));
+  assert.ok(calls.some((filter_set) => !filter_set["property-type"]));
 });

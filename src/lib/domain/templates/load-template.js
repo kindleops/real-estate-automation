@@ -276,7 +276,7 @@ function buildCandidateSets({
     "4th Touch",
     "Final",
   ]);
-  const categories = uniq([category]);
+  const categories = category ? [category] : [null];
   const secondary_categories = secondary_category ? [secondary_category, null] : [null];
 
   const sets = [];
@@ -411,7 +411,7 @@ function buildLocalCandidateSets({
     "4th Touch",
     "Final",
   ]);
-  const categories = uniq([category]);
+  const categories = category ? [category] : [null];
   const secondary_categories = secondary_category ? [secondary_category, null] : [null];
   const sets = [];
 
@@ -549,6 +549,8 @@ export async function loadTemplateCandidates({
   paired_with_agent_type = "Warm Professional",
   recently_used_template_ids = [],
   fallback_agent_type = "Warm Professional",
+  remote_fetcher = fetchTemplatesCached,
+  local_fetcher = fetchLocalTemplates,
 }) {
   const normalized_preferences = normalizeTemplateFilters({
     category,
@@ -590,17 +592,58 @@ export async function loadTemplateCandidates({
   let all_candidates = [];
 
   for (const filter_set of candidate_sets) {
-    const batch = await fetchTemplatesCached(filter_set);
+    const batch = await remote_fetcher(filter_set);
     all_candidates.push(...batch);
 
     if (batch.length > 0 && all_candidates.length >= 20) break;
   }
 
   for (const filter_set of local_candidate_sets) {
-    const batch = fetchLocalTemplates(filter_set);
+    const batch = local_fetcher(filter_set);
     all_candidates.push(...batch);
 
     if (batch.length > 0 && all_candidates.length >= 20) break;
+  }
+
+  if (!all_candidates.length && (category || secondary_category)) {
+    const generic_candidate_sets = buildCandidateSets({
+      category: null,
+      secondary_category: null,
+      use_case,
+      variant_group,
+      tone,
+      gender_variant,
+      language,
+      sequence_position,
+      paired_with_agent_type,
+      fallback_agent_type,
+    });
+    const generic_local_candidate_sets = buildLocalCandidateSets({
+      category: null,
+      secondary_category: null,
+      use_case,
+      variant_group,
+      tone,
+      gender_variant,
+      language,
+      sequence_position,
+      paired_with_agent_type,
+      fallback_agent_type,
+    });
+
+    for (const filter_set of generic_candidate_sets) {
+      const batch = await remote_fetcher(filter_set);
+      all_candidates.push(...batch);
+
+      if (batch.length > 0 && all_candidates.length >= 20) break;
+    }
+
+    for (const filter_set of generic_local_candidate_sets) {
+      const batch = local_fetcher(filter_set);
+      all_candidates.push(...batch);
+
+      if (batch.length > 0 && all_candidates.length >= 20) break;
+    }
   }
 
   all_candidates = dedupeTemplates(removeEmptyTemplates(all_candidates));
