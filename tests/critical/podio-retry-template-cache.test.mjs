@@ -14,6 +14,7 @@ import {
   fetchTemplatesCached,
   loadTemplateCandidates,
 } from "@/lib/domain/templates/load-template.js";
+import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
 
 test("Podio retry logic treats server-too-long responses as transient", () => {
   assert.equal(
@@ -162,4 +163,72 @@ test("template loader falls back to generic same-use-case templates when categor
   assert.equal(candidates[0].item_id, 7001);
   assert.ok(calls.some((filter_set) => filter_set["property-type"] === "Residential"));
   assert.ok(calls.some((filter_set) => !filter_set["property-type"]));
+});
+
+test("template loader accepts legacy stage labels and templates without spam risk values", async () => {
+  const calls = [];
+  const candidates = await loadTemplateCandidates({
+    category: "Residential",
+    secondary_category: "Outbound Initial",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 Ownership Check",
+    tone: "Warm",
+    gender_variant: "Neutral",
+    language: "English",
+    sequence_position: "V1",
+    paired_with_agent_type: "Warm Professional",
+    recently_used_template_ids: [],
+    fallback_agent_type: "Warm Professional",
+    remote_fetcher: async (filter_set) => {
+      calls.push(filter_set);
+      return [
+        {
+          item_id: 8001,
+          use_case: "ownership_check",
+          variant_group: filter_set.stage,
+          tone: "Warm",
+          gender_variant: "Neutral",
+          language: "English",
+          sequence_position: "V1",
+          paired_with_agent_type: "Warm Professional",
+          text: "Hi {{agent_first_name}}, are you the owner of {{property_address}}?",
+          active: "Yes",
+          category_primary: null,
+          category_secondary: null,
+          deliverability_score: 90,
+          spam_risk: null,
+          historical_reply_rate: 20,
+          total_conversations: 0,
+          total_replies: 0,
+        },
+      ];
+    },
+    local_fetcher: () => [],
+  });
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].item_id, 8001);
+  assert.ok(
+    calls.some(
+      (filter_set) => filter_set.stage === "Stage 1 — Ownership Confirmation"
+    )
+  );
+});
+
+test("template normalization keeps missing spam risk as null instead of forcing exclusion", () => {
+  const normalized = normalizeTemplateItem({
+    item_id: 9001,
+    fields: [
+      {
+        external_id: "text",
+        values: [{ value: "Hi {{agent_first_name}}" }],
+      },
+      {
+        external_id: "active",
+        values: [{ value: { text: "Yes" } }],
+      },
+    ],
+  });
+
+  assert.equal(normalized.spam_risk, null);
 });

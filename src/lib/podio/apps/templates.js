@@ -38,7 +38,7 @@ export function normalizeTemplateItem(item) {
     category_secondary: getCategoryValue(item, "category", null),
     personalization_tags: getCategoryValues(item, "personalization-tags", []),
     deliverability_score: getNumberValue(item, "deliverability-score", 0),
-    spam_risk: getNumberValue(item, "spam-risk", 100),
+    spam_risk: getNumberValue(item, "spam-risk", null),
     historical_reply_rate: getNumberValue(item, "historical-reply-rate", 0),
     total_sends: getNumberValue(item, "total-sends", 0),
     total_replies: getNumberValue(item, "total-replies", 0),

@@ -8,6 +8,7 @@ const HARD_SPAM_RISK_CUTOFF = 35;
 const TEMPLATE_APP_ID = APP_IDS.templates;
 const TEMPLATE_FILTER_ALIAS_MAP = Object.freeze({
   stage: Object.freeze({
+    "stage 1 ownership check": "Stage 1 — Ownership Confirmation",
     "stage 1 6 scripts": "Stage 1 — Ownership Confirmation",
     "negotiation variants": "Stage 3 — Offer Reveal",
   }),
@@ -162,7 +163,10 @@ function removeEmptyTemplates(templates) {
 }
 
 function applySpamGuard(templates) {
-  return templates.filter((t) => t.spam_risk <= HARD_SPAM_RISK_CUTOFF);
+  return templates.filter((t) => {
+    if (!Number.isFinite(t?.spam_risk)) return true;
+    return t.spam_risk <= HARD_SPAM_RISK_CUTOFF;
+  });
 }
 
 function dedupeTemplates(templates) {
@@ -183,12 +187,13 @@ function applyCooldownFilter(templates, recently_used_template_ids = []) {
 
 function scoreTemplate(template, preferences = {}) {
   let score = 0;
+  const spam_risk = Number.isFinite(template?.spam_risk) ? template.spam_risk : 0;
 
   score += template.deliverability_score * 3;
   score += template.historical_reply_rate * 2;
   score += template.total_conversations * 0.2;
   score += template.total_replies * 0.1;
-  score -= template.spam_risk * 4;
+  score -= spam_risk * 4;
 
   if (
     preferences.preferred_tone &&

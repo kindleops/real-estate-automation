@@ -151,7 +151,10 @@ function buildVariableMap(context = {}, overrides = {}) {
 
 function extractPlaceholders(template_text) {
   const text = String(template_text || "");
-  const matches = [...text.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)];
+  const matches = [
+    ...text.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g),
+    ...text.matchAll(/\{(?!\{)\s*([a-zA-Z0-9_]+)\s*\}(?!\})/g),
+  ];
   return [...new Set(matches.map((m) => m[1]))];
 }
 
@@ -175,16 +178,23 @@ export function renderTemplate({
 
   for (const key of placeholders) {
     const replacement = variables[key];
-    const regex = new RegExp(`\\{\\{\\s*${escapeRegExp(key)}\\s*\\}\\}`, "g");
+    const regexes = [
+      new RegExp(`\\{\\{\\s*${escapeRegExp(key)}\\s*\\}\\}`, "g"),
+      new RegExp(`\\{(?!\\{)\\s*${escapeRegExp(key)}\\s*\\}(?!\\})`, "g"),
+    ];
 
     if (replacement && String(replacement).trim() !== "") {
-      rendered = rendered.replace(regex, String(replacement).trim());
+      for (const regex of regexes) {
+        rendered = rendered.replace(regex, String(replacement).trim());
+      }
       used_placeholders.push(`{{${key}}}`);
     } else {
       missing_placeholders.push(`{{${key}}}`);
 
       if (remove_unknown_placeholders) {
-        rendered = rendered.replace(regex, "");
+        for (const regex of regexes) {
+          rendered = rendered.replace(regex, "");
+        }
       }
     }
   }
