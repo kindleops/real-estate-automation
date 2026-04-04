@@ -11,6 +11,7 @@ import {
 } from "@/lib/providers/podio.js";
 
 import { normalizePhone } from "@/lib/providers/textgrid.js";
+import { warn } from "@/lib/logging/logger.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // REAL SEND QUEUE FIELD IDS
@@ -76,6 +77,11 @@ function unique(list) {
 function asArrayAppRef(value) {
   if (!value) return undefined;
   return [value];
+}
+
+function toItemId(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function normalizePriority(value) {
@@ -186,8 +192,10 @@ function maybeTemplateFieldValue(template_id, template_item = null) {
 
   const template_app_id =
     template_item?.app?.app_id ||
+    template_item?.raw?.app?.app_id ||
     template_item?.app_id ||
     template_item?.appId ||
+    (template_item?.item_id ? APP_IDS.templates : null) ||
     null;
 
   if (!template_item) {
@@ -259,18 +267,38 @@ export async function buildSendQueueItem({
   const phone_item = context.items?.phone_item || null;
   const master_owner_item = context.items?.master_owner_item || null;
   const property_item = context.items?.property_item || null;
+  const brain_item = context.items?.brain_item || null;
   const agent_item = context.items?.agent_item || null;
   const market_item = context.items?.market_item || null;
 
   const phone_item_id = requireItemId(
-    context.ids?.phone_item_id,
+    context.ids?.phone_item_id || phone_item?.item_id,
     "context.ids.phone_item_id"
   );
 
-  const master_owner_id = context.ids?.master_owner_id || null;
-  const prospect_id = context.ids?.prospect_id || null;
-  const property_id = context.ids?.property_id || null;
-  const market_id = context.ids?.market_id || null;
+  const master_owner_id =
+    toItemId(context.ids?.master_owner_id) ||
+    toItemId(master_owner_item?.item_id) ||
+    getFirstAppReferenceId(phone_item, "linked-master-owner", null) ||
+    getFirstAppReferenceId(brain_item, "master-owner", null) ||
+    null;
+  const prospect_id =
+    toItemId(context.ids?.prospect_id) ||
+    getFirstAppReferenceId(phone_item, "linked-contact", null) ||
+    getFirstAppReferenceId(brain_item, "prospect", null) ||
+    null;
+  const property_id =
+    toItemId(context.ids?.property_id) ||
+    toItemId(property_item?.item_id) ||
+    getFirstAppReferenceId(phone_item, "primary-property", null) ||
+    getFirstAppReferenceId(brain_item, "properties", null) ||
+    null;
+  const market_id =
+    toItemId(context.ids?.market_id) ||
+    toItemId(market_item?.item_id) ||
+    getFirstAppReferenceId(property_item, "market-2", null) ||
+    getFirstAppReferenceId(property_item, "market", null) ||
+    null;
 
   const assigned_agent_id =
     context.ids?.assigned_agent_id ||
@@ -351,6 +379,35 @@ export async function buildSendQueueItem({
   );
 
   const template_field_value = maybeTemplateFieldValue(template_id, template_item);
+  const missing_relation_warnings = [];
+
+  if (!master_owner_id && (master_owner_item?.item_id || context.ids?.master_owner_id)) {
+    missing_relation_warnings.push("master_owner_relation_unresolved");
+  }
+  if (!property_id && (property_item?.item_id || brain_item?.item_id || master_owner_id)) {
+    missing_relation_warnings.push("property_relation_unresolved");
+  }
+  if (template_id && !template_field_value) {
+    missing_relation_warnings.push("template_relation_unresolved");
+  }
+
+  if (missing_relation_warnings.length) {
+    warn("queue.build_relation_payload_incomplete", {
+      phone_item_id,
+      master_owner_id,
+      property_id,
+      market_id,
+      template_id: toItemId(template_id),
+      template_item_id: toItemId(template_item?.item_id),
+      template_app_id:
+        template_item?.app?.app_id ||
+        template_item?.raw?.app?.app_id ||
+        template_item?.app_id ||
+        template_item?.appId ||
+        null,
+      warnings: missing_relation_warnings,
+    });
+  }
 
   const fields = {
     [QUEUE_FIELDS.queue_id]: queue_id || undefined,
@@ -437,6 +494,7 @@ export async function buildSendQueueItem({
     touch_number: next_touch_number,
     queue_status: normalizeQueueStatus(queue_status),
     warnings: [
+      ...missing_relation_warnings,
       ...(defer_message_resolution && !message_text
         ? ["Message text will be resolved during queue processing."]
         : []),

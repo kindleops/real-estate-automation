@@ -6,6 +6,7 @@ import {
   buildQueueSendTriggerName,
   serializeMessageEventMetadata,
 } from "@/lib/domain/events/message-event-metadata.js";
+import { warn } from "@/lib/logging/logger.js";
 
 const EVENT_FIELDS = {
   message_id: "message-id",
@@ -45,7 +46,12 @@ function mapDeliveryStatusForEvent(send_result) {
   return "Sent";
 }
 
-export async function logOutboundMessageEvent({
+function asArrayAppRef(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
+}
+
+export function buildOutboundMessageEventFields({
   brain_item = null,
   conversation_item_id = null,
   master_owner_id = null,
@@ -73,8 +79,37 @@ export async function logOutboundMessageEvent({
 } = {}) {
   const ai_route = getCategoryValue(brain_item, "ai-route", null);
   const resolved_message_id = provider_message_id || client_reference_id || null;
+  const conversation_relation = asArrayAppRef(conversation_item_id || brain_item?.item_id);
+  const missing_relation_warnings = [];
 
-  const fields = {
+  if (phone_item_id && !asArrayAppRef(phone_item_id)) {
+    missing_relation_warnings.push("phone_relation_invalid");
+  }
+  if (property_id && !asArrayAppRef(property_id)) {
+    missing_relation_warnings.push("property_relation_invalid");
+  }
+  if (template_id && !asArrayAppRef(template_id)) {
+    missing_relation_warnings.push("template_relation_invalid");
+  }
+  if ((conversation_item_id || brain_item?.item_id) && !asArrayAppRef(conversation_item_id || brain_item?.item_id)) {
+    missing_relation_warnings.push("conversation_relation_invalid");
+  }
+
+  if (missing_relation_warnings.length) {
+    warn("events.outbound_relation_payload_incomplete", {
+      master_owner_id,
+      prospect_id,
+      property_id,
+      market_id,
+      phone_item_id,
+      outbound_number_item_id,
+      conversation_item_id: conversation_item_id || brain_item?.item_id || null,
+      template_id,
+      warnings: missing_relation_warnings,
+    });
+  }
+
+  return {
     [EVENT_FIELDS.message_id]: resolved_message_id,
     [EVENT_FIELDS.direction]: "Outbound",
     [EVENT_FIELDS.timestamp]: { start: nowIso() },
@@ -112,27 +147,45 @@ export async function logOutboundMessageEvent({
     ...(message_variant !== null && message_variant !== undefined
       ? { [EVENT_FIELDS.message_variant]: Number(message_variant) || undefined }
       : {}),
-    ...(master_owner_id ? { [EVENT_FIELDS.master_owner]: master_owner_id } : {}),
-    ...(prospect_id ? { [EVENT_FIELDS.prospect]: prospect_id } : {}),
-    ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
-    ...(market_id ? { [EVENT_FIELDS.market]: market_id } : {}),
-    ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
-    ...(outbound_number_item_id ? { [EVENT_FIELDS.textgrid_number]: outbound_number_item_id } : {}),
-    ...((conversation_item_id || brain_item?.item_id)
-      ? { [EVENT_FIELDS.conversation]: conversation_item_id || brain_item?.item_id }
+    ...(asArrayAppRef(master_owner_id)
+      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
       : {}),
-    ...(template_id ? { [EVENT_FIELDS.template_selected]: template_id } : {}),
+    ...(asArrayAppRef(prospect_id)
+      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
+      : {}),
+    ...(asArrayAppRef(property_id)
+      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
+      : {}),
+    ...(asArrayAppRef(market_id)
+      ? { [EVENT_FIELDS.market]: asArrayAppRef(market_id) }
+      : {}),
+    ...(asArrayAppRef(phone_item_id)
+      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
+      : {}),
+    ...(asArrayAppRef(outbound_number_item_id)
+      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(outbound_number_item_id) }
+      : {}),
+    ...(conversation_relation
+      ? { [EVENT_FIELDS.conversation]: conversation_relation }
+      : {}),
+    ...(asArrayAppRef(template_id)
+      ? { [EVENT_FIELDS.template_selected]: asArrayAppRef(template_id) }
+      : {}),
     ...(latency_ms !== null && latency_ms !== undefined
       ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }
       : {}),
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
   };
+}
+
+export async function logOutboundMessageEvent(payload = {}) {
+  const fields = buildOutboundMessageEventFields(payload);
 
   const created = await createMessageEvent(fields);
 
   await linkMessageEventToBrain({
-    brain_item,
-    brain_id: conversation_item_id || brain_item?.item_id || null,
+    brain_item: payload.brain_item || null,
+    brain_id: payload.conversation_item_id || payload.brain_item?.item_id || null,
     message_event_id: created?.item_id ?? null,
   });
 

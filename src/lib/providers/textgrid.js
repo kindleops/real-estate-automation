@@ -20,6 +20,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_DELAY_MS = 10_000;
+const TEXTGRID_MESSAGES_RESOURCE = "/messages";
 
 const TEXTGRID_PROVIDER_CAPABILITIES = Object.freeze({
   message_status_lookup: {
@@ -94,6 +95,10 @@ export function getTextgridSendCredentialStatus() {
 
 export function hasTextgridSendCredentials() {
   return getTextgridSendCredentials().configured;
+}
+
+export function getTextgridSendEndpoint() {
+  return `${TEXTGRID_BASE_URL}${TEXTGRID_MESSAGES_RESOURCE}`;
 }
 
 export function getTextgridWebhookSecret() {
@@ -251,6 +256,13 @@ export function mapTextgridFailureBucket(result) {
 
   if (msg.includes("opt out") || msg.includes("dnc")) return "DNC";
   if (msg.includes("spam")) return "Spam";
+  if (
+    msg.includes("invalid number") ||
+    msg.includes("invalid destination") ||
+    msg.includes("invalid sending number")
+  ) {
+    return "Hard Bounce";
+  }
   if ([400, 404].includes(status)) return "Hard Bounce";
   if (RETRYABLE_STATUSES.has(status)) return "Soft Bounce";
 
@@ -296,6 +308,7 @@ export async function sendTextgridSMS({
       status: null,
       message: missing_message,
       error_data: null,
+      endpoint: getTextgridSendEndpoint(),
     });
 
     await recordSystemAlert({
@@ -337,7 +350,7 @@ export async function sendTextgridSMS({
   try {
     const res = await requestWithRetry({
       method: "post",
-      url: `${TEXTGRID_BASE_URL}/messages`,
+      url: getTextgridSendEndpoint(),
       data: payload,
       headers: {
         Authorization: `Bearer ${buildTextgridBearerToken(credentials)}`,
@@ -356,16 +369,22 @@ export async function sendTextgridSMS({
       to: normalized_to,
       from: normalized_from,
       body: trimmed_body,
+      endpoint: getTextgridSendEndpoint(),
     };
   } catch (err) {
     const tge = toTextGridError(err);
 
     warn("textgrid.send_failed", {
+      to_input: to,
+      from_input: from,
       to: normalized_to,
       from: normalized_from,
       status: tge.status,
       message: tge.message,
       error_data: tge.data,
+      endpoint: getTextgridSendEndpoint(),
+      resource: TEXTGRID_MESSAGES_RESOURCE,
+      client_reference_id,
     });
 
     await recordSystemAlert({
@@ -393,6 +412,7 @@ export async function sendTextgridSMS({
       to: normalized_to,
       from: normalized_from,
       body: trimmed_body,
+      endpoint: getTextgridSendEndpoint(),
     };
   }
 }

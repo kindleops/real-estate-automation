@@ -5,6 +5,7 @@ import {
   getItem,
   getTextValue,
   getCategoryValue,
+  getDateValue,
   getFirstAppReferenceId,
   getPhoneValue,
   getNumberValue,
@@ -17,6 +18,7 @@ import {
 
 import {
   sendTextgridSMS,
+  getTextgridSendEndpoint,
   mapTextgridFailureBucket,
   normalizePhone,
 } from "@/lib/providers/textgrid.js";
@@ -40,6 +42,7 @@ import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
 import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
+import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import {
   deriveCanonicalSellerFlowFromTemplate,
   inferCanonicalUseCaseFromOutboundText,
@@ -115,6 +118,41 @@ function clean(value) {
 
 function lower(value) {
   return clean(value).toLowerCase();
+}
+
+function asArrayAppRef(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
+}
+
+function isPositiveCategory(value) {
+  const raw = lower(value);
+  return [
+    "yes",
+    "true",
+    "active",
+    "enabled",
+    "available",
+    "on",
+    "_ active",
+    "_ warming up",
+  ].includes(raw);
+}
+
+function isNegativeCategory(value) {
+  const raw = lower(value);
+  return [
+    "no",
+    "false",
+    "inactive",
+    "disabled",
+    "retired",
+    "blocked",
+    "off",
+    "_ paused",
+    "_ flagged",
+    "⚫ retired",
+  ].includes(raw);
 }
 
 function shouldRetryQueueUpdateWithoutTemplate(error) {
@@ -615,9 +653,12 @@ async function resolveQueuePropertyAndMarket({
   property_id = null,
   market_id = null,
   master_owner_id = null,
+  brain_item = null,
 } = {}) {
   const queued_property_item = await safeGetItem(property_id);
-  let property_item = queued_property_item;
+  let property_item =
+    queued_property_item ||
+    (await safeGetItem(getFirstAppReferenceId(brain_item, "properties", null)));
 
   if (!property_item?.item_id && master_owner_id) {
     try {
@@ -648,7 +689,99 @@ async function resolveQueuePropertyAndMarket({
   };
 }
 
-async function logFailedOutboundMessageEvent({
+export function validateQueuedOutboundNumberItem(
+  outbound_number_item = null,
+  now = new Date()
+) {
+  const status = getCategoryValue(
+    outbound_number_item,
+    TEXTGRID_NUMBER_FIELDS.status,
+    null
+  );
+  const hard_pause = getCategoryValue(
+    outbound_number_item,
+    TEXTGRID_NUMBER_FIELDS.hard_pause,
+    null
+  );
+  const pause_until = getDateValue(
+    outbound_number_item,
+    TEXTGRID_NUMBER_FIELDS.pause_until,
+    null
+  );
+  const normalized_from = normalizePhone(
+    getPhoneValue(outbound_number_item, "phone-number", "") ||
+      getTextValue(outbound_number_item, TEXTGRID_NUMBER_FIELDS.title, "")
+  );
+
+  if (!outbound_number_item?.item_id) {
+    return {
+      ok: false,
+      reason: "outbound_number_item_missing",
+      normalized_from,
+      status,
+      hard_pause,
+      pause_until,
+    };
+  }
+
+  if (!normalized_from) {
+    return {
+      ok: false,
+      reason: "outbound_number_phone_invalid",
+      normalized_from,
+      status,
+      hard_pause,
+      pause_until,
+    };
+  }
+
+  if (status && isNegativeCategory(status)) {
+    return {
+      ok: false,
+      reason: `outbound_number_inactive:${lower(status)}`,
+      normalized_from,
+      status,
+      hard_pause,
+      pause_until,
+    };
+  }
+
+  if (hard_pause && isPositiveCategory(hard_pause)) {
+    return {
+      ok: false,
+      reason: "outbound_number_hard_paused",
+      normalized_from,
+      status,
+      hard_pause,
+      pause_until,
+    };
+  }
+
+  if (pause_until) {
+    const pause_until_ts = new Date(pause_until).getTime();
+    if (!Number.isNaN(pause_until_ts) && pause_until_ts > now.getTime()) {
+      return {
+        ok: false,
+        reason: "outbound_number_paused_until",
+        normalized_from,
+        status,
+        hard_pause,
+        pause_until,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    reason: null,
+    normalized_from,
+    status,
+    hard_pause,
+    pause_until,
+  };
+}
+
+export function buildFailedOutboundMessageEventFields({
   brain_item = null,
   conversation_item_id = null,
   queue_item_id,
@@ -674,8 +807,37 @@ async function logFailedOutboundMessageEvent({
 }) {
   const ai_route = getCategoryValue(brain_item, "ai-route", null);
   const resolved_message_id = send_result.message_id || client_reference_id || null;
+  const missing_relation_warnings = [];
 
-  return createMessageEvent({
+  if (phone_item_id && !asArrayAppRef(phone_item_id)) {
+    missing_relation_warnings.push("phone_relation_invalid");
+  }
+  if (property_id && !asArrayAppRef(property_id)) {
+    missing_relation_warnings.push("property_relation_invalid");
+  }
+  if (template_id && !asArrayAppRef(template_id)) {
+    missing_relation_warnings.push("template_relation_invalid");
+  }
+  if (conversation_item_id && !asArrayAppRef(conversation_item_id)) {
+    missing_relation_warnings.push("conversation_relation_invalid");
+  }
+
+  if (missing_relation_warnings.length) {
+    warn("events.failed_outbound_relation_payload_incomplete", {
+      queue_item_id,
+      master_owner_id,
+      prospect_id,
+      property_id,
+      market_id,
+      phone_item_id,
+      outbound_number_item_id,
+      conversation_item_id,
+      template_id,
+      warnings: missing_relation_warnings,
+    });
+  }
+
+  return {
     [EVENT_FIELDS.message_id]: resolved_message_id,
     [EVENT_FIELDS.direction]: "Outbound",
     [EVENT_FIELDS.timestamp]: { start: nowIso() },
@@ -714,19 +876,39 @@ async function logFailedOutboundMessageEvent({
     ...(message_variant !== null && message_variant !== undefined
       ? { [EVENT_FIELDS.message_variant]: Number(message_variant) || 0 }
       : {}),
-    ...(master_owner_id ? { [EVENT_FIELDS.master_owner]: master_owner_id } : {}),
-    ...(prospect_id ? { [EVENT_FIELDS.prospect]: prospect_id } : {}),
-    ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
-    ...(market_id ? { [EVENT_FIELDS.market]: market_id } : {}),
-    ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
-    ...(outbound_number_item_id ? { [EVENT_FIELDS.textgrid_number]: outbound_number_item_id } : {}),
-    ...(conversation_item_id ? { [EVENT_FIELDS.conversation]: conversation_item_id } : {}),
-    ...(template_id ? { [EVENT_FIELDS.template_selected]: template_id } : {}),
+    ...(asArrayAppRef(master_owner_id)
+      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
+      : {}),
+    ...(asArrayAppRef(prospect_id)
+      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
+      : {}),
+    ...(asArrayAppRef(property_id)
+      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
+      : {}),
+    ...(asArrayAppRef(market_id)
+      ? { [EVENT_FIELDS.market]: asArrayAppRef(market_id) }
+      : {}),
+    ...(asArrayAppRef(phone_item_id)
+      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
+      : {}),
+    ...(asArrayAppRef(outbound_number_item_id)
+      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(outbound_number_item_id) }
+      : {}),
+    ...(asArrayAppRef(conversation_item_id)
+      ? { [EVENT_FIELDS.conversation]: asArrayAppRef(conversation_item_id) }
+      : {}),
+    ...(asArrayAppRef(template_id)
+      ? { [EVENT_FIELDS.template_selected]: asArrayAppRef(template_id) }
+      : {}),
     ...(latency_ms !== null && latency_ms !== undefined
       ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }
       : {}),
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
-  });
+  };
+}
+
+export async function logFailedOutboundMessageEvent(payload = {}) {
+  return createMessageEvent(buildFailedOutboundMessageEventFields(payload));
 }
 
 async function failQueueItem(
@@ -927,7 +1109,7 @@ export async function processSendQueueItem(queue_item_id) {
   const initial_prospect_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null);
 
   const [initial_phone_item, initial_brain_item] = await Promise.all([
-    initial_phone_item_id ? getItem(initial_phone_item_id) : Promise.resolve(null),
+    initial_phone_item_id ? safeGetItem(initial_phone_item_id) : Promise.resolve(null),
     resolveBrainForQueue({
       master_owner_id: initial_master_owner_id,
       prospect_id: initial_prospect_id,
@@ -1031,8 +1213,8 @@ export async function processSendQueueItem(queue_item_id) {
   const [phone_item, outbound_number_item, brain_item] = await Promise.all([
     initial_phone_item && String(initial_phone_item?.item_id || "") === String(phone_item_id)
       ? Promise.resolve(initial_phone_item)
-      : getItem(phone_item_id),
-    getItem(outbound_number_item_id),
+      : safeGetItem(phone_item_id),
+    safeGetItem(outbound_number_item_id),
     initial_brain_item
       ? Promise.resolve(initial_brain_item)
       : resolveBrainForQueue({ master_owner_id, prospect_id }),
@@ -1044,6 +1226,7 @@ export async function processSendQueueItem(queue_item_id) {
       property_id,
       market_id,
       master_owner_id,
+      brain_item,
     });
 
   const phone_validation = validateActivePhone(phone_item);
@@ -1101,21 +1284,88 @@ export async function processSendQueueItem(queue_item_id) {
   const to_number =
     getTextValue(phone_item, "canonical-e164", "") ||
     normalizePhone(getTextValue(phone_item, "phone-hidden", ""));
-
-  const from_number =
-    getPhoneValue(outbound_number_item, "phone-number", "") ||
-    getTextValue(outbound_number_item, "title", "");
+  const outbound_number_validation = validateQueuedOutboundNumberItem(
+    outbound_number_item
+  );
+  const from_number = outbound_number_validation.normalized_from || "";
   const client_reference_id = buildQueueClientReferenceId(queue_item_id);
 
-  if (!to_number || !from_number) {
+  info("queue.process_send_preflight", {
+    queue_item_id,
+    phone_item_id,
+    outbound_number_item_id,
+    property_id: resolved_property_id,
+    template_id,
+    normalized_to: clean(to_number) || null,
+    normalized_from: clean(from_number) || null,
+    send_endpoint: getTextgridSendEndpoint(),
+    outbound_number_found: Boolean(outbound_number_item?.item_id),
+    outbound_number_valid: outbound_number_validation.ok,
+    outbound_number_status: outbound_number_validation.status || null,
+    outbound_number_hard_pause: outbound_number_validation.hard_pause || null,
+    outbound_number_pause_until: outbound_number_validation.pause_until || null,
+  });
+
+  if (!to_number || !outbound_number_validation.ok) {
+    const preflight_reason = !to_number
+      ? "destination_number_invalid"
+      : outbound_number_validation.reason;
+    const preflight_message = !to_number
+      ? `Invalid destination number for phone item ${phone_item_id}`
+      : `Invalid sending number for TextGrid item ${outbound_number_item_id}: ${outbound_number_validation.reason}`;
+
     await failQueueItem(queue_item_id, {
+      queue_status: "Blocked",
       failed_reason: "Invalid Number",
       retry_count: retry_count + 1,
     });
 
+    try {
+      await logFailedOutboundMessageEvent({
+        brain_item,
+        conversation_item_id: brain_id,
+        queue_item_id,
+        master_owner_id,
+        prospect_id,
+        property_id: resolved_property_id,
+        market_id: resolved_market_id,
+        phone_item_id,
+        outbound_number_item_id,
+        template_id,
+        message_body,
+        message_variant,
+        latency_ms: 0,
+        selected_use_case: canonical_flow?.selected_use_case || null,
+        template_use_case: canonical_flow?.template_use_case || null,
+        next_expected_stage: canonical_flow?.next_expected_stage || null,
+        selected_variant_group: canonical_flow?.selected_variant_group || null,
+        selected_tone: canonical_flow?.selected_tone || null,
+        send_result: {
+          ok: false,
+          provider: "textgrid",
+          message_id: null,
+          status: "failed",
+          error_status: "preflight_invalid_number",
+          error_message: preflight_message,
+          to: to_number || null,
+          from: from_number || null,
+          endpoint: getTextgridSendEndpoint(),
+        },
+        retry_count,
+        max_retries,
+        client_reference_id,
+      });
+    } catch (error) {
+      warn("queue.process_preflight_failed_event_log_failed", {
+        queue_item_id,
+        reason: preflight_reason,
+        message: error?.message || "unknown_error",
+      });
+    }
+
     return {
       ok: false,
-      reason: "missing_to_or_from_number",
+      reason: preflight_reason,
     };
   }
 
@@ -1169,6 +1419,11 @@ export async function processSendQueueItem(queue_item_id) {
       error_status: send_result.error_status,
       error_message: send_result.error_message,
       failed_reason,
+      normalized_to: send_result.to || to_number || null,
+      normalized_from: send_result.from || from_number || null,
+      send_endpoint: send_result.endpoint || getTextgridSendEndpoint(),
+      outbound_number_valid: outbound_number_validation.ok,
+      outbound_number_status: outbound_number_validation.status || null,
     });
 
     try {

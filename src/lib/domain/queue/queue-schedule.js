@@ -287,19 +287,22 @@ function getWindowDurationMinutes(window) {
   return Math.max(0, (24 * 60 - window.start) + window.end);
 }
 
-function pickDistributedWindowMinute(window, distribution_key = null) {
+function pickDistributedWindowSecondOfDay(window, distribution_key = null) {
   if (!window) return 0;
 
-  const duration = getWindowDurationMinutes(window);
-  if (!distribution_key || duration <= 0) {
-    return window.start;
+  const duration_minutes = getWindowDurationMinutes(window);
+  if (!distribution_key || duration_minutes <= 0) {
+    return window.start * 60;
   }
 
-  const guard_band = duration >= 30 ? 5 : 0;
-  const usable_span = Math.max(1, duration - guard_band * 2);
-  const offset = guard_band + (Math.abs(hashString(String(distribution_key))) % usable_span);
+  const duration_seconds = duration_minutes * 60;
+  const guard_band_seconds = duration_minutes >= 30 ? 5 * 60 : 0;
+  const usable_span_seconds = Math.max(1, duration_seconds - guard_band_seconds * 2);
+  const offset_seconds =
+    guard_band_seconds +
+    (Math.abs(hashString(String(distribution_key))) % usable_span_seconds);
 
-  return (window.start + offset) % (24 * 60);
+  return ((window.start * 60) + offset_seconds) % (24 * 60 * 60);
 }
 
 function clampToPositiveInteger(value, fallback = 0) {
@@ -373,17 +376,18 @@ export function resolveQueueSchedule({
         ? addLocalDays(local_now_parts, 0)
         : addLocalDays(local_now_parts, 0);
 
-  const scheduled_minute_of_day = pickDistributedWindowMinute(
+  const scheduled_second_of_day = pickDistributedWindowSecondOfDay(
     parsed_window,
     distribution_key
   );
-  const start_hour = Math.floor(scheduled_minute_of_day / 60);
-  const start_minute = scheduled_minute_of_day % 60;
+  const start_hour = Math.floor(scheduled_second_of_day / 3600);
+  const start_minute = Math.floor((scheduled_second_of_day % 3600) / 60);
+  const start_second = scheduled_second_of_day % 60;
   const scheduled_local_parts = {
     ...target_date,
     hour: start_hour,
     minute: start_minute,
-    second: 0,
+    second: start_second,
   };
 
   if (

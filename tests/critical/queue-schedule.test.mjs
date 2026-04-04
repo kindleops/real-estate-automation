@@ -15,6 +15,12 @@ function parseLocalMinute(value) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+function parseLocalSecond(value) {
+  const match = String(value || "").match(/(\d{2}):(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  return Number(match[3]);
+}
+
 test("queue schedule spreads a Central morning window across the next local day instead of pinning to window start", () => {
   const result = resolveQueueSchedule({
     now: "2026-04-02T22:14:00Z",
@@ -28,6 +34,9 @@ test("queue schedule spreads a Central morning window across the next local day 
   assert.equal(result.within_contact_window, false);
   assert.ok(parseLocalMinute(result.scheduled_for_local) >= 7 * 60 + 5);
   assert.ok(parseLocalMinute(result.scheduled_for_local) <= 8 * 60 + 54);
+  assert.equal(result.scheduled_for_local, "2026-04-03 08:02:01");
+  assert.equal(result.scheduled_for_utc, "2026-04-03 13:02:01");
+  assert.equal(parseLocalSecond(result.scheduled_for_local), 1);
 });
 
 test("queue schedule without a distribution key still pins to window start", () => {
@@ -71,9 +80,13 @@ test("queue schedule respects target timezone when the window starts later today
   assert.match(mountain.scheduled_for_local, /^2026-04-02 /);
   assert.ok(parseLocalMinute(mountain.scheduled_for_local) >= 17 * 60 + 5);
   assert.ok(parseLocalMinute(mountain.scheduled_for_local) <= 19 * 60 + 54);
+  assert.equal(mountain.scheduled_for_local, "2026-04-02 19:37:22");
+  assert.equal(mountain.scheduled_for_utc, "2026-04-03 01:37:22");
   assert.match(eastern.scheduled_for_local, /^2026-04-03 /);
   assert.ok(parseLocalMinute(eastern.scheduled_for_local) >= 12 * 60 + 5);
   assert.ok(parseLocalMinute(eastern.scheduled_for_local) <= 12 * 60 + 54);
+  assert.equal(eastern.scheduled_for_local, "2026-04-03 12:37:21");
+  assert.equal(eastern.scheduled_for_utc, "2026-04-03 16:37:21");
 });
 
 test("latency-aware queue schedule delays an in-window reply instead of sending immediately", () => {
