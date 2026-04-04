@@ -14,6 +14,7 @@ import { maybeUpsertUnderwritingFromInbound } from "@/lib/domain/underwriting/ma
 import { maybeQueueUnderwritingFollowUp } from "@/lib/domain/underwriting/maybe-queue-underwriting-follow-up.js";
 import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/maybe-create-contract-from-accepted-offer.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
+import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
 import {
   beginIdempotentProcessing,
   completeIdempotentProcessing,
@@ -39,6 +40,7 @@ const defaultDeps = {
   maybeQueueUnderwritingFollowUp,
   maybeCreateContractFromAcceptedOffer,
   syncPipelineState,
+  maybeQueueSellerStageReply,
   beginIdempotentProcessing,
   completeIdempotentProcessing,
   failIdempotentProcessing,
@@ -253,6 +255,7 @@ export async function handleTextgridInboundWebhook(payload = {}) {
 
     await runtimeDeps.logInboundMessageEvent({
       brain_item,
+      conversation_item_id: brain_id,
       master_owner_id,
       prospect_id,
       property_id,
@@ -347,13 +350,35 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       notes: message_body,
     });
 
-    const underwriting_follow_up = await runtimeDeps.maybeQueueUnderwritingFollowUp({
+    const seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
       inbound_from,
-      underwriting,
-      classification,
-      route,
       context,
+      classification,
+      message: message_body,
+      maybe_offer,
+      existing_offer,
     });
+
+    if (seller_stage_reply?.brain_stage) {
+      await runtimeDeps.updateBrainStage({
+        brain_id,
+        stage: seller_stage_reply.brain_stage,
+      });
+    }
+
+    const underwriting_follow_up = seller_stage_reply?.handled
+      ? {
+          ok: true,
+          queued: false,
+          reason: "suppressed_by_seller_stage_reply",
+        }
+      : await runtimeDeps.maybeQueueUnderwritingFollowUp({
+          inbound_from,
+          underwriting,
+          classification,
+          route,
+          context,
+        });
 
     const contract = await runtimeDeps.maybeCreateContractFromAcceptedOffer({
       offer_item: existing_offer || null,
@@ -395,6 +420,9 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       underwriting_created: Boolean(underwriting?.created),
       underwriting_updated: Boolean(underwriting?.updated),
       underwriting_item_id: underwriting?.underwriting_item_id || null,
+      seller_stage_reply_queued: Boolean(seller_stage_reply?.queued),
+      seller_stage_reply_reason: seller_stage_reply?.reason || null,
+      seller_stage_use_case: seller_stage_reply?.plan?.selected_use_case || null,
       underwriting_follow_up_queued: Boolean(underwriting_follow_up?.queued),
       underwriting_follow_up_reason: underwriting_follow_up?.reason || null,
       contract_created: Boolean(contract?.created),
@@ -418,6 +446,7 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       offer_progress: maybe_offer_progress,
       offer: maybe_offer,
       underwriting,
+      seller_stage_reply,
       underwriting_follow_up,
       contract,
       pipeline,

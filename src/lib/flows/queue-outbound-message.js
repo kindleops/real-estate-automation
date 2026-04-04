@@ -5,6 +5,7 @@ import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
+import { resolveQueueSchedule } from "@/lib/domain/queue/queue-schedule.js";
 import { chooseTextgridNumber } from "@/lib/domain/routing/choose-textgrid-number.js";
 import { normalizeUsPhone10 } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
@@ -163,6 +164,8 @@ export async function queueOutboundMessage({
   category = null,
   secondary_category = null,
   use_case = null,
+  template_lookup_use_case = undefined,
+  template_lookup_secondary_category = undefined,
   variant_group = null,
   tone = null,
   gender_variant = "Neutral",
@@ -319,6 +322,14 @@ export async function queueOutboundMessage({
     route?.template_filters?.secondary_category ||
     route?.secondary_category ||
     null;
+  const resolved_template_lookup_secondary_category =
+    template_lookup_secondary_category !== undefined
+      ? template_lookup_secondary_category
+      : resolved_secondary_category;
+  const resolved_template_lookup_use_case =
+    template_lookup_use_case !== undefined
+      ? template_lookup_use_case
+      : resolved_use_case;
 
   const resolved_lifecycle_stage =
     lifecycle_stage ||
@@ -331,14 +342,28 @@ export async function queueOutboundMessage({
     fallback_agent_type ||
     route?.template_filters?.fallback_agent_type ||
     "Warm Professional";
+  const resolved_rotation_key = deriveRotationKey({
+    explicit_rotation_key: rotation_key,
+    context,
+    use_case: resolved_use_case,
+    stage: resolved_lifecycle_stage || route?.stage,
+  });
+  const resolved_timezone = deriveTimezone({
+    explicit_timezone: timezone,
+    context,
+  });
+  const resolved_contact_window = deriveContactWindow({
+    explicit_contact_window: contact_window,
+    context,
+  });
 
   let selected_template = template_item || null;
 
   if (!selected_template && !clean(rendered_message_text)) {
     selected_template = await loadTemplate({
       category: resolved_category,
-      secondary_category: resolved_secondary_category,
-      use_case: resolved_use_case,
+      secondary_category: resolved_template_lookup_secondary_category,
+      use_case: resolved_template_lookup_use_case,
       variant_group: resolved_variant_group,
       tone: resolved_tone,
       gender_variant,
@@ -347,12 +372,7 @@ export async function queueOutboundMessage({
       paired_with_agent_type: resolved_agent_type,
       recently_used_template_ids:
         context?.recent?.recently_used_template_ids || [],
-      rotation_key: deriveRotationKey({
-        explicit_rotation_key: rotation_key,
-        context,
-        use_case: resolved_use_case,
-        stage: resolved_lifecycle_stage || route?.stage,
-      }),
+      rotation_key: resolved_rotation_key,
       fallback_agent_type: resolved_fallback_agent_type,
     });
   }
@@ -362,8 +382,10 @@ export async function queueOutboundMessage({
       inbound_from: resolved_inbound_from,
       phone_item_id: context?.ids?.phone_item_id || null,
       use_case: resolved_use_case,
+      template_lookup_use_case: resolved_template_lookup_use_case,
       language: resolved_language,
       category: resolved_category,
+      secondary_category: resolved_template_lookup_secondary_category,
       sequence_position: resolved_sequence_position,
       paired_with_agent_type: resolved_agent_type,
     });
@@ -431,12 +453,7 @@ export async function queueOutboundMessage({
       classification,
       route,
       preferred_language: resolved_language,
-      rotation_key: deriveRotationKey({
-        explicit_rotation_key: rotation_key,
-        context,
-        use_case: resolved_use_case,
-        stage: resolved_lifecycle_stage || route?.stage,
-      }),
+      rotation_key: resolved_rotation_key,
     });
 
     resolved_textgrid_number_item_id =
@@ -466,6 +483,21 @@ export async function queueOutboundMessage({
     };
   }
 
+  const derived_schedule =
+    normalizeScheduledDate(scheduled_for_local) || normalizeScheduledDate(scheduled_for_utc)
+      ? {
+          scheduled_for_local:
+            normalizeScheduledDate(scheduled_for_local) ||
+            normalizeScheduledDate(scheduled_for_utc),
+          scheduled_for_utc: normalizeScheduledDate(scheduled_for_utc),
+        }
+      : resolveQueueSchedule({
+          now: started_at,
+          timezone_label: resolved_timezone,
+          contact_window: resolved_contact_window,
+          distribution_key: resolved_rotation_key,
+        });
+
   const queue_result = await buildSendQueueItem({
     context,
     rendered_message_text: final_message_text,
@@ -473,17 +505,11 @@ export async function queueOutboundMessage({
     template_item: selected_template,
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     scheduled_for_local:
-      normalizeScheduledDate(scheduled_for_local) || { start: started_at },
+      derived_schedule?.scheduled_for_local || { start: started_at },
     scheduled_for_utc:
-      normalizeScheduledDate(scheduled_for_utc),
-    timezone: deriveTimezone({
-      explicit_timezone: timezone,
-      context,
-    }),
-    contact_window: deriveContactWindow({
-      explicit_contact_window: contact_window,
-      context,
-    }),
+      derived_schedule?.scheduled_for_utc || normalizeScheduledDate(scheduled_for_utc),
+    timezone: resolved_timezone,
+    contact_window: resolved_contact_window,
     send_priority: deriveSendPriority({
       explicit_send_priority: send_priority,
       classification,
@@ -513,6 +539,8 @@ export async function queueOutboundMessage({
     use_case: resolved_use_case,
     stage: route?.stage || null,
     lifecycle_stage: resolved_lifecycle_stage,
+    template_lookup_use_case: resolved_template_lookup_use_case,
+    template_lookup_secondary_category: resolved_template_lookup_secondary_category,
   });
 
   return {

@@ -26,8 +26,37 @@ test("blank outbound routing stays on ownership and targets outbound initial tem
   assert.equal(route.use_case, "ownership_check");
   assert.equal(route.stage, STAGES.OWNERSHIP);
   assert.equal(route.lifecycle_stage, LIFECYCLE_STAGES.OWNERSHIP);
+  assert.equal(route.persona, "Warm Professional");
+  assert.equal(route.tone, "Warm");
+  assert.equal(route.variant_group, "Stage 1 — Ownership Confirmation");
+  assert.equal(route.brain_ai_route, "Soft");
   assert.equal(route.secondary_category, "Outbound Initial");
   assert.equal(route.template_filters.secondary_category, "Outbound Initial");
+  assert.equal(route.template_filters.paired_with_agent_type, "Warm Professional");
+  assert.equal(route.template_filters.fallback_agent_type, "Warm Professional");
+});
+
+test("motivated blank outbound routing still stays in stage 1 ownership confirmation", () => {
+  const route = resolveRoute({
+    classification: buildClassification({
+      emotion: "motivated",
+      language: "Spanish",
+    }),
+    brain_item: null,
+    phone_item: null,
+    message: "",
+  });
+
+  assert.equal(route.use_case, "ownership_check");
+  assert.equal(route.stage, STAGES.OWNERSHIP);
+  assert.equal(route.lifecycle_stage, LIFECYCLE_STAGES.OWNERSHIP);
+  assert.equal(route.persona, "Warm Professional");
+  assert.equal(route.tone, "Warm");
+  assert.equal(route.variant_group, "Stage 1 — Ownership Confirmation");
+  assert.equal(route.brain_ai_route, "Soft");
+  assert.equal(route.secondary_category, "Outbound Initial");
+  assert.equal(route.template_filters.paired_with_agent_type, "Warm Professional");
+  assert.equal(route.template_filters.fallback_agent_type, "Warm Professional");
 });
 
 test("contract skip-ahead messaging resolves to the exact contract request flow", () => {

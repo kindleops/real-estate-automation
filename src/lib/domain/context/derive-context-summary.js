@@ -6,6 +6,10 @@ import {
   normalizeLanguage,
 } from "@/lib/providers/podio.js";
 
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
 function firstNonNull(...values) {
   for (const value of values) {
     if (value !== null && value !== undefined && value !== "") {
@@ -13,6 +17,41 @@ function firstNonNull(...values) {
     }
   }
   return null;
+}
+
+function parseSellerIdLocation(value) {
+  const raw = clean(value).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (!raw) {
+    return {
+      property_address: "",
+      property_city: "",
+      property_state: "",
+    };
+  }
+
+  const location_segment = raw
+    .split("~")
+    .map((segment) => clean(segment))
+    .find((segment) => segment.split("|").filter(Boolean).length >= 4);
+
+  if (!location_segment) {
+    return {
+      property_address: "",
+      property_city: "",
+      property_state: "",
+    };
+  }
+
+  const [property_address = "", property_city = "", property_state = ""] =
+    location_segment
+      .split("|")
+      .map((segment) => clean(segment));
+
+  return {
+    property_address,
+    property_city,
+    property_state,
+  };
 }
 
 export function deriveContextSummary({
@@ -26,6 +65,9 @@ export function deriveContextSummary({
   market_item = null,
   touch_count = 0,
 } = {}) {
+  const seller_id_location = parseSellerIdLocation(
+    getTextValue(master_owner_item, "seller-id", "")
+  );
   const owner_name =
     firstNonNull(
       getTextValue(master_owner_item, "owner-full-name", ""),
@@ -74,13 +116,28 @@ export function deriveContextSummary({
     property_address:
       firstNonNull(
         getTextValue(property_item, "property-address", ""),
-        getTextValue(property_item, "title", "")
+        getTextValue(property_item, "title", ""),
+        seller_id_location.property_address
       ) || "",
-    property_city: getTextValue(property_item, "city", ""),
-    property_state: getTextValue(property_item, "state", ""),
+    property_city:
+      firstNonNull(getTextValue(property_item, "city", ""), seller_id_location.property_city) || "",
+    property_state:
+      firstNonNull(
+        getTextValue(property_item, "state", ""),
+        seller_id_location.property_state
+      ) || "",
 
-    agent_name: getTextValue(agent_item, "title", ""),
-    agent_first_name: getTextValue(agent_item, "first-name", ""),
+    agent_name:
+      firstNonNull(
+        getTextValue(agent_item, "title", ""),
+        getTextValue(agent_item, "agent-name", "")
+      ) || "",
+    agent_first_name:
+      firstNonNull(
+        getTextValue(agent_item, "first-name", ""),
+        clean(getTextValue(agent_item, "title", "")).split(" ")[0],
+        clean(getTextValue(agent_item, "agent-name", "")).split(" ")[0]
+      ) || "",
 
     market_name: getTextValue(market_item, "title", ""),
     market_state: getTextValue(market_item, "state", ""),

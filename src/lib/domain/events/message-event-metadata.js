@@ -104,6 +104,7 @@ export function buildQueueMessageEventMetadata({
   client_reference_id = null,
   provider_message_id = null,
   event_kind = "outbound_send",
+  ...extra
 } = {}) {
   return {
     version: 1,
@@ -111,5 +112,6 @@ export function buildQueueMessageEventMetadata({
     queue_item_id: queue_item_id ? Number(queue_item_id) : null,
     client_reference_id: clean(client_reference_id) || null,
     provider_message_id: clean(provider_message_id) || null,
+    ...extra,
   };
 }

@@ -45,6 +45,7 @@ afterEach(() => {
 test("inbound webhook ignores replay after first completion", async () => {
   const ledger = createInMemoryIdempotencyLedger();
   let logInboundCount = 0;
+  const inboundLogPayloads = [];
   let updateBrainAfterInboundCount = 0;
   let createOfferCount = 0;
 
@@ -79,8 +80,9 @@ test("inbound webhook ignores replay after first completion", async () => {
       use_case: "offer_follow_up",
       seller_profile: "motivated",
     }),
-    logInboundMessageEvent: async () => {
+    logInboundMessageEvent: async (payload) => {
       logInboundCount += 1;
+      inboundLogPayloads.push(payload);
     },
     updateBrainAfterInbound: async () => {
       updateBrainAfterInboundCount += 1;
@@ -116,13 +118,99 @@ test("inbound webhook ignores replay after first completion", async () => {
   assert.equal(second.ok, true);
   assert.equal(second.duplicate, true);
   assert.equal(logInboundCount, 1);
+  assert.equal(inboundLogPayloads[0].conversation_item_id, 11);
   assert.equal(updateBrainAfterInboundCount, 1);
   assert.equal(createOfferCount, 1);
+});
+
+test("inbound webhook suppresses underwriting follow-up when seller-stage reply is handled", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const stage_updates = [];
+  let underwriting_follow_up_count = 0;
+
+  __setTextgridInboundTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    normalizeInboundTextgridPhone: (value) => value,
+    info: () => {},
+    warn: () => {},
+    loadContext: async () => ({
+      found: true,
+      ids: {
+        brain_item_id: 11,
+        master_owner_id: 21,
+        prospect_id: 31,
+        property_id: 41,
+        phone_item_id: 51,
+      },
+      items: {
+        brain_item: createPodioItem(11),
+        phone_item: createPodioItem(51),
+      },
+    }),
+    classify: async () => ({
+      language: "English",
+      source: "test",
+    }),
+    resolveRoute: () => ({
+      stage: "Ownership",
+      use_case: "ownership_check",
+      seller_profile: null,
+    }),
+    logInboundMessageEvent: async () => {},
+    updateBrainAfterInbound: async () => {},
+    updateBrainStage: async (payload) => {
+      stage_updates.push(payload);
+      return { ok: true };
+    },
+    updateBrainLanguage: async () => ({ ok: true }),
+    updateBrainSellerProfile: async () => ({ ok: true }),
+    findLatestOpenOffer: async () => null,
+    maybeProgressOfferStatus: async () => ({ ok: true, updated: false }),
+    maybeCreateOfferFromContext: async () => ({ ok: true, created: false }),
+    maybeUpsertUnderwritingFromInbound: async () => ({ ok: true, extracted: true }),
+    maybeQueueSellerStageReply: async () => ({
+      ok: true,
+      queued: true,
+      handled: true,
+      reason: "seller_flow_reply_queued",
+      brain_stage: "Offer",
+      plan: {
+        selected_use_case: "consider_selling",
+      },
+    }),
+    maybeQueueUnderwritingFollowUp: async () => {
+      underwriting_follow_up_count += 1;
+      return { ok: true, queued: true };
+    },
+    maybeCreateContractFromAcceptedOffer: async () => ({ ok: true, created: false }),
+    syncPipelineState: async () => ({ pipeline_item_id: 61, current_stage: "Offer" }),
+  });
+
+  const result = await handleTextgridInboundWebhook({
+    message_id: "sms-stage-1",
+    from: "+15550000001",
+    to: "+15550000002",
+    body: "Yes, I own it.",
+    status: "received",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.seller_stage_reply.queued, true);
+  assert.equal(result.underwriting_follow_up.reason, "suppressed_by_seller_stage_reply");
+  assert.equal(underwriting_follow_up_count, 0);
+  assert.deepEqual(
+    stage_updates.map((entry) => entry.stage),
+    ["Ownership", "Offer"]
+  );
 });
 
 test("delivery webhook ignores replay after exact queue correlation succeeds", async () => {
   const ledger = createInMemoryIdempotencyLedger();
   const queueUpdates = [];
+  const deliveryLogPayloads = [];
   let deliveryEventCount = 0;
   let eventStatusUpdateCount = 0;
   let brainDeliveryUpdateCount = 0;
@@ -164,8 +252,9 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
     updateItem: async (item_id, payload) => {
       queueUpdates.push({ item_id, payload });
     },
-    logDeliveryEvent: async () => {
+    logDeliveryEvent: async (payload) => {
       deliveryEventCount += 1;
+      deliveryLogPayloads.push(payload);
     },
     updateMessageEventStatus: async () => {
       eventStatusUpdateCount += 1;
@@ -196,6 +285,7 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
   assert.equal(second.duplicate, true);
   assert.equal(queueUpdates.length, 1);
   assert.equal(deliveryEventCount, 1);
+  assert.equal(deliveryLogPayloads[0].conversation_item_id, 701);
   assert.equal(eventStatusUpdateCount, 1);
   assert.equal(brainDeliveryUpdateCount, 1);
 });

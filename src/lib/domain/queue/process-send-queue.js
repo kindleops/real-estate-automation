@@ -37,6 +37,13 @@ import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
+import { findPropertyItems } from "@/lib/podio/apps/properties.js";
+import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
+import {
+  deriveCanonicalSellerFlowFromTemplate,
+  inferCanonicalUseCaseFromOutboundText,
+  canonicalStageForUseCase,
+} from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 
 import { info, warn } from "@/lib/logging/logger.js";
 
@@ -73,11 +80,14 @@ const EVENT_FIELDS = {
   message_id: "message-id",
   timestamp: "timestamp",
   direction: "direction",
+  message_variant: "message-variant",
   master_owner: "master-owner",
   prospect: "linked-seller",
   property: "property",
   textgrid_number: "textgrid-number",
   phone_number: "phone-number",
+  conversation: "conversation",
+  market: "market",
   ai_route: "ai-route",
   processed_by: "processed-by",
   source_app: "source-app",
@@ -87,6 +97,7 @@ const EVENT_FIELDS = {
   character_count: "character-count",
   delivery_status: "status-3",
   raw_carrier_status: "status-2",
+  latency_ms: "latency-ms",
   failure_bucket: "failure-bucket",
   is_final_failure: "is-final-failure",
   ai_output: "ai-output",
@@ -313,12 +324,22 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
 
   const started_at = Date.now();
 
-  const [master_owner_item, property_item, queued_market_item, agent_item] = await Promise.all([
+  const [master_owner_item, queued_property_item, queued_market_item, agent_item] = await Promise.all([
     safeGetItem(master_owner_id),
     safeGetItem(property_id),
     safeGetItem(market_id),
     safeGetItem(sms_agent_id),
   ]);
+  let property_item = queued_property_item;
+
+  if (!property_item?.item_id && master_owner_id) {
+    try {
+      const response = await findPropertyItems({ "master-owner": master_owner_id }, 1, 0);
+      property_item = response?.items?.[0] ?? response?.[0] ?? null;
+    } catch (_error) {
+      property_item = null;
+    }
+  }
 
   const derived_market_id =
     queued_market_item?.item_id ??
@@ -488,9 +509,43 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     ok: true,
     deferred: true,
     template_id: selected_template.item_id,
+    template_item: selected_template.raw || null,
+    canonical_flow: deriveCanonicalSellerFlowFromTemplate(selected_template),
     message_text: rendered_message_text,
     queue_item: refreshed_queue_item || queue_item,
     route,
+  };
+}
+
+async function resolveCanonicalSellerFlowForQueue({
+  template_id = null,
+  template_item = null,
+  message_body = "",
+} = {}) {
+  let candidate_template = template_item || null;
+
+  if (!candidate_template && template_id) {
+    candidate_template = await safeGetItem(template_id);
+  }
+
+  if (candidate_template) {
+    const normalized_template =
+      candidate_template.raw && candidate_template.text
+        ? candidate_template
+        : normalizeTemplateItem(candidate_template);
+    const derived = deriveCanonicalSellerFlowFromTemplate(normalized_template);
+    if (derived) return derived;
+  }
+
+  const inferred_use_case = inferCanonicalUseCaseFromOutboundText(message_body);
+  if (!inferred_use_case) return null;
+
+  return {
+    selected_use_case: inferred_use_case,
+    template_use_case: null,
+    next_expected_stage: canonicalStageForUseCase(inferred_use_case),
+    selected_variant_group: null,
+    selected_tone: null,
   };
 }
 
@@ -539,27 +594,78 @@ async function resolveBrainForQueue({ master_owner_id, prospect_id }) {
   return null;
 }
 
+async function resolveQueuePropertyAndMarket({
+  property_id = null,
+  market_id = null,
+  master_owner_id = null,
+} = {}) {
+  const queued_property_item = await safeGetItem(property_id);
+  let property_item = queued_property_item;
+
+  if (!property_item?.item_id && master_owner_id) {
+    try {
+      const response = await findPropertyItems({ "master-owner": master_owner_id }, 1, 0);
+      property_item = response?.items?.[0] ?? response?.[0] ?? null;
+    } catch (_error) {
+      property_item = null;
+    }
+  }
+
+  const queued_market_item = await safeGetItem(market_id);
+  const derived_market_id =
+    queued_market_item?.item_id ??
+    getFirstAppReferenceId(property_item, "market-2", null) ??
+    getFirstAppReferenceId(property_item, "market", null) ??
+    null;
+
+  const market_item =
+    queued_market_item?.item_id && String(queued_market_item.item_id) === String(derived_market_id || "")
+      ? queued_market_item
+      : await safeGetItem(derived_market_id);
+
+  return {
+    property_item,
+    market_item,
+    property_id: property_item?.item_id ?? property_id ?? null,
+    market_id: market_item?.item_id ?? derived_market_id ?? market_id ?? null,
+  };
+}
+
 async function logFailedOutboundMessageEvent({
+  brain_item = null,
+  conversation_item_id = null,
   queue_item_id,
   master_owner_id,
   prospect_id,
   property_id,
+  market_id,
+  phone_item_id,
   outbound_number_item_id,
   template_id,
   message_body,
+  message_variant = null,
+  latency_ms = null,
+  selected_use_case = null,
+  template_use_case = null,
+  next_expected_stage = null,
+  selected_variant_group = null,
+  selected_tone = null,
   send_result,
   retry_count,
   max_retries,
   client_reference_id,
 }) {
+  const ai_route = getCategoryValue(brain_item, "ai-route", null);
+  const resolved_message_id = send_result.message_id || client_reference_id || null;
+
   return createMessageEvent({
-    [EVENT_FIELDS.message_id]: send_result.message_id || null,
+    [EVENT_FIELDS.message_id]: resolved_message_id,
     [EVENT_FIELDS.direction]: "Outbound",
     [EVENT_FIELDS.timestamp]: { start: nowIso() },
     [EVENT_FIELDS.message]: message_body,
     [EVENT_FIELDS.character_count]: String(message_body || "").length,
     [EVENT_FIELDS.delivery_status]: "Failed",
-    [EVENT_FIELDS.raw_carrier_status]: String(send_result.error_status || ""),
+    [EVENT_FIELDS.raw_carrier_status]: String(send_result.error_status || send_result.status || ""),
     [EVENT_FIELDS.failure_bucket]: mapTextgridFailureBucket(send_result) || "Other",
     [EVENT_FIELDS.is_final_failure]: retry_count + 1 >= max_retries ? "Yes" : "No",
     [EVENT_FIELDS.processed_by]: "Scheduled Campaign",
@@ -572,13 +678,37 @@ async function logFailedOutboundMessageEvent({
         client_reference_id,
         provider_message_id: send_result.message_id,
         event_kind: "outbound_send_failed",
+        message_variant,
+        master_owner_id,
+        prospect_id,
+        property_id,
+        market_id,
+        phone_item_id,
+        outbound_number_item_id,
+        conversation_item_id,
+        template_id,
+        selected_use_case: clean(selected_use_case) || null,
+        template_use_case: clean(template_use_case) || null,
+        next_expected_stage: clean(next_expected_stage) || null,
+        selected_variant_group: clean(selected_variant_group) || null,
+        selected_tone: clean(selected_tone) || null,
       })
     ),
+    ...(message_variant !== null && message_variant !== undefined
+      ? { [EVENT_FIELDS.message_variant]: Number(message_variant) || 0 }
+      : {}),
     ...(master_owner_id ? { [EVENT_FIELDS.master_owner]: master_owner_id } : {}),
     ...(prospect_id ? { [EVENT_FIELDS.prospect]: prospect_id } : {}),
     ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
+    ...(market_id ? { [EVENT_FIELDS.market]: market_id } : {}),
+    ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
     ...(outbound_number_item_id ? { [EVENT_FIELDS.textgrid_number]: outbound_number_item_id } : {}),
+    ...(conversation_item_id ? { [EVENT_FIELDS.conversation]: conversation_item_id } : {}),
     ...(template_id ? { [EVENT_FIELDS.template_selected]: template_id } : {}),
+    ...(latency_ms !== null && latency_ms !== undefined
+      ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }
+      : {}),
+    ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
   });
 }
 
@@ -604,15 +734,22 @@ async function failQueueItem(
   await updateItem(queue_item_id, payload);
 }
 
-async function claimQueueItemForSending(queue_item_id, queue_item, retry_count) {
+async function claimQueueItemForSending(
+  queue_item_id,
+  queue_item,
+  retry_count,
+  extra_fields = {}
+) {
   const revision = extractItemRevision(queue_item);
+  const payload = {
+    ...extra_fields,
+    [QUEUE_FIELDS.queue_status]: "Sending",
+    [QUEUE_FIELDS.retry_count]: retry_count + 1,
+    [QUEUE_FIELDS.delivery_confirmed]: "⏳ Pending",
+  };
 
   if (revision === null) {
-    await updateItem(queue_item_id, {
-      [QUEUE_FIELDS.queue_status]: "Sending",
-      [QUEUE_FIELDS.retry_count]: retry_count + 1,
-      [QUEUE_FIELDS.delivery_confirmed]: "⏳ Pending",
-    });
+    await updateItem(queue_item_id, payload);
 
     return {
       ok: true,
@@ -622,15 +759,7 @@ async function claimQueueItemForSending(queue_item_id, queue_item, retry_count) 
   }
 
   try {
-    await updateItem(
-      queue_item_id,
-      {
-        [QUEUE_FIELDS.queue_status]: "Sending",
-        [QUEUE_FIELDS.retry_count]: retry_count + 1,
-        [QUEUE_FIELDS.delivery_confirmed]: "⏳ Pending",
-      },
-      revision
-    );
+    await updateItem(queue_item_id, payload, revision);
 
     return {
       ok: true,
@@ -656,12 +785,21 @@ export async function finalizeSuccessfulQueueSend({
   phone_item_id,
   brain_id = null,
   brain_item = null,
+  conversation_item_id = null,
   master_owner_id = null,
   prospect_id = null,
   property_id = null,
+  market_id = null,
   outbound_number_item_id = null,
   template_id = null,
   message_body = "",
+  message_variant = null,
+  latency_ms = null,
+  selected_use_case = null,
+  template_use_case = null,
+  next_expected_stage = null,
+  selected_variant_group = null,
+  selected_tone = null,
   send_result = {},
   current_total_messages_sent = 0,
   client_reference_id = null,
@@ -688,9 +826,11 @@ export async function finalizeSuccessfulQueueSend({
   try {
     await logOutbound({
       brain_item,
+      conversation_item_id: conversation_item_id || brain_id,
       master_owner_id,
       prospect_id,
       property_id,
+      market_id,
       phone_item_id,
       outbound_number_item_id,
       message_body,
@@ -698,7 +838,14 @@ export async function finalizeSuccessfulQueueSend({
       queue_item_id,
       client_reference_id,
       template_id,
+      message_variant,
+      latency_ms,
       send_result,
+      ...(selected_use_case ? { selected_use_case } : {}),
+      ...(template_use_case ? { template_use_case } : {}),
+      ...(next_expected_stage ? { next_expected_stage } : {}),
+      ...(selected_variant_group ? { selected_variant_group } : {}),
+      ...(selected_tone ? { selected_tone } : {}),
     });
   } catch (error) {
     bookkeeping_errors.push(
@@ -838,6 +985,15 @@ export async function processSendQueueItem(queue_item_id) {
   const master_owner_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.master_owner, null);
   const prospect_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null);
   const property_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.properties, null);
+  const market_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.market, null);
+  const message_variant = getTouchNumber(queue_item);
+  const canonical_flow =
+    message_resolution.canonical_flow ||
+    (await resolveCanonicalSellerFlowForQueue({
+      template_id,
+      template_item: message_resolution.template_item || null,
+      message_body,
+    }));
 
   const [phone_item, outbound_number_item, brain_item] = await Promise.all([
     initial_phone_item && String(initial_phone_item?.item_id || "") === String(phone_item_id)
@@ -850,6 +1006,12 @@ export async function processSendQueueItem(queue_item_id) {
   ]);
 
   const brain_id = brain_item?.item_id ?? null;
+  const { property_id: resolved_property_id, market_id: resolved_market_id } =
+    await resolveQueuePropertyAndMarket({
+      property_id,
+      market_id,
+      master_owner_id,
+    });
 
   const phone_validation = validateActivePhone(phone_item);
 
@@ -924,7 +1086,21 @@ export async function processSendQueueItem(queue_item_id) {
     };
   }
 
-  const claim = await claimQueueItemForSending(queue_item_id, queue_item, retry_count);
+  const queue_context_updates = {
+    ...(!property_id && resolved_property_id
+      ? { [QUEUE_FIELDS.properties]: [resolved_property_id] }
+      : {}),
+    ...(!market_id && resolved_market_id
+      ? { [QUEUE_FIELDS.market]: [resolved_market_id] }
+      : {}),
+  };
+
+  const claim = await claimQueueItemForSending(
+    queue_item_id,
+    queue_item,
+    retry_count,
+    queue_context_updates
+  );
 
   if (!claim.ok) {
     info("queue.process_skipped_claim_conflict", {
@@ -939,6 +1115,7 @@ export async function processSendQueueItem(queue_item_id) {
     };
   }
 
+  const send_started_at = Date.now();
   const send_result = await sendTextgridSMS({
     to: to_number,
     from: from_number,
@@ -946,6 +1123,7 @@ export async function processSendQueueItem(queue_item_id) {
     message_type: "sms",
     client_reference_id,
   });
+  const latency_ms = Date.now() - send_started_at;
 
   if (!send_result.ok) {
     const failed_reason = mapFailureReasonToQueueCategory(send_result);
@@ -972,13 +1150,24 @@ export async function processSendQueueItem(queue_item_id) {
 
     try {
       await logFailedOutboundMessageEvent({
+        brain_item,
+        conversation_item_id: brain_id,
         queue_item_id,
         master_owner_id,
         prospect_id,
-        property_id,
+        property_id: resolved_property_id,
+        market_id: resolved_market_id,
+        phone_item_id,
         outbound_number_item_id,
         template_id,
         message_body,
+        message_variant,
+        latency_ms,
+        selected_use_case: canonical_flow?.selected_use_case || null,
+        template_use_case: canonical_flow?.template_use_case || null,
+        next_expected_stage: canonical_flow?.next_expected_stage || null,
+        selected_variant_group: canonical_flow?.selected_variant_group || null,
+        selected_tone: canonical_flow?.selected_tone || null,
         send_result,
         retry_count,
         max_retries,
@@ -1009,12 +1198,21 @@ export async function processSendQueueItem(queue_item_id) {
     phone_item_id,
     brain_id,
     brain_item,
+    conversation_item_id: brain_id,
     master_owner_id,
     prospect_id,
-    property_id,
+    property_id: resolved_property_id,
+    market_id: resolved_market_id,
     outbound_number_item_id,
     template_id,
     message_body,
+    message_variant,
+    latency_ms,
+    selected_use_case: canonical_flow?.selected_use_case || null,
+    template_use_case: canonical_flow?.template_use_case || null,
+    next_expected_stage: canonical_flow?.next_expected_stage || null,
+    selected_variant_group: canonical_flow?.selected_variant_group || null,
+    selected_tone: canonical_flow?.selected_tone || null,
     send_result,
     current_total_messages_sent,
     client_reference_id,

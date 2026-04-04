@@ -8,6 +8,7 @@ import { deriveContextSummary } from "@/lib/domain/context/derive-context-summar
 import { derivePhoneDisqualification } from "@/lib/domain/context/phone-disqualification.js";
 import { loadRecentEvents } from "@/lib/domain/context/load-recent-events.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
+import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 
 const CONTEXT_LOAD_TIMEOUT_MS = 30_000;
 
@@ -95,7 +96,16 @@ async function _loadContextInner({
   const master_owner_id = getFirstAppReferenceId(phone_item, "linked-master-owner", null);
   const owner_id = getFirstAppReferenceId(phone_item, "linked-owner", null);
   const prospect_id = getFirstAppReferenceId(phone_item, "linked-contact", null);
-  const property_id = getFirstAppReferenceId(phone_item, "primary-property", null);
+  let property_id = getFirstAppReferenceId(phone_item, "primary-property", null);
+
+  if (!property_id && master_owner_id) {
+    try {
+      const response = await findPropertyItems({ "master-owner": master_owner_id }, 1, 0);
+      property_id = response?.items?.[0]?.item_id ?? response?.[0]?.item_id ?? null;
+    } catch (_error) {
+      property_id = null;
+    }
+  }
 
   const log = child({
     inbound_from: normalized_phone,

@@ -1,5 +1,6 @@
 // ─── log-delivery-event.js ───────────────────────────────────────────────
 import { createMessageEvent } from "@/lib/providers/podio.js";
+import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
 import { mapTextgridFailureBucket } from "@/lib/providers/textgrid.js";
 import {
   buildQueueMessageEventMetadata,
@@ -15,6 +16,7 @@ const EVENT_FIELDS = {
   property: "property",
   textgrid_number: "textgrid-number",
   phone_number: "phone-number",
+  conversation: "conversation",
   processed_by: "processed-by",
   source_app: "source-app",
   trigger_name: "trigger-name",
@@ -77,6 +79,7 @@ export async function logDeliveryEvent({
   property_id = null,
   phone_item_id = null,
   textgrid_number_item_id = null,
+  conversation_item_id = null,
   processed_by = "Delivery Webhook",
   source_app = "TextGrid",
   trigger_name = "textgrid-delivery",
@@ -115,12 +118,14 @@ export async function logDeliveryEvent({
         client_reference_id,
         provider_message_id,
         event_kind: "delivery_update",
+        conversation_item_id,
       })
     ),
     ...(master_owner_id ? { [EVENT_FIELDS.master_owner]: master_owner_id } : {}),
     ...(prospect_id ? { [EVENT_FIELDS.prospect]: prospect_id } : {}),
     ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
     ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
+    ...(conversation_item_id ? { [EVENT_FIELDS.conversation]: conversation_item_id } : {}),
     ...(textgrid_number_item_id
       ? { [EVENT_FIELDS.textgrid_number]: textgrid_number_item_id }
       : {}),
@@ -128,7 +133,14 @@ export async function logDeliveryEvent({
     ...(is_failed ? { [EVENT_FIELDS.is_final_failure]: "Yes" } : {}),
   };
 
-  return createMessageEvent(fields);
+  const created = await createMessageEvent(fields);
+
+  await linkMessageEventToBrain({
+    brain_id: conversation_item_id || null,
+    message_event_id: created?.item_id ?? null,
+  });
+
+  return created;
 }
 
 export default logDeliveryEvent;

@@ -6,8 +6,10 @@ import {
   getCategoryValue,
   getDateValue,
   getFirstAppReferenceId,
+  getNumberValue,
   getTextValue,
 } from "@/lib/providers/podio.js";
+import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
 
 const DEFAULT_LIMIT = 10;
 
@@ -26,6 +28,8 @@ function sortByTimestampDesc(items = []) {
 }
 
 function normalizeMessageEvent(item) {
+  const metadata = parseMessageEventMetadata(item);
+
   return {
     item_id: item?.item_id ?? null,
     message_id: getTextValue(item, "message-id", ""),
@@ -38,11 +42,30 @@ function normalizeMessageEvent(item) {
     processed_by: getCategoryValue(item, "processed-by", null),
     source_app: getCategoryValue(item, "source-app", null),
     trigger_name: getTextValue(item, "trigger-name", null),
+    message_variant:
+      getNumberValue(item, "message-variant", null) ??
+      metadata?.message_variant ??
+      null,
     phone_item_id: getFirstAppReferenceId(item, "phone-number", null),
     textgrid_number_item_id: getFirstAppReferenceId(item, "textgrid-number", null),
     master_owner_id: getFirstAppReferenceId(item, "master-owner", null),
     prospect_id: getFirstAppReferenceId(item, "linked-seller", null),
     property_id: getFirstAppReferenceId(item, "property", null),
+    market_id: getFirstAppReferenceId(item, "market", null),
+    conversation_item_id: getFirstAppReferenceId(item, "conversation", null),
+    template_id:
+      getFirstAppReferenceId(item, "template-selected", null) ??
+      metadata?.template_id ??
+      null,
+    metadata,
+    selected_use_case:
+      metadata?.selected_use_case ||
+      metadata?.canonical_use_case ||
+      null,
+    template_use_case: metadata?.template_use_case || null,
+    next_expected_stage: metadata?.next_expected_stage || null,
+    selected_variant_group: metadata?.selected_variant_group || null,
+    selected_tone: metadata?.selected_tone || null,
     raw: item,
   };
 }

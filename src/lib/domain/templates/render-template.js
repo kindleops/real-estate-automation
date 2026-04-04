@@ -121,6 +121,13 @@ function buildVariableMap(context = {}, overrides = {}) {
     summary.brain_ai_route
   );
 
+  const offer_price = firstNonEmpty(
+    overrides.offer_price,
+    overrides.smart_cash_offer_display,
+    summary.offer_price,
+    summary.smart_cash_offer_display
+  );
+
   return {
     owner_name,
     property_address,
@@ -140,6 +147,11 @@ function buildVariableMap(context = {}, overrides = {}) {
     target_net_to_seller,
     conversation_stage,
     ai_route,
+    offer_price,
+    smart_cash_offer_display: firstNonEmpty(
+      overrides.smart_cash_offer_display,
+      offer_price
+    ),
 
     // alias support
     seller_name: owner_name,

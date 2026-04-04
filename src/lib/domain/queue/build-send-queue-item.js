@@ -244,6 +244,8 @@ export async function buildSendQueueItem({
   failed_reason = null,
   sent_at = null,
   delivered_at = null,
+  create_item = createItem,
+  update_item = updateItem,
 }) {
   if (!context?.found) {
     throw new Error("buildSendQueueItem: context not found");
@@ -396,7 +398,7 @@ export async function buildSendQueueItem({
   let template_attach_warning = null;
 
   try {
-    created = await createItem(APP_IDS.send_queue, fields);
+    created = await create_item(APP_IDS.send_queue, fields);
   } catch (error) {
     if (!template_field_value || !shouldRetryQueueCreateWithoutTemplate(error)) {
       throw error;
@@ -405,7 +407,7 @@ export async function buildSendQueueItem({
     const retry_fields = { ...fields };
     delete retry_fields[QUEUE_FIELDS.template];
 
-    created = await createItem(APP_IDS.send_queue, retry_fields);
+    created = await create_item(APP_IDS.send_queue, retry_fields);
     template_attach_warning =
       "Template relation was skipped because Send Queue.template rejected the selected template reference.";
   }
@@ -416,7 +418,7 @@ export async function buildSendQueueItem({
     null;
 
   if (created?.item_id && resolved_queue_id && !queue_id) {
-    await updateItem(created.item_id, {
+    await update_item(created.item_id, {
       [QUEUE_FIELDS.queue_id]: resolved_queue_id,
     });
   }

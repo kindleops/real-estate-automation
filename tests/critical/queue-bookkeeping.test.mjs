@@ -6,6 +6,7 @@ import { createPodioItem } from "../helpers/test-helpers.js";
 
 test("finalizeSuccessfulQueueSend records a clean success path", async () => {
   const calls = [];
+  const brain_item = createPodioItem(701);
 
   const result = await finalizeSuccessfulQueueSend(
     {
@@ -13,13 +14,17 @@ test("finalizeSuccessfulQueueSend records a clean success path", async () => {
       phone_item: createPodioItem(401),
       phone_item_id: 401,
       brain_id: 701,
-      brain_item: createPodioItem(701),
+      brain_item,
+      conversation_item_id: 701,
       master_owner_id: 201,
       prospect_id: 301,
       property_id: 601,
+      market_id: 801,
       outbound_number_item_id: 501,
       template_id: 901,
       message_body: "Test message",
+      message_variant: 2,
+      latency_ms: 483,
       send_result: {
         message_id: "provider-1",
         to: "+15550000001",
@@ -51,23 +56,50 @@ test("finalizeSuccessfulQueueSend records a clean success path", async () => {
     calls.map((entry) => entry.type),
     ["updateItem", "logOutboundMessageEvent", "updateBrainAfterSend"]
   );
+  assert.deepEqual(calls[1].payload, {
+    brain_item,
+    conversation_item_id: 701,
+    master_owner_id: 201,
+    prospect_id: 301,
+    property_id: 601,
+    market_id: 801,
+    phone_item_id: 401,
+    outbound_number_item_id: 501,
+    message_body: "Test message",
+    provider_message_id: "provider-1",
+    queue_item_id: 123,
+    client_reference_id: "queue-123",
+    template_id: 901,
+    message_variant: 2,
+    latency_ms: 483,
+    send_result: {
+      message_id: "provider-1",
+      to: "+15550000001",
+      from: "+15550000002",
+    },
+  });
 });
 
 test("finalizeSuccessfulQueueSend reports partial failure if bookkeeping breaks after provider send", async () => {
   const calls = [];
+  const brain_item = createPodioItem(701);
 
   const result = await finalizeSuccessfulQueueSend(
     {
       queue_item_id: 123,
       phone_item_id: 401,
       brain_id: 701,
-      brain_item: createPodioItem(701),
+      brain_item,
+      conversation_item_id: 701,
       master_owner_id: 201,
       prospect_id: 301,
       property_id: 601,
+      market_id: 801,
       outbound_number_item_id: 501,
       template_id: 901,
       message_body: "Test message",
+      message_variant: 1,
+      latency_ms: 215,
       send_result: {
         message_id: "provider-2",
         to: "+15550000001",

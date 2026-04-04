@@ -9,8 +9,10 @@ import {
   getMasterOwnerView,
   listMasterOwnerViews,
 } from "@/lib/podio/apps/master-owners.js";
+import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { PHONE_FIELDS } from "@/lib/podio/apps/phone-numbers.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
+import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
@@ -278,6 +280,41 @@ function summarizeMasterOwner(owner_item) {
 
 function stripHtml(value) {
   return clean(value).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function parseSellerIdLocation(value) {
+  const raw = stripHtml(value);
+  if (!raw) {
+    return {
+      property_address: "",
+      property_city: "",
+      property_state: "",
+    };
+  }
+
+  const location_segment = raw
+    .split("~")
+    .map((segment) => clean(segment))
+    .find((segment) => segment.split("|").filter(Boolean).length >= 4);
+
+  if (!location_segment) {
+    return {
+      property_address: "",
+      property_city: "",
+      property_state: "",
+    };
+  }
+
+  const [property_address = "", property_city = "", property_state = ""] =
+    location_segment
+      .split("|")
+      .map((segment) => clean(segment));
+
+  return {
+    property_address,
+    property_city,
+    property_state,
+  };
 }
 
 function maskOwnerName(value) {
@@ -578,13 +615,18 @@ function summarizePhone(phone_item, slot = null) {
   };
 }
 
-function summarizeProperty(property_item) {
+function summarizeProperty(property_item, owner_item = null) {
+  const seller_id_location = parseSellerIdLocation(
+    getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "")
+  );
+
   return {
     item_id: property_item?.item_id ?? null,
     title: property_item?.title || null,
     property_address:
       getTextValue(property_item, "property-address", "") ||
       property_item?.title ||
+      seller_id_location.property_address ||
       "",
     property_class: getCategoryValue(property_item, "property-class", null),
     property_type: getCategoryValue(property_item, "property-type", null),
@@ -745,6 +787,30 @@ async function selectBestProperty(
     });
     if (property_item?.item_id) {
       return property_item;
+    }
+  }
+
+  const master_owner_id = owner_item?.item_id ?? null;
+  if (master_owner_id) {
+    try {
+      const response = await timedStage(
+        log,
+        "master_owner_feeder.property_lookup_by_master_owner",
+        {
+          master_owner_id,
+          phone_item_id: selected_phone_record?.phone_item_id ?? null,
+        },
+        () => findPropertyItems({ "master-owner": master_owner_id }, 1, 0)
+      );
+
+      const matched_property = response?.items?.[0] ?? response?.[0] ?? null;
+      if (matched_property?.item_id) {
+        return matched_property;
+      }
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        throw error;
+      }
     }
   }
 
@@ -1067,6 +1133,15 @@ function buildOwnerContext({
     getTextValue(market_item, "title", "") ||
     getCategoryValue(owner_item, MASTER_OWNER_FIELDS.markets, null) ||
     null;
+  const base_summary = deriveContextSummary({
+    phone_item,
+    brain_item,
+    master_owner_item: owner_item,
+    property_item,
+    agent_item,
+    market_item,
+    touch_count: owner_touch_count,
+  });
 
   return {
     found: true,
@@ -1077,7 +1152,7 @@ function buildOwnerContext({
       prospect_id,
       property_id,
       market_id,
-      assigned_agent_id: sms_agent_id || null,
+      assigned_agent_id: sms_agent_id || agent_item?.item_id || null,
     },
     items: {
       brain_item,
@@ -1089,18 +1164,7 @@ function buildOwnerContext({
       agent_item,
     },
     summary: {
-      phone_item_id,
-      brain_item_id: brain_item?.item_id ?? null,
-      master_owner_item_id: master_owner_id,
-      prospect_item_id: prospect_id,
-      property_item_id: property_id,
-      market_item_id: market_item?.item_id ?? null,
-      agent_item_id: agent_item?.item_id ?? null,
-      phone_hidden: getTextValue(phone_item, PHONE_FIELDS.phone_hidden, ""),
-      canonical_e164: getTextValue(phone_item, PHONE_FIELDS.canonical_e164, ""),
-      phone_activity_status: getCategoryValue(phone_item, PHONE_FIELDS.phone_activity_status, "Unknown"),
-      do_not_call: getCategoryValue(phone_item, PHONE_FIELDS.do_not_call, "FALSE"),
-      dnc_source: getCategoryValue(phone_item, PHONE_FIELDS.dnc_source, null),
+      ...base_summary,
       conversation_stage:
         getCategoryValue(brain_item, "conversation-stage", null) ||
         deriveOwnerStageHint(owner_item),
@@ -1117,25 +1181,7 @@ function buildOwnerContext({
       total_messages_sent: owner_touch_count,
       last_inbound_message: getTextValue(brain_item, "last-inbound-message", ""),
       last_outbound_message: getTextValue(brain_item, "last-outbound-message", ""),
-      owner_name:
-        getTextValue(owner_item, MASTER_OWNER_FIELDS.owner_full_name, "") ||
-        owner_item?.title ||
-        "",
       contact_window: getCategoryValue(owner_item, MASTER_OWNER_FIELDS.best_contact_window, null),
-      property_address:
-        getTextValue(property_item, "property-address", "") ||
-        property_item?.title ||
-        "",
-      property_city: getTextValue(property_item, "city", ""),
-      property_state: getTextValue(property_item, "state", ""),
-      agent_name:
-        getTextValue(agent_item, "title", "") ||
-        getTextValue(agent_item, "agent-name", "") ||
-        "",
-      agent_first_name:
-        getTextValue(agent_item, "first-name", "") ||
-        clean(getTextValue(agent_item, "title", "")).split(" ")[0] ||
-        "",
       market_name: owner_market_name,
       market_state: getTextValue(market_item, "state", ""),
       market_timezone:
@@ -1580,6 +1626,26 @@ async function evaluateOwner({
 
   const sms_agent_id = getFirstAppReferenceId(owner_item, MASTER_OWNER_FIELDS.sms_agent, null);
   const assigned_agent_id = getFirstAppReferenceId(owner_item, MASTER_OWNER_FIELDS.assigned_agent, null);
+  const resolved_agent_id = sms_agent_id || assigned_agent_id || null;
+  const agent_item = await timedStage(
+    log,
+    "master_owner_feeder.agent_resolution",
+    {
+      evaluation_depth,
+      agent_item_id: resolved_agent_id,
+    },
+    () =>
+      resolved_agent_id
+        ? safeGetItem(resolved_agent_id, {
+            runtime,
+            log,
+            call_name: "master_owner_feeder.podio_get_agent_item",
+            meta: {
+              master_owner_id,
+            },
+          })
+        : Promise.resolve(null)
+  );
 
   const market_id =
     getFirstAppReferenceId(property_item, "market-2", null) ||
@@ -1592,8 +1658,8 @@ async function evaluateOwner({
     property_item,
     market_item: null,
     brain_item: null,
-    agent_item: null,
-    sms_agent_id,
+    agent_item,
+    sms_agent_id: resolved_agent_id,
     owner_touch_count,
   });
 
@@ -1714,7 +1780,7 @@ async function evaluateOwner({
       reason: "template_not_found",
       owner: owner_summary,
       phone: selected_phone_record.summary,
-      property: summarizeProperty(property_item),
+      property: summarizeProperty(property_item, owner_item),
       outbound_number_source: outbound_number.source,
       outbound_number_diagnostics: outbound_number.diagnostics || null,
     };
@@ -1739,7 +1805,7 @@ async function evaluateOwner({
       reason: "rendered_message_empty",
       owner: owner_summary,
       phone: selected_phone_record.summary,
-      property: summarizeProperty(property_item),
+      property: summarizeProperty(property_item, owner_item),
       template_id: selected_template.item_id,
     };
   }
@@ -1748,6 +1814,7 @@ async function evaluateOwner({
     now,
     timezone_label: resolved_timezone,
     contact_window: resolved_contact_window,
+    distribution_key: rotation_key,
   });
 
   const plan = {
@@ -1756,7 +1823,7 @@ async function evaluateOwner({
     owner_name: owner_summary.owner_name,
     phone_item_id: selected_phone_record.phone_item_id,
     phone: selected_phone_record.summary,
-    property: summarizeProperty(property_item),
+    property: summarizeProperty(property_item, owner_item),
     brain_item_id: null,
     assigned_agent_id: sms_agent_id || assigned_agent_id || null,
     market_id,

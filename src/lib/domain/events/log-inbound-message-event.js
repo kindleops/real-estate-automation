@@ -11,6 +11,7 @@ const EVENT_FIELDS = {
   property: "property",
   textgrid_number: "textgrid-number",
   phone_number: "phone-number",
+  conversation: "conversation",
   ai_route: "ai-route",
   processed_by: "processed-by",
   source_app: "source-app",
@@ -27,6 +28,7 @@ function nowIso() {
 
 export async function logInboundMessageEvent({
   brain_item = null,
+  conversation_item_id = null,
   master_owner_id = null,
   prospect_id = null,
   property_id = null,
@@ -58,6 +60,9 @@ export async function logInboundMessageEvent({
     ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
     ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
     ...(inbound_number_item_id ? { [EVENT_FIELDS.textgrid_number]: inbound_number_item_id } : {}),
+    ...((conversation_item_id || brain_item?.item_id)
+      ? { [EVENT_FIELDS.conversation]: conversation_item_id || brain_item?.item_id }
+      : {}),
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
   };
 
@@ -65,7 +70,7 @@ export async function logInboundMessageEvent({
 
   await linkMessageEventToBrain({
     brain_item,
-    brain_id: brain_item?.item_id ?? null,
+    brain_id: conversation_item_id || brain_item?.item_id || null,
     message_event_id: created?.item_id ?? null,
   });
 

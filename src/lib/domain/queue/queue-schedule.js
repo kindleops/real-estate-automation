@@ -8,6 +8,15 @@ function lower(value) {
   return clean(value).toLowerCase();
 }
 
+function hashString(value) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
+
 function pad2(value) {
   return String(value).padStart(2, "0");
 }
@@ -175,10 +184,61 @@ function shouldSendNow(current_minutes, window) {
   return current_minutes >= window.start || current_minutes <= window.end;
 }
 
+function getWindowDurationMinutes(window) {
+  if (!window) return 0;
+
+  if (window.end >= window.start) {
+    return Math.max(0, window.end - window.start);
+  }
+
+  return Math.max(0, (24 * 60 - window.start) + window.end);
+}
+
+function pickDistributedWindowMinute(window, distribution_key = null) {
+  if (!window) return 0;
+
+  const duration = getWindowDurationMinutes(window);
+  if (!distribution_key || duration <= 0) {
+    return window.start;
+  }
+
+  const guard_band = duration >= 30 ? 5 : 0;
+  const usable_span = Math.max(1, duration - guard_band * 2);
+  const offset = guard_band + (Math.abs(hashString(String(distribution_key))) % usable_span);
+
+  return (window.start + offset) % (24 * 60);
+}
+
+function clampToPositiveInteger(value, fallback = 0) {
+  const numeric = Math.round(Number(value));
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return Math.max(0, Math.round(Number(fallback) || 0));
+  }
+  return numeric;
+}
+
+function pickDeterministicDelayMinutes(
+  min_minutes = 0,
+  max_minutes = 0,
+  distribution_key = null
+) {
+  const lower_bound = clampToPositiveInteger(min_minutes, 0);
+  const upper_bound = clampToPositiveInteger(max_minutes, lower_bound);
+  const min = Math.min(lower_bound, upper_bound);
+  const max = Math.max(lower_bound, upper_bound);
+
+  if (max <= min) return min;
+  if (!distribution_key) return min;
+
+  const span = max - min + 1;
+  return min + (Math.abs(hashString(String(distribution_key))) % span);
+}
+
 export function resolveQueueSchedule({
   now = new Date().toISOString(),
   timezone_label = "Central",
   contact_window = null,
+  distribution_key = null,
 } = {}) {
   const base_date = new Date(now || Date.now());
   const safe_now = Number.isNaN(base_date.getTime()) ? new Date() : base_date;
@@ -220,8 +280,12 @@ export function resolveQueueSchedule({
         ? addLocalDays(local_now_parts, 0)
         : addLocalDays(local_now_parts, 0);
 
-  const start_hour = Math.floor(parsed_window.start / 60);
-  const start_minute = parsed_window.start % 60;
+  const scheduled_minute_of_day = pickDistributedWindowMinute(
+    parsed_window,
+    distribution_key
+  );
+  const start_hour = Math.floor(scheduled_minute_of_day / 60);
+  const start_minute = scheduled_minute_of_day % 60;
   const scheduled_local_parts = {
     ...target_date,
     hour: start_hour,
@@ -244,8 +308,44 @@ export function resolveQueueSchedule({
     timeZone,
     timezone_label: clean(timezone_label) || "Central",
     contact_window: clean(contact_window) || null,
-    reason: "outside_contact_window_schedule_at_window_start",
+    reason: distribution_key
+      ? "outside_contact_window_schedule_within_window"
+      : "outside_contact_window_schedule_at_window_start",
     within_contact_window: false,
+  };
+}
+
+export function resolveLatencyAwareQueueSchedule({
+  now = new Date().toISOString(),
+  timezone_label = "Central",
+  contact_window = null,
+  distribution_key = null,
+  delay_min_minutes = 0,
+  delay_max_minutes = 0,
+} = {}) {
+  const agent_delay_minutes = pickDeterministicDelayMinutes(
+    delay_min_minutes,
+    delay_max_minutes,
+    distribution_key
+  );
+
+  const base_date = new Date(now || Date.now());
+  const safe_now = Number.isNaN(base_date.getTime()) ? new Date() : base_date;
+  const delayed_now = new Date(safe_now.getTime() + agent_delay_minutes * 60_000);
+
+  const schedule = resolveQueueSchedule({
+    now: delayed_now.toISOString(),
+    timezone_label,
+    contact_window,
+    distribution_key,
+  });
+
+  return {
+    ...schedule,
+    agent_delay_minutes,
+    delay_min_minutes: clampToPositiveInteger(delay_min_minutes, 0),
+    delay_max_minutes: clampToPositiveInteger(delay_max_minutes, 0),
+    delayed_now_utc: toPodioDateTimeString(delayed_now),
   };
 }
 
@@ -253,4 +353,5 @@ export default {
   mapQueueTimezoneToIana,
   parseQueueContactWindow,
   resolveQueueSchedule,
+  resolveLatencyAwareQueueSchedule,
 };

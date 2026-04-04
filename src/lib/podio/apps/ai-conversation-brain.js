@@ -14,6 +14,7 @@ export const BRAIN_FIELDS = {
   prospect: "prospect",
   master_owner: "master-owner",
   properties: "properties",
+  linked_message_events: "linked-message-events",
   ai_agent_assigned: "ai-agent-assigned",
   sms_agent: "sms-agent",
   last_template_sent: "last-template-sent",

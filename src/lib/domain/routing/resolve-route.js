@@ -282,6 +282,24 @@ function routeOverrideForUseCase({ use_case, seller_profile = null } = {}) {
   return base;
 }
 
+function isInitialOwnershipOutbound({
+  message = "",
+  compliance_flag = null,
+  objection = null,
+  use_case = null,
+  stage = null,
+  lifecycle_stage = null,
+} = {}) {
+  return (
+    !clean(message) &&
+    !compliance_flag &&
+    !objection &&
+    use_case === "ownership_check" &&
+    stage === STAGES.OWNERSHIP &&
+    lifecycle_stage === LIFECYCLE_STAGES.OWNERSHIP
+  );
+}
+
 function isCloseLifecycleStage(lifecycle_stage) {
   return [
     LIFECYCLE_STAGES.TITLE,
@@ -1170,7 +1188,7 @@ export function resolveRoute({
     message: resolved_message,
   });
 
-  const persona = normalizePersona(
+  const base_persona = normalizePersona(
     personaFromSignals({
       language,
       objection,
@@ -1198,18 +1216,31 @@ export function resolveRoute({
     stage: hinted_lifecycle_stage,
   });
   const stage = collapseLifecycleStage(lifecycle_stage, detected_stage);
+  const is_initial_ownership_outbound = isInitialOwnershipOutbound({
+    message: resolved_message,
+    compliance_flag,
+    objection,
+    use_case,
+    stage,
+    lifecycle_stage,
+  });
   const route_override = routeOverrideForUseCase({
     use_case,
     seller_profile,
   });
+  const resolved_persona = is_initial_ownership_outbound
+    ? "Warm Professional"
+    : base_persona;
 
-  const brain_ai_route = aiRouteFromSignals({
-    compliance_flag,
-    objection,
-    emotion,
-    stage,
-    seller_profile,
-  });
+  const brain_ai_route = is_initial_ownership_outbound
+    ? "Soft"
+    : aiRouteFromSignals({
+        compliance_flag,
+        objection,
+        emotion,
+        stage,
+        seller_profile,
+      });
 
   const primary_category = primaryCategoryFromSignals({
     seller_profile,
@@ -1233,11 +1264,13 @@ export function resolveRoute({
 
   const resolved_tone =
     route_override?.tone ||
-    toneFromEmotion(emotion, objection);
+    (is_initial_ownership_outbound ? "Warm" : toneFromEmotion(emotion, objection));
 
   const resolved_variant_group =
     route_override?.variant_group ||
-    variantGroupFromStage(stage, objection, emotion, lifecycle_stage);
+    (is_initial_ownership_outbound
+      ? "Stage 1 — Ownership Confirmation"
+      : variantGroupFromStage(stage, objection, emotion, lifecycle_stage));
 
   const sequence_position = sequencePositionFromStage(
     stage,
@@ -1245,30 +1278,36 @@ export function resolveRoute({
     lifecycle_stage
   );
 
-  const resolved_template_agent_type = templateAgentTypeForRoute({
-    lifecycle_stage,
-    use_case,
-    language,
-    seller_profile,
-    primary_category: resolved_primary_category,
-    persona,
-  });
+  const resolved_template_agent_type = is_initial_ownership_outbound
+    ? "Warm Professional"
+    : templateAgentTypeForRoute({
+        lifecycle_stage,
+        use_case,
+        language,
+        seller_profile,
+        primary_category: resolved_primary_category,
+        persona: resolved_persona,
+      });
 
-  const resolved_fallback_agent_type = fallbackTemplateAgentTypeForRoute({
-    lifecycle_stage,
-    use_case,
-    language,
-    seller_profile,
-    primary_category: resolved_primary_category,
-  });
+  const resolved_fallback_agent_type = is_initial_ownership_outbound
+    ? "Warm Professional"
+    : fallbackTemplateAgentTypeForRoute({
+        lifecycle_stage,
+        use_case,
+        language,
+        seller_profile,
+        primary_category: resolved_primary_category,
+      });
 
-  const next_move = nextMoveFromSignals({
-    compliance_flag,
-    objection,
-    stage,
-    emotion,
-    use_case,
-  });
+  const next_move = is_initial_ownership_outbound
+    ? "Confirm ownership cleanly before moving deeper."
+    : nextMoveFromSignals({
+        compliance_flag,
+        objection,
+        stage,
+        emotion,
+        use_case,
+      });
 
   const flags = computeRouteFlags({
     objection,
@@ -1284,7 +1323,7 @@ export function resolveRoute({
     lifecycle_stage,
     objection,
     emotion,
-    persona,
+    persona: resolved_persona,
     tone: resolved_tone,
     variant_group: resolved_variant_group,
     use_case,

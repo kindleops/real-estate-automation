@@ -53,6 +53,7 @@ const EVENT_FIELDS = {
   textgrid_number: "textgrid-number",
   master_owner: "master-owner",
   prospect: "linked-seller",
+  conversation: "conversation",
 };
 
 const defaultDeps = {
@@ -366,6 +367,15 @@ async function updateQueueCandidates(candidates, normalized_state, extracted) {
 }
 
 async function resolveBrainForEvent(event_item) {
+  const conversation_item_id = runtimeDeps.getFirstAppReferenceId(
+    event_item,
+    EVENT_FIELDS.conversation,
+    null
+  );
+  if (conversation_item_id) {
+    return runtimeDeps.getItem(conversation_item_id);
+  }
+
   const prospect_id = runtimeDeps.getFirstAppReferenceId(
     event_item,
     EVENT_FIELDS.prospect,
@@ -376,6 +386,22 @@ async function resolveBrainForEvent(event_item) {
     EVENT_FIELDS.master_owner,
     null
   );
+
+  return (
+    (prospect_id ? await runtimeDeps.findLatestBrainByProspectId(prospect_id) : null) ||
+    (master_owner_id ? await runtimeDeps.findLatestBrainByMasterOwnerId(master_owner_id) : null) ||
+    null
+  );
+}
+
+async function resolveBrainForRefs({
+  conversation_item_id = null,
+  prospect_id = null,
+  master_owner_id = null,
+} = {}) {
+  if (conversation_item_id) {
+    return runtimeDeps.getItem(conversation_item_id);
+  }
 
   return (
     (prospect_id ? await runtimeDeps.findLatestBrainByProspectId(prospect_id) : null) ||
@@ -674,6 +700,21 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
 
     const primary_event = linked_events[0] || null;
     const primary_queue_item = queue_items[0] || null;
+    const primary_master_owner_id =
+      runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.master_owner, null) ||
+      runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.master_owner, null);
+    const primary_prospect_id =
+      runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.prospect, null) ||
+      runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.prospects, null);
+    const primary_conversation_item_id =
+      runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.conversation, null) ||
+      null;
+    const primary_brain_item = await resolveBrainForRefs({
+      conversation_item_id: primary_conversation_item_id,
+      prospect_id: primary_prospect_id,
+      master_owner_id: primary_master_owner_id,
+    });
+    const primary_brain_id = primary_brain_item?.item_id || primary_conversation_item_id || null;
 
     await runtimeDeps.logDeliveryEvent({
       provider_message_id: extracted.message_id,
@@ -683,12 +724,8 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
       error_status: extracted.error_status,
       queue_item_id: primary_queue_item?.item_id || exact_queue_item_ids[0] || null,
       client_reference_id: extracted.client_reference_id,
-      master_owner_id:
-        runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.master_owner, null) ||
-        runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.master_owner, null),
-      prospect_id:
-        runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.prospect, null) ||
-        runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.prospects, null),
+      master_owner_id: primary_master_owner_id,
+      prospect_id: primary_prospect_id,
       property_id:
         runtimeDeps.getFirstAppReferenceId(primary_event, "property", null) ||
         runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.properties, null),
@@ -698,6 +735,7 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
       textgrid_number_item_id:
         runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.textgrid_number, null) ||
         runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.textgrid_number, null),
+      conversation_item_id: primary_brain_id,
       trigger_name:
         primary_queue_item?.item_id
           ? `textgrid-delivery:${primary_queue_item.item_id}`

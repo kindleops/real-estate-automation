@@ -1,4 +1,29 @@
+import APP_IDS from "@/lib/config/app-ids.js";
+import PODIO_ATTACHED_BASE_SCHEMA from "@/lib/podio/schema-attached.generated.js";
+
+const BASE_BRAIN_SCHEMA =
+  PODIO_ATTACHED_BASE_SCHEMA[String(APP_IDS.ai_conversation_brain)] || null;
+
 export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
+  [String(APP_IDS.ai_conversation_brain)]: {
+    ...(BASE_BRAIN_SCHEMA || {
+      app_id: APP_IDS.ai_conversation_brain,
+      app_name: "AI Conversation Brain",
+      item_name: "Message",
+      fields: {},
+    }),
+    fields: {
+      ...(BASE_BRAIN_SCHEMA?.fields || {}),
+      "linked-message-events": {
+        label: "Linked Message Events",
+        type: "app",
+        multiple: true,
+        allowed_currencies: null,
+        referenced_app_ids: [APP_IDS.message_events],
+        options: [],
+      },
+    },
+  },
   "30644077": {
     "app_id": 30644077,
     "app_name": "Buyers (Hedge funds, flippers, institutions)",
