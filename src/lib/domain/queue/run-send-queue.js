@@ -5,6 +5,7 @@ import {
   getCategoryValue,
   getDateValue,
   getFirstAppReferenceId,
+  PodioError,
 } from "@/lib/providers/podio.js";
 
 import { processSendQueueItem } from "@/lib/domain/queue/process-send-queue.js";
@@ -24,6 +25,49 @@ function clean(value) {
 
 function lower(value) {
   return clean(value).toLowerCase();
+}
+
+function isRevisionLimitExceededError(error) {
+  if (!(error instanceof PodioError)) return false;
+  return lower(error?.message).includes(
+    "this item has exceeded the maximum number of revisions"
+  );
+}
+
+async function recordRevisionLimitAlert(
+  record_alert,
+  queue_item_id,
+  {
+    run_started_at,
+    master_owner_id = null,
+    error = null,
+  } = {}
+) {
+  try {
+    await record_alert({
+      subsystem: "queue",
+      code: "revision_limit_exceeded",
+      severity: "warning",
+      retryable: false,
+      summary: `Queue item ${queue_item_id} hit the Podio revision limit and was skipped for manual review.`,
+      dedupe_key: `queue-revision-limit:${queue_item_id}`,
+      affected_ids: [queue_item_id],
+      metadata: {
+        queue_item_id,
+        failure_bucket: "revision_limit_exceeded",
+        run_started_at,
+        master_owner_id,
+        podio_error_message: error?.message || null,
+        recovery: "manual_review_required",
+      },
+    });
+  } catch (alert_error) {
+    warn("queue.run_revision_limit_alert_failed", {
+      queue_item_id,
+      failure_bucket: "revision_limit_exceeded",
+      message: alert_error?.message || "Unknown alert recording error",
+    });
+  }
 }
 
 function toTimestamp(value) {
@@ -205,21 +249,29 @@ export async function runSendQueue({
   now = null,
   dry_run = false,
   master_owner_id = null,
-} = {}) {
+} = {}, deps = {}) {
+  const fetch_all_items = deps.fetchAllItems || fetchAllItems;
+  const process_send_queue_item =
+    deps.processSendQueueItem || processSendQueueItem;
+  const record_system_alert = deps.recordSystemAlert || recordSystemAlert;
+  const resolve_system_alert = deps.resolveSystemAlert || resolveSystemAlert;
+  const with_run_lock = deps.withRunLock || withRunLock;
+  const info_log = deps.info || info;
+  const warn_log = deps.warn || warn;
   const run_started_at = now || nowIso();
   const now_ts = toTimestamp(run_started_at) ?? Date.now();
   const now_date = new Date(run_started_at);
   const scoped_master_owner_id = Number(master_owner_id || 0) || null;
 
   async function executeRun() {
-    info("queue.run_started", {
+    info_log("queue.run_started", {
       limit,
       run_started_at,
       dry_run,
       master_owner_id: scoped_master_owner_id,
     });
 
-    const queued_items = await fetchAllItems(
+    const queued_items = await fetch_all_items(
       APP_IDS.send_queue,
       {
         "queue-status": "Queued",
@@ -251,7 +303,7 @@ export async function runSendQueue({
       })
     ).slice(0, limit);
 
-    info("queue.run_candidates_loaded", {
+    info_log("queue.run_candidates_loaded", {
       total_queued: queued_items.length,
       runnable_count: runnable_items.length,
       master_owner_id: scoped_master_owner_id,
@@ -275,7 +327,7 @@ export async function runSendQueue({
         })),
       };
 
-      info("queue.run_completed", {
+      info_log("queue.run_completed", {
         run_started_at,
         processed_count: summary.processed_count,
         sent_count: summary.sent_count,
@@ -297,7 +349,7 @@ export async function runSendQueue({
       const queue_item_id = item?.item_id;
 
       try {
-        const result = await processSendQueueItem(queue_item_id);
+        const result = await process_send_queue_item(queue_item_id);
 
         results.push({
           queue_item_id,
@@ -312,7 +364,32 @@ export async function runSendQueue({
           failed_count += 1;
         }
       } catch (err) {
-        warn("queue.run_item_crashed", {
+        if (isRevisionLimitExceededError(err)) {
+          warn_log("queue.run_item_skipped_revision_limit", {
+            queue_item_id,
+            failure_bucket: "revision_limit_exceeded",
+            message: err?.message || "Unknown queue processing error",
+          });
+
+          skipped_count += 1;
+          results.push({
+            queue_item_id,
+            ok: true,
+            skipped: true,
+            reason: "queue_item_revision_limit_exceeded",
+            failure_bucket: "revision_limit_exceeded",
+            manual_review_required: true,
+          });
+
+          await recordRevisionLimitAlert(record_system_alert, queue_item_id, {
+            run_started_at,
+            master_owner_id: scoped_master_owner_id,
+            error: err,
+          });
+          continue;
+        }
+
+        warn_log("queue.run_item_crashed", {
           queue_item_id,
           message: err?.message || "Unknown queue processing error",
         });
@@ -339,7 +416,7 @@ export async function runSendQueue({
     };
 
     if (failed_count > 0) {
-      await recordSystemAlert({
+      await record_system_alert({
         subsystem: "queue",
         code: "runner_failed_items",
         severity: "warning",
@@ -361,7 +438,7 @@ export async function runSendQueue({
         },
       });
     } else {
-      await resolveSystemAlert({
+      await resolve_system_alert({
         subsystem: "queue",
         code: "runner_failed_items",
         dedupe_key: scoped_master_owner_id
@@ -371,7 +448,7 @@ export async function runSendQueue({
       });
     }
 
-    info("queue.run_completed", {
+    info_log("queue.run_completed", {
       run_started_at,
       processed_count: summary.processed_count,
       sent_count,
@@ -383,7 +460,7 @@ export async function runSendQueue({
     return summary;
   }
 
-  return withRunLock({
+  return with_run_lock({
     scope: scoped_master_owner_id
       ? `queue-run:${scoped_master_owner_id}`
       : "queue-run",
@@ -395,7 +472,7 @@ export async function runSendQueue({
       master_owner_id: scoped_master_owner_id,
     },
     onLocked: async (lock) => {
-      await recordSystemAlert({
+      await record_system_alert({
         subsystem: "queue",
         code: "runner_overlap",
         severity: "warning",
