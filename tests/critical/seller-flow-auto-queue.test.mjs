@@ -10,7 +10,11 @@ import {
   numberField,
 } from "../helpers/test-helpers.js";
 
-function buildContext() {
+function buildContext({
+  previous_use_case = "ownership_check",
+  previous_stage = SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+  contact_window = "12PM-2PM CT",
+} = {}) {
   return {
     ids: {
       master_owner_id: 201,
@@ -28,7 +32,7 @@ function buildContext() {
       }),
     },
     summary: {
-      contact_window: "12PM-2PM CT",
+      contact_window,
       market_timezone: "Central",
       total_messages_sent: 1,
       language_preference: "English",
@@ -39,8 +43,8 @@ function buildContext() {
         {
           direction: "Outbound",
           metadata: {
-            selected_use_case: "ownership_check",
-            next_expected_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+            selected_use_case: previous_use_case,
+            next_expected_stage: previous_stage,
             selected_tone: "Warm",
           },
         },
@@ -86,4 +90,57 @@ test("seller-stage auto queue uses blank-use-case template lookup for stage 2 an
   assert.equal(queue_calls[0].variant_group, "Stage 2 Consider Selling");
   assert.equal(queue_calls[0].send_priority, "_ Normal");
   assert.equal(queue_calls[0].scheduled_for_local, "2026-04-03 12:14:00");
+});
+
+test("seller-stage stage-1 replies still respect quiet hours outside the seller local window", async () => {
+  const queue_calls = [];
+
+  const result = await maybeQueueSellerStageReply({
+    inbound_from: "+15550000001",
+    context: buildContext({
+      previous_use_case: "ownership_check",
+      previous_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+      contact_window: "9AM-8PM CT",
+    }),
+    classification: { language: "English", emotion: "calm" },
+    message: "Yes, I own it.",
+    now: "2026-04-03T03:30:00Z",
+    queue_message: async (payload) => {
+      queue_calls.push(payload);
+      return { ok: true, queue_item_id: 1001 };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.queued, true);
+  assert.equal(result.schedule.within_contact_window, false);
+  assert.match(result.schedule.scheduled_for_local, /^2026-04-03 /);
+  assert.equal(queue_calls[0].contact_window, "9AM-8PM CT");
+});
+
+test("seller-stage replies after stage 1 can send outside quiet hours with latency only", async () => {
+  const queue_calls = [];
+
+  const result = await maybeQueueSellerStageReply({
+    inbound_from: "+15550000001",
+    context: buildContext({
+      previous_use_case: "consider_selling",
+      previous_stage: SELLER_FLOW_STAGES.CONSIDER_SELLING,
+      contact_window: "9AM-8PM CT",
+    }),
+    classification: { language: "English", emotion: "calm" },
+    message: "Maybe.",
+    now: "2026-04-03T03:30:00Z",
+    queue_message: async (payload) => {
+      queue_calls.push(payload);
+      return { ok: true, queue_item_id: 1002 };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.queued, true);
+  assert.equal(result.schedule.within_contact_window, true);
+  assert.equal(result.schedule.scheduled_for_local, "2026-04-02 22:44:00");
+  assert.equal(queue_calls[0].contact_window, "12AM-11:59PM CT");
+  assert.equal(queue_calls[0].use_case, "asking_price");
 });

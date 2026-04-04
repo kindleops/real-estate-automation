@@ -24,6 +24,11 @@ import {
 import { LIFECYCLE_STAGES, STAGES } from "@/lib/config/stages.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import {
+  canonicalStageForUseCase,
+  inferCanonicalUseCaseFromOutboundText,
+  preferredAgentTypeForSellerFlow,
+} from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import {
   chooseTextgridNumber,
   loadUsableTextgridNumbers,
 } from "@/lib/domain/routing/choose-textgrid-number.js";
@@ -45,6 +50,7 @@ import {
   getTextValue,
   normalizeLanguage,
 } from "@/lib/providers/podio.js";
+import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
 import { child, info, warn } from "@/lib/logging/logger.js";
 
 const DEFAULT_BATCH_SIZE = 25;
@@ -1089,6 +1095,113 @@ function findRecentDuplicate(history, phone_item_id, cutoff_ts) {
   };
 }
 
+function sortHistoryEventsDesc(events = []) {
+  return [...(events || [])].sort((left, right) => {
+    const left_ts = toTimestamp(getDateValue(left, "timestamp", null));
+    const right_ts = toTimestamp(getDateValue(right, "timestamp", null));
+    return right_ts - left_ts;
+  });
+}
+
+function resolveLatestOutboundSellerFlow(history = null) {
+  const latest_event = sortHistoryEventsDesc(history?.outbound_events || [])[0] || null;
+  if (!latest_event) return null;
+
+  const metadata = parseMessageEventMetadata(latest_event);
+  const message_body = getTextValue(latest_event, "message", "");
+  const selected_use_case = clean(
+    metadata.selected_use_case ||
+      metadata.template_use_case ||
+      inferCanonicalUseCaseFromOutboundText(message_body)
+  );
+  const next_expected_stage = clean(
+    metadata.next_expected_stage || canonicalStageForUseCase(selected_use_case)
+  );
+
+  return {
+    event_item: latest_event,
+    metadata,
+    selected_use_case: selected_use_case || null,
+    template_use_case: clean(metadata.template_use_case) || null,
+    selected_variant_group: clean(metadata.selected_variant_group) || null,
+    selected_tone: clean(metadata.selected_tone) || null,
+    next_expected_stage: next_expected_stage || null,
+  };
+}
+
+function deriveNoReplyFollowUpPlan({
+  history = null,
+  default_category = "Residential",
+  default_tone = "Warm",
+} = {}) {
+  const latest = resolveLatestOutboundSellerFlow(history);
+  const base_use_case = clean(latest?.selected_use_case);
+
+  if (!base_use_case) return null;
+
+  const tone = latest?.selected_tone || default_tone;
+
+  const stage_follow_up = (variant_group, category = default_category, paired_with_agent_type = null) => ({
+    base_use_case,
+    template_lookup_use_case: "follow_up",
+    variant_group,
+    tone,
+    category,
+    secondary_category: "Follow-Up",
+    paired_with_agent_type:
+      paired_with_agent_type ||
+      preferredAgentTypeForSellerFlow({
+        tone,
+        template_use_case: base_use_case,
+      }),
+    fallback_agent_type: "Fallback / Market-Local",
+    next_expected_stage:
+      latest?.next_expected_stage || canonicalStageForUseCase(base_use_case),
+  });
+
+  switch (base_use_case) {
+    case "ownership_check":
+      return stage_follow_up("Stage 1 — Ownership Confirmation Follow-Up");
+    case "consider_selling":
+      return stage_follow_up("Stage 2 — Consider Selling Follow-Up");
+    case "asking_price":
+      return stage_follow_up("Stage 3 — Asking Price Follow-Up");
+    case "price_works_confirm_basics":
+      return stage_follow_up("Stage 4A — Confirm Basics Follow-Up");
+    case "price_high_condition_probe":
+      return stage_follow_up("Stage 4B — Condition Probe Follow-Up");
+    case "offer_reveal":
+      return stage_follow_up("Stage 5 — Offer Reveal Follow-Up");
+    case "mf_units":
+    case "mf_units_unknown":
+      return stage_follow_up(
+        "Multifamily Underwrite — Units Follow-Up",
+        "Landlord / Multifamily",
+        "Specialist-Landlord / Market-Local"
+      );
+    case "mf_occupancy":
+      return stage_follow_up(
+        "Multifamily Underwrite — Occupancy Follow-Up",
+        "Landlord / Multifamily",
+        "Specialist-Landlord / Market-Local"
+      );
+    case "mf_rents":
+      return stage_follow_up(
+        "Multifamily Underwrite — Rents Follow-Up",
+        "Landlord / Multifamily",
+        "Specialist-Landlord / Market-Local"
+      );
+    case "mf_expenses":
+      return stage_follow_up(
+        "Multifamily Underwrite — Expenses Follow-Up",
+        "Landlord / Multifamily",
+        "Specialist-Landlord / Market-Local"
+      );
+    default:
+      return null;
+  }
+}
+
 function extractLatestOwnerContactTimestamp(owner_item, history) {
   const owner_dates = [
     getDateValue(owner_item, MASTER_OWNER_FIELDS.last_contacted_at, null),
@@ -1689,6 +1802,13 @@ async function evaluateOwner({
     owner_item,
     route?.primary_category || "Residential"
   );
+  const follow_up_plan = explicit_follow_up_due
+    ? deriveNoReplyFollowUpPlan({
+        history,
+        default_category: primary_category,
+        default_tone: route?.tone || "Warm",
+      })
+    : null;
   const secondary_category = deriveTemplateSecondaryCategory(
     property_item,
     owner_item,
@@ -1754,22 +1874,28 @@ async function evaluateOwner({
     },
     () =>
       loadTemplate({
-        category: primary_category,
-        secondary_category,
-        use_case: route?.use_case || "ownership_check",
-        variant_group: route?.variant_group || "Stage 1 — Ownership Confirmation",
-        tone: route?.tone || "Warm",
+        category: follow_up_plan?.category || primary_category,
+        secondary_category: follow_up_plan?.secondary_category ?? secondary_category,
+        use_case: follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check",
+        variant_group:
+          follow_up_plan?.variant_group ||
+          route?.variant_group ||
+          "Stage 1 — Ownership Confirmation",
+        tone: follow_up_plan?.tone || route?.tone || "Warm",
         gender_variant: "Neutral",
         language,
         sequence_position,
         paired_with_agent_type:
+          follow_up_plan?.paired_with_agent_type ||
           route?.template_filters?.paired_with_agent_type ||
           route?.persona ||
           "Warm Professional",
         recently_used_template_ids: context?.recent?.recently_used_template_ids || [],
         rotation_key,
         fallback_agent_type:
-          route?.template_filters?.fallback_agent_type || "Warm Professional",
+          follow_up_plan?.fallback_agent_type ||
+          route?.template_filters?.fallback_agent_type ||
+          "Warm Professional",
       })
   );
 
@@ -1840,17 +1966,24 @@ async function evaluateOwner({
     route: {
       stage: route?.stage || stage_hint,
       lifecycle_stage: route?.lifecycle_stage || null,
-      use_case: route?.use_case || "ownership_check",
-      tone: route?.tone || "Warm",
-      variant_group: route?.variant_group || "Stage 1 — Ownership Confirmation",
+      use_case: follow_up_plan?.base_use_case || route?.use_case || "ownership_check",
+      tone: follow_up_plan?.tone || route?.tone || "Warm",
+      variant_group:
+        follow_up_plan?.variant_group ||
+        route?.variant_group ||
+        "Stage 1 — Ownership Confirmation",
       language,
       persona:
+        follow_up_plan?.paired_with_agent_type ||
         route?.template_filters?.paired_with_agent_type ||
         route?.persona ||
         "Warm Professional",
-      category: primary_category,
-      secondary_category,
+      category: follow_up_plan?.category || primary_category,
+      secondary_category: follow_up_plan?.secondary_category ?? secondary_category,
       sequence_position,
+      next_expected_stage:
+        follow_up_plan?.next_expected_stage ||
+        canonicalStageForUseCase(route?.use_case || "ownership_check"),
     },
     touch_number,
     send_priority,
@@ -1883,10 +2016,13 @@ async function evaluateOwner({
     timezone: resolved_timezone,
     contact_window: resolved_contact_window,
     send_priority,
-    message_type: deriveQueueMessageType(
-      route?.stage || stage_hint,
-      route?.lifecycle_stage || null
-    ),
+    message_type:
+      follow_up_plan
+        ? "Follow-Up"
+        : deriveQueueMessageType(
+            route?.stage || stage_hint,
+            route?.lifecycle_stage || null
+          ),
     max_retries: 3,
     queue_status: "Queued",
     dnc_check: "✅ Cleared",

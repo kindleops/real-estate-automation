@@ -29,6 +29,45 @@ function unique(values = []) {
   return [...new Set((values || []).filter(Boolean))];
 }
 
+function deriveLatestOutboundUseCase(context = null) {
+  const recent_events = Array.isArray(context?.recent?.recent_events)
+    ? context.recent.recent_events
+    : [];
+
+  const latest_outbound = recent_events.find(
+    (event) => lower(event?.direction) === "outbound"
+  );
+
+  return lower(
+    latest_outbound?.selected_use_case ||
+      latest_outbound?.template_use_case ||
+      latest_outbound?.metadata?.selected_use_case ||
+      latest_outbound?.metadata?.template_use_case ||
+      ""
+  );
+}
+
+function isNegativeNoInfoMessage(message = "") {
+  const text = lower(message);
+
+  return (
+    /^(?:no|nope|nah|none)\b/i.test(clean(message)) ||
+    includesAny(text, [
+      "don't know",
+      "dont know",
+      "not sure",
+      "no idea",
+      "don't have that",
+      "dont have that",
+      "don't have it",
+      "dont have it",
+      "not off hand",
+      "not offhand",
+      "unknown",
+    ])
+  );
+}
+
 function deriveStrategyName({ strategy = null, signals = {} } = {}) {
   return clean(strategy?.strategy || signals.underwriting_strategy);
 }
@@ -42,10 +81,11 @@ function deriveUnitCount({ strategy = null, signals = {}, context = null } = {})
   );
 }
 
-function derivePropertyType({ strategy = null, signals = {}, route = null } = {}) {
+function derivePropertyType({ strategy = null, signals = {}, route = null, context = null } = {}) {
   return clean(
     signals.property_type ||
       strategy?.property_type ||
+      context?.summary?.property_type ||
       route?.primary_category ||
       "Residential"
   );
@@ -53,7 +93,16 @@ function derivePropertyType({ strategy = null, signals = {}, route = null } = {}
 
 function isMultifamily({ property_type = "", unit_count = null, route = null } = {}) {
   return (
-    lower(property_type) === "multifamily" ||
+    includesAny(property_type, [
+      "multifamily",
+      "multi family",
+      "apartment",
+      "apartments",
+      "duplex",
+      "triplex",
+      "quadplex",
+      "fourplex",
+    ]) ||
     (unit_count !== null && unit_count >= 2) ||
     route?.is_multifamily_like === true
   );
@@ -125,6 +174,7 @@ function buildFollowUpDecision({
   classification = null,
   route = null,
   context = null,
+  message = "",
 } = {}) {
   if (!context?.found) {
     return {
@@ -182,7 +232,7 @@ function buildFollowUpDecision({
   }
 
   const unit_count = deriveUnitCount({ strategy, signals, context });
-  const property_type = derivePropertyType({ strategy, signals, route });
+  const property_type = derivePropertyType({ strategy, signals, route, context });
   const multifamily = isMultifamily({ property_type, unit_count, route });
   const alternative_track = determineAlternativeTrack({
     strategy_name,
@@ -191,6 +241,7 @@ function buildFollowUpDecision({
   });
   const creative_track = alternative_track === "creative";
   const novation_track = alternative_track === "novation";
+  const latest_outbound_use_case = deriveLatestOutboundUseCase(context);
   const missing_fields = [];
 
   if (multifamily) {
@@ -231,11 +282,52 @@ function buildFollowUpDecision({
 
   const unique_missing_fields = unique(missing_fields);
 
+  if (multifamily && latest_outbound_use_case === "mf_finalize_to_offer") {
+    return {
+      should_queue: false,
+      reason: "multifamily_waiting_on_internal_offer",
+      missing_fields: unique_missing_fields,
+      offer_ready: true,
+    };
+  }
+
+  const multifamily_completion_ack =
+    multifamily &&
+    (
+      unique_missing_fields.length === 0 ||
+      (
+        isNegativeNoInfoMessage(message) &&
+        ["mf_rents", "mf_expenses"].includes(latest_outbound_use_case)
+      )
+    );
+
+  if (multifamily_completion_ack) {
+    return {
+      should_queue: true,
+      reason:
+        unique_missing_fields.length === 0
+          ? "multifamily_underwriting_complete"
+          : "multifamily_ready_to_run_numbers",
+      missing_fields: unique_missing_fields,
+      unit_count,
+      property_type,
+      is_multifamily: multifamily,
+      creative_track,
+      novation_track,
+      strategy_name,
+      signals,
+      offer_ready: true,
+      completion_ack: true,
+      latest_outbound_use_case,
+    };
+  }
+
   if (!unique_missing_fields.length) {
     return {
       should_queue: false,
       reason: "no_follow_up_needed",
       missing_fields: [],
+      offer_ready: false,
     };
   }
 
@@ -250,6 +342,9 @@ function buildFollowUpDecision({
     novation_track,
     strategy_name,
     signals,
+    offer_ready: false,
+    completion_ack: false,
+    latest_outbound_use_case,
   };
 }
 
@@ -259,6 +354,21 @@ function buildMultifamilyFollowUp({ decision = {} } = {}) {
   const render_overrides = {
     units: unit_count !== null ? String(unit_count) : null,
   };
+
+  if (decision.completion_ack) {
+    return {
+      use_case: "mf_finalize_to_offer",
+      category: "Landlord / Multifamily",
+      secondary_category: "Underwriting",
+      variant_group: "Multifamily Underwrite — Finalize",
+      tone: "Neutral",
+      sequence_position: "V1",
+      paired_with_agent_type: "Specialist-Landlord / Market-Local",
+      fallback_agent_type: "Fallback / Market-Local",
+      render_overrides,
+      offer_ready: true,
+    };
+  }
 
   if (missing_fields.includes("unit_count")) {
     const has_unit_guess = unit_count !== null;
@@ -286,23 +396,6 @@ function buildMultifamilyFollowUp({ decision = {} } = {}) {
           fallback_agent_type: "Fallback / Market-Local",
           render_overrides,
         };
-  }
-
-  if (
-    missing_fields.includes("occupancy_status") &&
-    missing_fields.includes("rents")
-  ) {
-    return {
-      use_case: "mf_occupancy_rents",
-      category: "Residential",
-      secondary_category: "Underwriting",
-      variant_group: "Multifamily Underwrite — Occupancy / Rents",
-      tone: "Neutral",
-      sequence_position: "V1",
-      paired_with_agent_type: "Fallback / Market-Local",
-      fallback_agent_type: "Fallback / Market-Local",
-      render_overrides,
-    };
   }
 
   if (missing_fields.includes("occupancy_status")) {
@@ -488,15 +581,18 @@ export async function maybeQueueUnderwritingFollowUp({
   classification = null,
   route = null,
   context = null,
+  message = "",
   create_brain_if_missing = true,
   queue_status = "Queued",
   created_by = "Underwriting Follow-Up Engine",
+  queue_message = queueOutboundMessage,
 } = {}) {
   const decision = buildFollowUpDecision({
     underwriting,
     classification,
     route,
     context,
+    message,
   });
 
   if (!decision.should_queue) {
@@ -519,7 +615,7 @@ export async function maybeQueueUnderwritingFollowUp({
     };
   }
 
-  const queue_result = await queueOutboundMessage({
+  const queue_result = await queue_message({
     inbound_from:
       inbound_from ||
       context?.summary?.phone_hidden ||
@@ -547,6 +643,7 @@ export async function maybeQueueUnderwritingFollowUp({
       ? "underwriting_follow_up_queued"
       : queue_result?.reason || "underwriting_follow_up_failed",
     missing_fields: decision.missing_fields || [],
+    offer_ready: decision.offer_ready === true,
     follow_up: {
       ...follow_up,
       strategy_name: decision.strategy_name,

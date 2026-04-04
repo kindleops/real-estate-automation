@@ -1,7 +1,10 @@
 import { getCategoryValue, getNumberValue } from "@/lib/providers/podio.js";
 import { queueOutboundMessage } from "@/lib/flows/queue-outbound-message.js";
 import { resolveLatencyAwareQueueSchedule } from "@/lib/domain/queue/queue-schedule.js";
-import { brainStageForUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import {
+  brainStageForUseCase,
+  SELLER_FLOW_STAGES,
+} from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { routeSellerConversation } from "@/lib/domain/seller-flow/route-seller-conversation.js";
 
 const DEFAULT_LATENCY_BY_TIER = Object.freeze({
@@ -112,6 +115,24 @@ function deriveAgentLatencyWindow(agent_item = null, response_tier = "neutral") 
   };
 }
 
+function buildAlwaysOnContactWindow(timezone_label = "Central") {
+  switch (clean(timezone_label)) {
+    case "Eastern":
+      return "12AM-11:59PM ET";
+    case "Mountain":
+      return "12AM-11:59PM MT";
+    case "Pacific":
+      return "12AM-11:59PM PT";
+    case "Alaska":
+      return "12AM-11:59PM AT";
+    case "Hawaii":
+      return "12AM-11:59PM HT";
+    case "Central":
+    default:
+      return "12AM-11:59PM CT";
+  }
+}
+
 export async function maybeQueueSellerStageReply({
   inbound_from = null,
   context = null,
@@ -161,7 +182,13 @@ export async function maybeQueueSellerStageReply({
   );
   const rotation_key = deriveRotationKey({ context, plan });
   const timezone_label = deriveTimezoneLabel(context);
-  const contact_window = clean(context?.summary?.contact_window) || "9AM-8PM CT";
+  const base_contact_window = clean(context?.summary?.contact_window) || "9AM-8PM CT";
+  const allow_after_hours_reply =
+    clean(plan.current_stage) &&
+    clean(plan.current_stage) !== SELLER_FLOW_STAGES.OWNERSHIP_CHECK;
+  const contact_window = allow_after_hours_reply
+    ? buildAlwaysOnContactWindow(timezone_label)
+    : base_contact_window;
   const schedule = schedule_resolver({
     now,
     timezone_label,

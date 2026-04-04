@@ -87,6 +87,7 @@ test("inbound webhook ignores replay after first completion", async () => {
     updateBrainAfterInbound: async () => {
       updateBrainAfterInboundCount += 1;
     },
+    updateMasterOwnerAfterInbound: async () => ({ ok: true }),
     updateBrainStage: async () => ({ ok: true }),
     updateBrainLanguage: async () => ({ ok: true }),
     updateBrainSellerProfile: async () => ({ ok: true }),
@@ -161,6 +162,7 @@ test("inbound webhook suppresses underwriting follow-up when seller-stage reply 
     }),
     logInboundMessageEvent: async () => {},
     updateBrainAfterInbound: async () => {},
+    updateMasterOwnerAfterInbound: async () => ({ ok: true }),
     updateBrainStage: async (payload) => {
       stage_updates.push(payload);
       return { ok: true };
@@ -205,6 +207,170 @@ test("inbound webhook suppresses underwriting follow-up when seller-stage reply 
     stage_updates.map((entry) => entry.stage),
     ["Ownership", "Offer"]
   );
+});
+
+test("inbound webhook does not run a second offer pass when the initial offer already exists", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const create_offer_calls = [];
+
+  __setTextgridInboundTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    normalizeInboundTextgridPhone: (value) => value,
+    info: () => {},
+    warn: () => {},
+    loadContext: async () => ({
+      found: true,
+      ids: {
+        brain_item_id: 11,
+        master_owner_id: 21,
+        prospect_id: 31,
+        property_id: 41,
+        phone_item_id: 51,
+      },
+      items: {
+        brain_item: createPodioItem(11),
+        phone_item: createPodioItem(51),
+      },
+    }),
+    classify: async () => ({
+      language: "English",
+      source: "test",
+    }),
+    resolveRoute: () => ({
+      stage: "Offer",
+      use_case: "offer_reveal",
+      seller_profile: "motivated",
+    }),
+    logInboundMessageEvent: async () => {},
+    updateBrainAfterInbound: async () => {},
+    updateMasterOwnerAfterInbound: async () => ({ ok: true }),
+    updateBrainStage: async () => ({ ok: true }),
+    updateBrainLanguage: async () => ({ ok: true }),
+    updateBrainSellerProfile: async () => ({ ok: true }),
+    findLatestOpenOffer: async () => null,
+    maybeProgressOfferStatus: async () => ({ ok: true, updated: false }),
+    maybeCreateOfferFromContext: async (payload) => {
+      create_offer_calls.push(payload);
+      return { ok: true, created: true, offer: { offer_item_id: 901 } };
+    },
+    maybeUpsertUnderwritingFromInbound: async () => ({
+      ok: true,
+      extracted: true,
+      strategy: { auto_offer_ready: true },
+      signals: { underwriting_auto_offer_ready: true },
+    }),
+    maybeQueueSellerStageReply: async () => ({
+      ok: true,
+      queued: false,
+      handled: false,
+    }),
+    maybeQueueUnderwritingFollowUp: async () => ({
+      ok: true,
+      queued: true,
+      offer_ready: true,
+    }),
+    maybeCreateContractFromAcceptedOffer: async () => ({ ok: true, created: false }),
+    syncPipelineState: async () => ({ pipeline_item_id: 61, current_stage: "Offer" }),
+  });
+
+  const result = await handleTextgridInboundWebhook({
+    message_id: "sms-offer-single-pass",
+    from: "+15550000001",
+    to: "+15550000002",
+    body: "Make me an offer.",
+    status: "received",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(create_offer_calls.length, 1);
+  assert.equal(create_offer_calls[0].respect_underwriting_gate, undefined);
+});
+
+test("inbound webhook runs a single ungated second offer pass only after underwriting is ready", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const create_offer_calls = [];
+
+  __setTextgridInboundTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    normalizeInboundTextgridPhone: (value) => value,
+    info: () => {},
+    warn: () => {},
+    loadContext: async () => ({
+      found: true,
+      ids: {
+        brain_item_id: 11,
+        master_owner_id: 21,
+        prospect_id: 31,
+        property_id: 41,
+        phone_item_id: 51,
+      },
+      items: {
+        brain_item: createPodioItem(11),
+        phone_item: createPodioItem(51),
+      },
+    }),
+    classify: async () => ({
+      language: "English",
+      source: "test",
+    }),
+    resolveRoute: () => ({
+      stage: "Offer",
+      use_case: "offer_reveal",
+      seller_profile: "motivated",
+    }),
+    logInboundMessageEvent: async () => {},
+    updateBrainAfterInbound: async () => {},
+    updateMasterOwnerAfterInbound: async () => ({ ok: true }),
+    updateBrainStage: async () => ({ ok: true }),
+    updateBrainLanguage: async () => ({ ok: true }),
+    updateBrainSellerProfile: async () => ({ ok: true }),
+    findLatestOpenOffer: async () => null,
+    maybeProgressOfferStatus: async () => ({ ok: true, updated: false }),
+    maybeCreateOfferFromContext: async (payload) => {
+      create_offer_calls.push(payload);
+      if (create_offer_calls.length === 1) {
+        return { ok: true, created: false, reason: "offer_requires_underwriting_first" };
+      }
+      return { ok: true, created: true, offer: { offer_item_id: 902 } };
+    },
+    maybeUpsertUnderwritingFromInbound: async () => ({
+      ok: true,
+      extracted: true,
+      strategy: { auto_offer_ready: false },
+      signals: { underwriting_auto_offer_ready: false },
+    }),
+    maybeQueueSellerStageReply: async () => ({
+      ok: true,
+      queued: false,
+      handled: false,
+    }),
+    maybeQueueUnderwritingFollowUp: async () => ({
+      ok: true,
+      queued: true,
+      offer_ready: true,
+    }),
+    maybeCreateContractFromAcceptedOffer: async () => ({ ok: true, created: false }),
+    syncPipelineState: async () => ({ pipeline_item_id: 61, current_stage: "Offer" }),
+  });
+
+  const result = await handleTextgridInboundWebhook({
+    message_id: "sms-offer-second-pass",
+    from: "+15550000001",
+    to: "+15550000002",
+    body: "Make me an offer.",
+    status: "received",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(create_offer_calls.length, 2);
+  assert.equal(create_offer_calls[0].respect_underwriting_gate, undefined);
+  assert.equal(create_offer_calls[1].respect_underwriting_gate, false);
 });
 
 test("delivery webhook ignores replay after exact queue correlation succeeds", async () => {

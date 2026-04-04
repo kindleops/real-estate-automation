@@ -32,6 +32,7 @@ import {
   serializeMessageEventMetadata,
 } from "@/lib/domain/events/message-event-metadata.js";
 import { updateBrainAfterSend } from "@/lib/domain/brain/update-brain-after-send.js";
+import { updateMasterOwnerAfterSend } from "@/lib/domain/master-owners/update-master-owner-after-send.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
@@ -43,6 +44,7 @@ import {
   deriveCanonicalSellerFlowFromTemplate,
   inferCanonicalUseCaseFromOutboundText,
   canonicalStageForUseCase,
+  normalizeSellerFlowTone,
 } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 
 import { info, warn } from "@/lib/logging/logger.js";
@@ -535,6 +537,21 @@ async function resolveCanonicalSellerFlowForQueue({
         : normalizeTemplateItem(candidate_template);
     const derived = deriveCanonicalSellerFlowFromTemplate(normalized_template);
     if (derived) return derived;
+
+    if (
+      clean(normalized_template?.use_case) ||
+      clean(normalized_template?.variant_group)
+    ) {
+      return {
+        selected_use_case: clean(normalized_template?.use_case) || null,
+        template_use_case: clean(normalized_template?.use_case) || null,
+        next_expected_stage: canonicalStageForUseCase(
+          clean(normalized_template?.use_case) || null
+        ),
+        selected_variant_group: clean(normalized_template?.variant_group) || null,
+        selected_tone: normalizeSellerFlowTone(normalized_template?.tone),
+      };
+    }
   }
 
   const inferred_use_case = inferCanonicalUseCaseFromOutboundText(message_body);
@@ -808,6 +825,8 @@ export async function finalizeSuccessfulQueueSend({
   const update = deps.updateItem || updateItem;
   const logOutbound = deps.logOutboundMessageEvent || logOutboundMessageEvent;
   const updateBrain = deps.updateBrainAfterSend || updateBrainAfterSend;
+  const updateMasterOwner =
+    deps.updateMasterOwnerAfterSend || updateMasterOwnerAfterSend;
 
   const bookkeeping_errors = [];
 
@@ -864,6 +883,20 @@ export async function finalizeSuccessfulQueueSend({
   } catch (error) {
     bookkeeping_errors.push(
       `brain_update_after_send_failed:${error?.message || "unknown_error"}`
+    );
+  }
+
+  try {
+    if (master_owner_id) {
+      await updateMasterOwner({
+        master_owner_id,
+        sent_at: now,
+        selected_use_case,
+      });
+    }
+  } catch (error) {
+    bookkeeping_errors.push(
+      `master_owner_update_after_send_failed:${error?.message || "unknown_error"}`
     );
   }
 

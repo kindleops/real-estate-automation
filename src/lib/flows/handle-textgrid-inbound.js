@@ -15,6 +15,7 @@ import { maybeQueueUnderwritingFollowUp } from "@/lib/domain/underwriting/maybe-
 import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/maybe-create-contract-from-accepted-offer.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
+import { updateMasterOwnerAfterInbound } from "@/lib/domain/master-owners/update-master-owner-after-inbound.js";
 import {
   beginIdempotentProcessing,
   completeIdempotentProcessing,
@@ -41,6 +42,7 @@ const defaultDeps = {
   maybeCreateContractFromAcceptedOffer,
   syncPipelineState,
   maybeQueueSellerStageReply,
+  updateMasterOwnerAfterInbound,
   beginIdempotentProcessing,
   completeIdempotentProcessing,
   failIdempotentProcessing,
@@ -274,6 +276,11 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       message_body,
     });
 
+    await runtimeDeps.updateMasterOwnerAfterInbound({
+      master_owner_id,
+      received_at: new Date().toISOString(),
+    });
+
     await Promise.all([
       route?.stage
         ? runtimeDeps.updateBrainStage({
@@ -316,7 +323,7 @@ export async function handleTextgridInboundWebhook(payload = {}) {
           reason: "no_existing_open_offer",
         };
 
-    const maybe_offer =
+    const initial_offer =
       maybe_offer_progress?.updated
         ? {
             ok: true,
@@ -334,18 +341,16 @@ export async function handleTextgridInboundWebhook(payload = {}) {
             created_by: "Inbound Offer Engine",
           });
 
-    const active_offer_item_id =
-      maybe_offer?.offer?.offer_item_id ||
-      maybe_offer?.existing_offer_item_id ||
-      existing_offer?.item_id ||
-      null;
-
     const underwriting = await runtimeDeps.maybeUpsertUnderwritingFromInbound({
       context,
       classification,
       route,
       message: message_body,
-      offer_item_id: active_offer_item_id,
+      offer_item_id:
+        initial_offer?.offer?.offer_item_id ||
+        initial_offer?.existing_offer_item_id ||
+        existing_offer?.item_id ||
+        null,
       source_channel: "SMS",
       notes: message_body,
     });
@@ -355,7 +360,7 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       context,
       classification,
       message: message_body,
-      maybe_offer,
+      maybe_offer: initial_offer,
       existing_offer,
     });
 
@@ -378,7 +383,36 @@ export async function handleTextgridInboundWebhook(payload = {}) {
           classification,
           route,
           context,
+          message: message_body,
         });
+
+    const underwriting_offer_ready =
+      underwriting?.strategy?.auto_offer_ready === true ||
+      underwriting?.signals?.underwriting_auto_offer_ready === true ||
+      underwriting_follow_up?.offer_ready === true;
+
+    const maybe_offer =
+      initial_offer?.created ||
+      initial_offer?.existing_offer_item_id ||
+      !underwriting_offer_ready
+        ? initial_offer
+        : await runtimeDeps.maybeCreateOfferFromContext({
+            context,
+            classification,
+            route,
+            message: message_body,
+            notes: message_body,
+            created_by: "Underwriting Offer Engine",
+            respect_underwriting_gate: false,
+          });
+
+    const active_offer_item_id =
+      maybe_offer?.offer?.offer_item_id ||
+      maybe_offer?.existing_offer_item_id ||
+      initial_offer?.offer?.offer_item_id ||
+      initial_offer?.existing_offer_item_id ||
+      existing_offer?.item_id ||
+      null;
 
     const contract = await runtimeDeps.maybeCreateContractFromAcceptedOffer({
       offer_item: existing_offer || null,

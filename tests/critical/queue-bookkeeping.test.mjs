@@ -44,6 +44,9 @@ test("finalizeSuccessfulQueueSend records a clean success path", async () => {
       updateBrainAfterSend: async (payload) => {
         calls.push({ type: "updateBrainAfterSend", payload });
       },
+      updateMasterOwnerAfterSend: async (payload) => {
+        calls.push({ type: "updateMasterOwnerAfterSend", payload });
+      },
     }
   );
 
@@ -51,10 +54,15 @@ test("finalizeSuccessfulQueueSend records a clean success path", async () => {
   assert.equal(result.partial, false);
   assert.equal(result.sent, true);
   assert.equal(result.provider_message_id, "provider-1");
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.deepEqual(
     calls.map((entry) => entry.type),
-    ["updateItem", "logOutboundMessageEvent", "updateBrainAfterSend"]
+    [
+      "updateItem",
+      "logOutboundMessageEvent",
+      "updateBrainAfterSend",
+      "updateMasterOwnerAfterSend",
+    ]
   );
   assert.deepEqual(calls[1].payload, {
     brain_item,
@@ -119,12 +127,19 @@ test("finalizeSuccessfulQueueSend reports partial failure if bookkeeping breaks 
       updateBrainAfterSend: async () => {
         calls.push("updateBrainAfterSend");
       },
+      updateMasterOwnerAfterSend: async () => {
+        calls.push("updateMasterOwnerAfterSend");
+      },
     }
   );
 
   assert.equal(result.ok, false);
   assert.equal(result.partial, true);
   assert.equal(result.sent, true);
-  assert.deepEqual(calls, ["logOutboundMessageEvent", "updateBrainAfterSend"]);
+  assert.deepEqual(calls, [
+    "logOutboundMessageEvent",
+    "updateBrainAfterSend",
+    "updateMasterOwnerAfterSend",
+  ]);
   assert.match(result.bookkeeping_errors[0], /^queue_sent_update_failed:/);
 });

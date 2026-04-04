@@ -20,15 +20,29 @@ function toNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+function parseScaledNumber(value, scale_suffix = "") {
+  const base = toNumber(value);
+  if (base === null) return null;
+
+  const suffix = lower(scale_suffix);
+  if (suffix === "k") return Math.round(base * 1_000);
+  if (suffix === "m") return Math.round(base * 1_000_000);
+  return base;
+}
+
 function unique(list = []) {
   return [...new Set((list || []).filter(Boolean))];
 }
 
 function extractDollarAmounts(message = "") {
-  const matches = [...String(message).matchAll(/\$?\s?(\d{1,3}(?:,\d{3})+|\d{4,7})(?:\.\d+)?/g)];
+  const matches = [
+    ...String(message).matchAll(
+      /\$?\s?(\d{1,3}(?:,\d{3})+|\d{2,7})(?:\.\d+)?\s*([kKmM])?\b/g
+    ),
+  ];
   const values = matches
-    .map((match) => toNumber(match[1]))
-    .filter((value) => Number.isFinite(value) && value >= 1000);
+    .map((match) => parseScaledNumber(match[1], match[2] || ""))
+    .filter((value) => Number.isFinite(value) && value >= 1_000);
 
   return unique(values);
 }
@@ -55,6 +69,69 @@ function extractUnitCount(message = "") {
     if (pattern.source.includes("duplex")) return 2;
     if (pattern.source.includes("triplex")) return 3;
     if (pattern.source.includes("quadplex") || pattern.source.includes("4[-\\s]?plex")) return 4;
+  }
+
+  return null;
+}
+
+function extractPropertyType(message = "") {
+  const text = lower(message);
+
+  if (
+    includesAny(text, [
+      "multifamily",
+      "multi family",
+      "apartment building",
+      "apartment complex",
+      "apartments",
+      "duplex",
+      "triplex",
+      "quadplex",
+      "fourplex",
+    ])
+  ) {
+    return "Multifamily";
+  }
+
+  if (
+    includesAny(text, [
+      "mixed use",
+      "mixed-use",
+      "commercial",
+      "retail",
+      "office",
+      "industrial",
+      "warehouse",
+    ])
+  ) {
+    return "Commercial";
+  }
+
+  if (
+    includesAny(text, [
+      "single family",
+      "sfr",
+      "house",
+      "residential",
+      "townhome",
+      "townhouse",
+      "condo",
+      "mobile home",
+      "manufactured home",
+    ])
+  ) {
+    return "Residential";
+  }
+
+  if (
+    includesAny(text, [
+      "vacant land",
+      "land",
+      "lot",
+      "acreage",
+    ])
+  ) {
+    return "Land";
   }
 
   return null;
@@ -190,15 +267,145 @@ function extractDistressSignals(message = "") {
   return unique(tags);
 }
 
-function pickAskingPrice(message = "", classification = null) {
-  const amounts = extractDollarAmounts(message);
-  if (!amounts.length) return null;
+function deriveLatestOutboundUseCase(context = null) {
+  const recent_events = Array.isArray(context?.recent?.recent_events)
+    ? context.recent.recent_events
+    : [];
 
-  if (classification?.objection === "need_more_money" || classification?.objection === "wants_retail") {
-    return Math.max(...amounts);
+  const latest_outbound = recent_events.find(
+    (event) => lower(event?.direction) === "outbound"
+  );
+
+  return lower(
+    latest_outbound?.selected_use_case ||
+      latest_outbound?.metadata?.selected_use_case ||
+      ""
+  );
+}
+
+function isLikelyPriceContext({
+  message = "",
+  classification = null,
+  route = null,
+  context = null,
+} = {}) {
+  const text = lower(message);
+  const last_use_case = deriveLatestOutboundUseCase(context);
+
+  if (
+    ["asking_price", "price_works_confirm_basics", "price_high_condition_probe", "offer_reveal"].includes(
+      last_use_case
+    )
+  ) {
+    return true;
   }
 
-  return amounts[0];
+  if (
+    ["send_offer_first", "need_more_money", "wants_retail"].includes(
+      lower(classification?.objection)
+    )
+  ) {
+    return true;
+  }
+
+  if (lower(route?.stage) === "offer" || lower(route?.use_case) === "offer_reveal") {
+    return true;
+  }
+
+  return includesAny(text, [
+    "ask",
+    "asking",
+    "take",
+    "want",
+    "would do",
+    "i'd do",
+    "id do",
+    "for it",
+    "cash",
+    "number",
+    "price",
+  ]);
+}
+
+function extractContextualBareAskingPrice({
+  message = "",
+  classification = null,
+  route = null,
+  context = null,
+} = {}) {
+  if (
+    !isLikelyPriceContext({
+      message,
+      classification,
+      route,
+      context,
+    })
+  ) {
+    return [];
+  }
+
+  const text = clean(message);
+  const normalized = lower(text);
+
+  if (
+    includesAny(normalized, [
+      "unit",
+      "units",
+      "door",
+      "doors",
+      "tenant",
+      "tenants",
+      "occupied",
+      "vacant",
+      "rent",
+      "rents",
+      "expense",
+      "expenses",
+      "bed",
+      "beds",
+      "bath",
+      "baths",
+      "built in",
+      "year built",
+      "month",
+      "monthly",
+      "year",
+      "years",
+      "days",
+      "%",
+    ])
+  ) {
+    return [];
+  }
+
+  const direct_match = text.match(
+    /^(?:i(?:'d| would)?\s*(?:do|take)|want|need|asking|ask|at|for)?\s*\$?\s*(\d{2,3})(?:\s*(?:cash|all cash))?\s*$/i
+  );
+
+  if (!direct_match?.[1]) return [];
+
+  const numeric = Number(direct_match[1]);
+  if (!Number.isFinite(numeric) || numeric < 10) return [];
+
+  return [numeric * 1_000];
+}
+
+function pickAskingPrice(message = "", classification = null, route = null, context = null) {
+  const amounts = extractDollarAmounts(message);
+  const contextual_amounts = extractContextualBareAskingPrice({
+    message,
+    classification,
+    route,
+    context,
+  });
+  const candidates = unique([...amounts, ...contextual_amounts]);
+  if (!candidates.length) return null;
+
+  if (classification?.objection === "need_more_money" || classification?.objection === "wants_retail") {
+    return Math.max(...candidates);
+  }
+
+  return candidates[0];
 }
 
 function matchFirstNumber(message = "", patterns = []) {
@@ -256,6 +463,10 @@ function extractExpenseSignals(message = "") {
       "taxes",
       "insurance",
       "utilities",
+      "electric",
+      "electricity",
+      "water",
+      "gas",
       "opex",
       "maintenance",
       "deferred maintenance",
@@ -550,8 +761,9 @@ export function extractUnderwritingSignals({
     };
   }
 
-  const asking_price = pickAskingPrice(text, classification);
+  const asking_price = pickAskingPrice(text, classification, route, context);
   const unit_count = extractUnitCount(text);
+  const property_type = extractPropertyType(text);
   const timeline = extractTimeline(text);
   const occupancy_status = extractOccupancy(text);
   const condition_level = extractCondition(text);
@@ -574,6 +786,7 @@ export function extractUnderwritingSignals({
     occupancy_status,
     condition_level,
     unit_count,
+    property_type,
     tenant_present: occupancy_status === "Tenant Occupied",
     creative_terms_interest: deal_type_signals.creative_terms_interest,
     novation_interest: deal_type_signals.novation_interest,

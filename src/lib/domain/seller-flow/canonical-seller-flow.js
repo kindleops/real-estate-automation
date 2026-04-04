@@ -91,8 +91,13 @@ export function preferredAgentTypeForSellerFlow({
     case "can_you_do_better":
       return "Fallback / Market-Local / Specialist-Close";
     case "price_too_low":
+    case "justify_price":
+    case "ask_timeline":
+    case "ask_condition_clarifier":
+    case "narrow_range":
       return "Fallback / Market-Local";
     case "close_ask_soft":
+    case "close_handoff":
       return "Soft Closer / Hard Closer / Ultra-Short";
     default:
       break;
@@ -199,6 +204,43 @@ export function deriveCanonicalSellerFlowFromTemplate(template = null) {
   const use_case = clean(template?.use_case);
   const variant_group = clean(template?.variant_group);
   const selected_tone = normalizeSellerFlowTone(template?.tone);
+
+  const follow_up_variant_map = {
+    "Stage 1 — Ownership Confirmation Follow-Up": {
+      selected_use_case: "ownership_check",
+      next_expected_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+    },
+    "Stage 2 — Consider Selling Follow-Up": {
+      selected_use_case: "consider_selling",
+      next_expected_stage: SELLER_FLOW_STAGES.CONSIDER_SELLING,
+    },
+    "Stage 3 — Asking Price Follow-Up": {
+      selected_use_case: "asking_price",
+      next_expected_stage: SELLER_FLOW_STAGES.ASKING_PRICE,
+    },
+    "Stage 4A — Confirm Basics Follow-Up": {
+      selected_use_case: "price_works_confirm_basics",
+      next_expected_stage: SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS,
+    },
+    "Stage 4B — Condition Probe Follow-Up": {
+      selected_use_case: "price_high_condition_probe",
+      next_expected_stage: SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE,
+    },
+    "Stage 5 — Offer Reveal Follow-Up": {
+      selected_use_case: "offer_reveal",
+      next_expected_stage: SELLER_FLOW_STAGES.OFFER_REVEAL,
+    },
+  };
+
+  if (follow_up_variant_map[variant_group] && (use_case === "follow_up" || !use_case)) {
+    return {
+      selected_use_case: follow_up_variant_map[variant_group].selected_use_case,
+      template_use_case: use_case || "follow_up",
+      selected_variant_group: variant_group,
+      selected_tone: selected_tone || "Warm",
+      next_expected_stage: follow_up_variant_map[variant_group].next_expected_stage,
+    };
+  }
 
   if (
     use_case === "ownership_check" ||
@@ -319,7 +361,17 @@ export function deriveCanonicalSellerFlowFromTemplate(template = null) {
   }
 
   if (
-    ["can_you_do_better", "price_too_low", "best_price", "close_ask_soft", "close_handoff"].includes(
+    [
+      "can_you_do_better",
+      "price_too_low",
+      "justify_price",
+      "ask_timeline",
+      "ask_condition_clarifier",
+      "narrow_range",
+      "best_price",
+      "close_ask_soft",
+      "close_handoff",
+    ].includes(
       use_case
     )
   ) {
@@ -348,4 +400,3 @@ export function deriveCanonicalSellerFlowFromTemplate(template = null) {
 
   return null;
 }
-

@@ -83,9 +83,10 @@ function normalizePropertyType(value = "") {
   return clean(value) || "Residential";
 }
 
-function derivePropertyType({ property_item = null, context = null, route = null } = {}) {
+function derivePropertyType({ signals = {}, property_item = null, context = null, route = null } = {}) {
   return normalizePropertyType(
-    getCategoryValue(property_item, "property-type", null) ||
+    signals.property_type ||
+      getCategoryValue(property_item, "property-type", null) ||
       context?.summary?.property_type ||
       route?.primary_category ||
       "Residential"
@@ -353,6 +354,7 @@ export function selectUnderwritingStrategy({
   property_item = null,
 } = {}) {
   const property_type = derivePropertyType({
+    signals,
     property_item,
     context,
     route,

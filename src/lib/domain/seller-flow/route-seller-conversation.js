@@ -1,4 +1,4 @@
-import { getNumberValue } from "@/lib/providers/podio.js";
+import { getCategoryValue, getNumberValue } from "@/lib/providers/podio.js";
 import { formatUsd } from "@/lib/utils/money.js";
 import { extractUnderwritingSignals } from "@/lib/domain/underwriting/extract-underwriting-signals.js";
 import {
@@ -176,6 +176,92 @@ function hasCounterSignal(message = "", classification = null) {
   ]);
 }
 
+function hasHandoffTrigger(message = "", classification = null) {
+  if (
+    ["wants_written_offer", "wants_proof_of_funds"].includes(
+      clean(classification?.objection)
+    )
+  ) {
+    return true;
+  }
+
+  return includesAny(message, [
+    "send the contract",
+    "send contract",
+    "send me the contract",
+    "what's next",
+    "what is next",
+    "next step",
+    "move forward",
+    "move ahead",
+    "let's do it",
+    "lets do it",
+    "ready to move forward",
+    "ready to sell",
+    "we have a deal",
+    "that works",
+  ]);
+}
+
+function hasEmotionalResistance(message = "", classification = null) {
+  if (["frustrated", "guarded", "skeptical"].includes(clean(classification?.emotion))) {
+    return true;
+  }
+
+  return includesAny(message, [
+    "ridiculous",
+    "insulting",
+    "crazy",
+    "joke",
+    "laughable",
+    "wasting my time",
+    "waste my time",
+    "not serious",
+    "lowball",
+  ]);
+}
+
+function hasSoftCounterSignal(message = "") {
+  return includesAny(message, [
+    "too low",
+    "can you do better",
+    "can you do a little better",
+    "a little better",
+    "do better",
+    "come up",
+    "come up a bit",
+    "a little higher",
+    "any room",
+    "best you can do",
+  ]);
+}
+
+function hasHardCounterSignal({
+  message = "",
+  counter_amount = null,
+} = {}) {
+  if (
+    counter_amount !== null &&
+    counter_amount !== undefined &&
+    counter_amount !== "" &&
+    Number.isFinite(Number(counter_amount))
+  ) {
+    return true;
+  }
+
+  return includesAny(message, [
+    "bottom line",
+    "my floor",
+    "firm at",
+    "firm on",
+    "won't take less",
+    "wont take less",
+    "minimum i would take",
+    "lowest i can do",
+    "at least",
+  ]);
+}
+
 function hasPropertyInfo(signals = {}) {
   return Boolean(
     signals.occupancy_status ||
@@ -184,6 +270,51 @@ function hasPropertyInfo(signals = {}) {
       signals.unit_count ||
       signals.rents_present ||
       signals.expenses_present
+  );
+}
+
+function normalizePropertyType(value = "") {
+  const text = lower(value);
+
+  if (
+    includesAny(text, [
+      "multifamily",
+      "multi family",
+      "apartment",
+      "apartments",
+      "5+ unit",
+      "commercial multifamily",
+      "duplex",
+      "triplex",
+      "quadplex",
+      "fourplex",
+    ])
+  ) {
+    return "Multifamily";
+  }
+
+  return clean(value) || "Residential";
+}
+
+function derivePropertyType({ context = null, signals = {} } = {}) {
+  return normalizePropertyType(
+    signals.property_type ||
+      getCategoryValue(context?.items?.property_item || null, "property-type", null) ||
+      context?.summary?.property_type ||
+      "Residential"
+  );
+}
+
+function isMultifamilyLike({ context = null, signals = {} } = {}) {
+  const unit_count =
+    Number.isFinite(Number(signals.unit_count))
+      ? Number(signals.unit_count)
+      : getNumberValue(context?.items?.property_item || null, "number-of-units", null);
+  const property_type = derivePropertyType({ context, signals });
+
+  return (
+    property_type === "Multifamily" ||
+    (Number.isFinite(Number(unit_count)) && Number(unit_count) >= 2)
   );
 }
 
@@ -307,6 +438,8 @@ function detectIntent({
   previous_stage = null,
   signals = {},
 }) {
+  const post_offer_negotiation = isPostOfferNegotiationStage(previous_stage);
+
   if (detectOptOut(message, classification)) return "Opt Out";
   if (detectWrongPerson(message, classification)) return "Ownership Denied / Wrong Person";
 
@@ -319,6 +452,20 @@ function detectIntent({
   if (Number.isFinite(signals.asking_price)) return "Asking Price Provided";
   if (hasReverseOfferRequest(message, classification)) {
     return "No Asking Price / Reverse Offer Request";
+  }
+  if (
+    post_offer_negotiation &&
+    (
+      hasHandoffTrigger(message, classification) ||
+      hasEmotionalResistance(message, classification) ||
+      hasHardCounterSignal({
+        message,
+        counter_amount: signals.asking_price,
+      }) ||
+      hasSoftCounterSignal(message)
+    )
+  ) {
+    return "Counter / Negotiation";
   }
   if (hasPropertyInfo(signals)) return "Property Info Provided";
   if (detectOpenToSelling(message, previous_stage)) return "Open to Selling";
@@ -347,6 +494,34 @@ function formatOfferDisplay({
   const resolved = maybe_offer_amount ?? existing_offer_amount ?? property_offer_amount;
   if (!Number.isFinite(Number(resolved))) return null;
   return formatUsd(resolved);
+}
+
+function resolveOfferAmount({
+  maybe_offer = null,
+  existing_offer = null,
+  context = null,
+} = {}) {
+  const maybe_offer_amount =
+    maybe_offer?.offer?.offer_amount ??
+    maybe_offer?.offer_amount ??
+    null;
+  const existing_offer_amount =
+    getNumberValue(existing_offer, "offer-sent-price-2", null) ??
+    getNumberValue(existing_offer, "seller-counter-offer-3", null) ??
+    null;
+  const property_offer_amount =
+    getNumberValue(context?.items?.property_item || null, "smart-cash-offer-2", null) ??
+    null;
+
+  const resolved = maybe_offer_amount ?? existing_offer_amount ?? property_offer_amount;
+  return Number.isFinite(Number(resolved)) ? Number(resolved) : null;
+}
+
+function isPostOfferNegotiationStage(stage = null) {
+  return [
+    SELLER_FLOW_STAGES.OFFER_REVEAL,
+    SELLER_FLOW_STAGES.NEGOTIATION,
+  ].includes(clean(stage));
 }
 
 function buildPlan({
@@ -392,6 +567,128 @@ function buildPlan({
   };
 }
 
+function buildNegotiationPlan({
+  detected_language,
+  current_stage,
+  detected_intent,
+  classification = null,
+  previous_tone = null,
+  message = "",
+  signals = {},
+  offer_price_display = null,
+} = {}) {
+  const counter_amount =
+    signals.asking_price !== null &&
+    signals.asking_price !== undefined &&
+    signals.asking_price !== "" &&
+    Number.isFinite(Number(signals.asking_price))
+    ? Number(signals.asking_price)
+    : null;
+  const hard_counter = hasHardCounterSignal({
+    message,
+    counter_amount,
+  });
+  const soft_counter = hasSoftCounterSignal(message);
+  const emotional_resistance = hasEmotionalResistance(message, classification);
+  const property_info_present = hasPropertyInfo(signals);
+  const timeline_present = Boolean(signals.timeline);
+
+  if (hasHandoffTrigger(message, classification)) {
+    return buildPlan({
+      detected_language,
+      current_stage,
+      detected_intent,
+      selected_use_case: "negotiation_follow_up",
+      template_use_case: "close_handoff",
+      selected_variant_group: "Stage 6 — Close / Handoff",
+      selected_tone: "Warm",
+      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      reasoning_summary: "Seller is signaling readiness for the next step, so the flow should move toward handoff instead of re-trading price.",
+      response_tier: "hot",
+      offer_price_display,
+    });
+  }
+
+  if (
+    current_stage === SELLER_FLOW_STAGES.OFFER_REVEAL &&
+    !property_info_present &&
+    !timeline_present &&
+    (hard_counter || soft_counter || emotional_resistance)
+  ) {
+    return buildPlan({
+      detected_language,
+      current_stage,
+      detected_intent,
+      selected_use_case: "negotiation_follow_up",
+      template_use_case: "ask_condition_clarifier",
+      selected_variant_group: "Negotiation — Condition Clarifier",
+      selected_tone: chooseConversationalTone({
+        classification,
+        previous_tone,
+        selected_use_case: "negotiation_follow_up",
+      }),
+      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      reasoning_summary: "Seller pushed back on price before enough property facts were confirmed, so the next move is to clarify condition and occupancy.",
+      response_tier: "hot",
+      offer_price_display,
+    });
+  }
+
+  if (hard_counter) {
+    return buildPlan({
+      detected_language,
+      current_stage,
+      detected_intent,
+      selected_use_case: "negotiation_follow_up",
+      template_use_case: "narrow_range",
+      selected_variant_group: "Negotiation — Narrow Range",
+      selected_tone: "Direct",
+      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      reasoning_summary: "Seller gave a firm counter, so the next move is to narrow the gap instead of repeating the same anchor.",
+      response_tier: "hot",
+      offer_price_display,
+    });
+  }
+
+  if (emotional_resistance && !soft_counter) {
+    return buildPlan({
+      detected_language,
+      current_stage,
+      detected_intent,
+      selected_use_case: "negotiation_follow_up",
+      template_use_case: "ask_timeline",
+      selected_variant_group: "Negotiation — Timeline",
+      selected_tone: chooseConversationalTone({
+        classification,
+        previous_tone,
+        selected_use_case: "negotiation_follow_up",
+      }),
+      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      reasoning_summary: "Seller is resisting the number emotionally without giving a clear counter, so the next move is to qualify timeline and urgency.",
+      response_tier: "neutral",
+      offer_price_display,
+    });
+  }
+
+  return buildPlan({
+    detected_language,
+    current_stage,
+    detected_intent,
+    selected_use_case: "negotiation_follow_up",
+    template_use_case: "justify_price",
+    selected_variant_group: "Negotiation — Justify Price",
+    selected_tone: chooseConversationalTone({
+      classification,
+      previous_tone,
+      selected_use_case: "negotiation_follow_up",
+    }),
+    next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+    reasoning_summary: "Seller is negotiating around price, so the next move is to justify the range and keep the conversation moving.",
+    response_tier: "hot",
+    offer_price_display,
+  });
+}
+
 export function routeSellerConversation({
   context = null,
   classification = null,
@@ -421,12 +718,21 @@ export function routeSellerConversation({
   });
   const signals = extracted?.signals || {};
   const asking_price = Number.isFinite(signals.asking_price) ? signals.asking_price : null;
+  const multifamily_like = isMultifamilyLike({
+    context,
+    signals,
+  });
   const max_cash_offer = getNumberValue(
     context?.items?.property_item || null,
     "smart-cash-offer-2",
     null
   );
   const offer_price_display = formatOfferDisplay({
+    maybe_offer,
+    existing_offer,
+    context,
+  });
+  const offer_amount = resolveOfferAmount({
     maybe_offer,
     existing_offer,
     context,
@@ -438,6 +744,30 @@ export function routeSellerConversation({
     previous_stage,
     signals,
   });
+
+  const shouldDeferToUnderwriting =
+    multifamily_like &&
+    ["Asking Price Provided", "No Asking Price / Reverse Offer Request", "Property Info Provided"].includes(
+      detected_intent
+    );
+
+  if (shouldDeferToUnderwriting) {
+    return buildPlan({
+      detected_language,
+      current_stage: previous_stage,
+      detected_intent,
+      selected_use_case: null,
+      template_use_case: null,
+      selected_variant_group: null,
+      selected_tone: null,
+      next_expected_stage: previous_stage,
+      reasoning_summary:
+        "Multifamily and apartment leads stay in underwriting until unit, occupancy, rent, and expense context is collected.",
+      should_queue_reply: false,
+      handled: false,
+      response_tier: "neutral",
+    });
+  }
 
   if (detected_intent === "Opt Out") {
     return buildPlan({
@@ -517,6 +847,20 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "Counter / Negotiation") {
+    if (isPostOfferNegotiationStage(previous_stage)) {
+      return buildNegotiationPlan({
+        detected_language,
+        current_stage: previous_stage,
+        detected_intent,
+        classification,
+        previous_tone,
+        message,
+        signals,
+        offer_price_display,
+        offer_amount,
+      });
+    }
+
     const template_use_case =
       previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
         ? "close_ask_soft"
@@ -553,6 +897,20 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "Asking Price Provided") {
+    if (isPostOfferNegotiationStage(previous_stage)) {
+      return buildNegotiationPlan({
+        detected_language,
+        current_stage: previous_stage,
+        detected_intent,
+        classification,
+        previous_tone,
+        message,
+        signals,
+        offer_price_display,
+        offer_amount,
+      });
+    }
+
     const selected_use_case =
       Number.isFinite(max_cash_offer) && Number.isFinite(asking_price) && asking_price <= max_cash_offer
         ? "price_works_confirm_basics"
