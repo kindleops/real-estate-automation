@@ -293,7 +293,17 @@ function isLikelyPriceContext({
   const last_use_case = deriveLatestOutboundUseCase(context);
 
   if (
-    ["asking_price", "price_works_confirm_basics", "price_high_condition_probe", "offer_reveal"].includes(
+    [
+      "asking_price",
+      "price_works_confirm_basics",
+      "price_high_condition_probe",
+      "offer_reveal",
+      "offer_reveal_cash",
+      "offer_reveal_lease_option",
+      "offer_reveal_subject_to",
+      "offer_reveal_novation",
+      "mf_offer_reveal",
+    ].includes(
       last_use_case
     )
   ) {
@@ -308,7 +318,17 @@ function isLikelyPriceContext({
     return true;
   }
 
-  if (lower(route?.stage) === "offer" || lower(route?.use_case) === "offer_reveal") {
+  if (
+    lower(route?.stage) === "offer" ||
+    [
+      "offer_reveal",
+      "offer_reveal_cash",
+      "offer_reveal_lease_option",
+      "offer_reveal_subject_to",
+      "offer_reveal_novation",
+      "mf_offer_reveal",
+    ].includes(lower(route?.use_case))
+  ) {
     return true;
   }
 

@@ -182,13 +182,7 @@ export async function maybeQueueSellerStageReply({
   );
   const rotation_key = deriveRotationKey({ context, plan });
   const timezone_label = deriveTimezoneLabel(context);
-  const base_contact_window = clean(context?.summary?.contact_window) || "9AM-8PM CT";
-  const allow_after_hours_reply =
-    clean(plan.current_stage) &&
-    clean(plan.current_stage) !== SELLER_FLOW_STAGES.OWNERSHIP_CHECK;
-  const contact_window = allow_after_hours_reply
-    ? buildAlwaysOnContactWindow(timezone_label)
-    : base_contact_window;
+  const contact_window = buildAlwaysOnContactWindow(timezone_label);
   const schedule = schedule_resolver({
     now,
     timezone_label,

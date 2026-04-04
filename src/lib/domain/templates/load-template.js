@@ -1,4 +1,6 @@
 import APP_IDS from "@/lib/config/app-ids.js";
+import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import { evaluateTemplatePlaceholders } from "@/lib/domain/templates/render-template.js";
 import { safeCategoryEquals } from "@/lib/providers/podio.js";
 import { getAttachedFieldSchema } from "@/lib/podio/schema.js";
 import { fetchTemplates } from "@/lib/podio/apps/templates.js";
@@ -22,6 +24,46 @@ const TEMPLATE_FILTER_ALIAS_MAP = Object.freeze({
       "Specialist-Portuguese / Specialist-Portuguese-Corporate",
     "specialist italian": "Specialist-Italian / Specialist-Italian-Family",
   }),
+});
+
+const TEMPLATE_LOOKUP_USE_CASE_ALIASES = Object.freeze({
+  ask_timeline: Object.freeze([
+    "text_me_later_specific",
+    "not_ready",
+    "seller_stalling_after_yes",
+  ]),
+  ask_condition_clarifier: Object.freeze([
+    "condition_question_set",
+    "walkthrough_or_condition",
+    "occupied_asset",
+    "vacant_boarded_probe",
+    "has_tenants",
+  ]),
+  narrow_range: Object.freeze([
+    "can_you_do_better",
+    "best_price",
+    "price_too_low",
+  ]),
+  mf_offer_reveal: Object.freeze([
+    "offer_reveal_cash",
+  ]),
+  offer_reveal_cash_follow_up: Object.freeze([
+    "offer_no_response_followup",
+    "followup_soft",
+    "followup_hard",
+    "persona_warm_professional_followup",
+    "persona_neighborly_followup",
+    "persona_empathetic_followup",
+    "persona_investor_direct_followup",
+    "persona_no-nonsense_closer_followup",
+  ]),
+  price_works_confirm_basics_follow_up: Object.freeze([
+    "followup_soft",
+  ]),
+  price_high_condition_probe_follow_up: Object.freeze([
+    "followup_hard",
+    "followup_soft",
+  ]),
 });
 
 function hashString(value) {
@@ -67,7 +109,40 @@ function getTemplateCategoryValue(external_id, value = null) {
   return (
     field.options.find(
       (option) => normalizeCategoryText(option.text) === normalized_alias
-    )?.text || null
+    )?.text || aliased
+  );
+}
+
+function expandTemplateLookupUseCases(use_case = null) {
+  const normalized_use_case =
+    normalizeSellerFlowUseCase(use_case) || clean(use_case) || null;
+
+  return uniq([
+    normalized_use_case,
+    ...(TEMPLATE_LOOKUP_USE_CASE_ALIASES[normalized_use_case] || []),
+  ]);
+}
+
+function buildLanguagePriority(language = "English", allow_language_fallback = true) {
+  const requested_language = clean(language) || "English";
+
+  return uniq([
+    requested_language,
+    allow_language_fallback && !safeCategoryEquals(requested_language, "English")
+      ? "English"
+      : null,
+  ]);
+}
+
+function isTemplateFilterValidationError(error) {
+  const message = clean(error?.message).toLowerCase();
+
+  return (
+    Number(error?.status || error?.response?.status || 0) === 400 &&
+    (
+      message.includes("invalid category value") ||
+      message.includes("invalid value")
+    )
   );
 }
 
@@ -188,6 +263,9 @@ function applyCooldownFilter(templates, recently_used_template_ids = []) {
 function scoreTemplate(template, preferences = {}) {
   let score = 0;
   const spam_risk = Number.isFinite(template?.spam_risk) ? template.spam_risk : 0;
+  const preferred_use_cases = Array.isArray(preferences.preferred_use_cases)
+    ? preferences.preferred_use_cases.filter(Boolean)
+    : [];
 
   score += template.deliverability_score * 3;
   score += template.historical_reply_rate * 2;
@@ -223,10 +301,7 @@ function scoreTemplate(template, preferences = {}) {
     score += 20;
   }
 
-  if (
-    preferences.preferred_use_case &&
-    safeCategoryEquals(template.use_case, preferences.preferred_use_case)
-  ) {
+  if (preferred_use_cases.some((value) => safeCategoryEquals(template.use_case, value))) {
     score += 22;
   }
 
@@ -253,6 +328,7 @@ function scoreTemplate(template, preferences = {}) {
 
   if (safeCategoryEquals(template.active, "Yes")) score += 50;
   if (template.text?.length > 0) score += 25;
+  if (template.source === "local_registry") score -= 250;
 
   return score;
 }
@@ -542,6 +618,165 @@ export async function fetchTemplatesCached(
   return batch;
 }
 
+function withTemplateSource(templates = [], source = "podio") {
+  return templates.map((template) => ({
+    ...template,
+    source: template?.source || source,
+  }));
+}
+
+async function fetchRemoteTemplatesSafely(remote_fetcher, filter_set) {
+  try {
+    const batch = await remote_fetcher(filter_set);
+    return withTemplateSource(batch, "podio");
+  } catch (error) {
+    if (isTemplateFilterValidationError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+function filterRenderableTemplates(
+  templates = [],
+  {
+    context = null,
+    template_render_overrides = {},
+  } = {}
+) {
+  return templates.filter((template) =>
+    evaluateTemplatePlaceholders({
+      template_text: template?.text || "",
+      use_case: template?.use_case || null,
+      variant_group: template?.variant_group || null,
+      context,
+      overrides: template_render_overrides,
+    }).ok
+  );
+}
+
+async function collectBucketCandidates({
+  source = "podio",
+  filter_sets = [],
+  remote_fetcher = fetchTemplatesCached,
+  local_fetcher = fetchLocalTemplates,
+  recently_used_template_ids = [],
+  context = null,
+  template_render_overrides = {},
+  preferences = {},
+}) {
+  let all_candidates = [];
+
+  for (const filter_set of filter_sets) {
+    const batch =
+      source === "podio"
+        ? await fetchRemoteTemplatesSafely(remote_fetcher, filter_set)
+        : withTemplateSource(local_fetcher(filter_set), "local_registry");
+
+    all_candidates.push(...batch);
+
+    if (batch.length > 0 && all_candidates.length >= 20) break;
+  }
+
+  all_candidates = dedupeTemplates(removeEmptyTemplates(all_candidates));
+  all_candidates = applySpamGuard(all_candidates);
+  all_candidates = applyCooldownFilter(all_candidates, recently_used_template_ids);
+  all_candidates = filterRenderableTemplates(all_candidates, {
+    context,
+    template_render_overrides,
+  });
+
+  if (!all_candidates.length) return [];
+
+  return all_candidates
+    .map((template) => ({
+      ...template,
+      score: scoreTemplate(template, preferences),
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function buildPriorityFilterSets({
+  source = "podio",
+  category = "Residential",
+  secondary_category = null,
+  use_cases = [],
+  variant_group = null,
+  tone = null,
+  gender_variant = "Neutral",
+  languages = [],
+  sequence_position = null,
+  paired_with_agent_type = "Warm Professional",
+  fallback_agent_type = "Warm Professional",
+  include_variant_group = false,
+}) {
+  const builder =
+    source === "podio" ? buildCandidateSets : buildLocalCandidateSets;
+  const categories = [
+    {
+      category,
+      secondary_category,
+    },
+  ];
+
+  if (category || secondary_category) {
+    categories.push({
+      category: null,
+      secondary_category: null,
+    });
+  }
+  const filters = [];
+
+  for (const language of languages) {
+    for (const requested of categories) {
+      if (use_cases.length) {
+        for (const use_case of use_cases) {
+          filters.push(
+            ...builder({
+              category: requested?.category ?? null,
+              secondary_category: requested?.secondary_category ?? null,
+              use_case,
+              variant_group: include_variant_group ? variant_group : null,
+              tone,
+              gender_variant,
+              language,
+              sequence_position,
+              paired_with_agent_type,
+              fallback_agent_type,
+            })
+          );
+        }
+        continue;
+      }
+
+      if (include_variant_group && variant_group) {
+        filters.push(
+          ...builder({
+            category: requested?.category ?? null,
+            secondary_category: requested?.secondary_category ?? null,
+            use_case: null,
+            variant_group,
+            tone,
+            gender_variant,
+            language,
+            sequence_position,
+            paired_with_agent_type,
+            fallback_agent_type,
+          })
+        );
+      }
+    }
+  }
+
+  const seen = new Set();
+  return filters.filter((filter_set) => {
+    const key = stableTemplateBatchCacheKey(filter_set);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export async function loadTemplateCandidates({
   category = "Residential",
   secondary_category = null,
@@ -554,6 +789,10 @@ export async function loadTemplateCandidates({
   paired_with_agent_type = "Warm Professional",
   recently_used_template_ids = [],
   fallback_agent_type = "Warm Professional",
+  context = null,
+  template_render_overrides = {},
+  allow_language_fallback = true,
+  allow_variant_group_fallback = false,
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
 }) {
@@ -568,114 +807,157 @@ export async function loadTemplateCandidates({
     sequence_position,
     paired_with_agent_type,
   });
+  const use_cases = expandTemplateLookupUseCases(use_case);
+  const languages = buildLanguagePriority(language, allow_language_fallback);
+  const requested_language = languages[0] || "English";
+  const fallback_languages = languages.slice(1);
+  const preferences = {
+    preferred_tone: normalized_preferences.tone,
+    preferred_sequence_position:
+      normalized_preferences.sequence_position || sequence_position,
+    preferred_variant_group:
+      normalized_preferences.variant_group || variant_group,
+    preferred_agent_type:
+      normalized_preferences.paired_with_agent_type || paired_with_agent_type,
+    preferred_use_cases: use_cases,
+    preferred_language: requested_language,
+    preferred_category: normalized_preferences.category || category,
+    preferred_secondary_category:
+      normalized_preferences.secondary_category || secondary_category,
+  };
+  const buckets = [];
 
-  const candidate_sets = buildCandidateSets({
-    category,
-    secondary_category,
-    use_case,
-    variant_group,
-    tone,
-    gender_variant,
-    language,
-    sequence_position,
-    paired_with_agent_type,
-    fallback_agent_type,
-  });
-  const local_candidate_sets = buildLocalCandidateSets({
-    category,
-    secondary_category,
-    use_case,
-    variant_group,
-    tone,
-    gender_variant,
-    language,
-    sequence_position,
-    paired_with_agent_type,
-    fallback_agent_type,
-  });
-
-  let all_candidates = [];
-
-  for (const filter_set of candidate_sets) {
-    const batch = await remote_fetcher(filter_set);
-    all_candidates.push(...batch);
-
-    if (batch.length > 0 && all_candidates.length >= 20) break;
-  }
-
-  for (const filter_set of local_candidate_sets) {
-    const batch = local_fetcher(filter_set);
-    all_candidates.push(...batch);
-
-    if (batch.length > 0 && all_candidates.length >= 20) break;
-  }
-
-  if (!all_candidates.length && (category || secondary_category)) {
-    const generic_candidate_sets = buildCandidateSets({
-      category: null,
-      secondary_category: null,
-      use_case,
-      variant_group,
-      tone,
-      gender_variant,
-      language,
-      sequence_position,
-      paired_with_agent_type,
-      fallback_agent_type,
-    });
-    const generic_local_candidate_sets = buildLocalCandidateSets({
-      category: null,
-      secondary_category: null,
-      use_case,
-      variant_group,
-      tone,
-      gender_variant,
-      language,
-      sequence_position,
-      paired_with_agent_type,
-      fallback_agent_type,
-    });
-
-    for (const filter_set of generic_candidate_sets) {
-      const batch = await remote_fetcher(filter_set);
-      all_candidates.push(...batch);
-
-      if (batch.length > 0 && all_candidates.length >= 20) break;
-    }
-
-    for (const filter_set of generic_local_candidate_sets) {
-      const batch = local_fetcher(filter_set);
-      all_candidates.push(...batch);
-
-      if (batch.length > 0 && all_candidates.length >= 20) break;
-    }
-  }
-
-  all_candidates = dedupeTemplates(removeEmptyTemplates(all_candidates));
-  all_candidates = applySpamGuard(all_candidates);
-  all_candidates = applyCooldownFilter(all_candidates, recently_used_template_ids);
-
-  const scored = all_candidates
-    .map((template) => ({
-      ...template,
-      score: scoreTemplate(template, {
-        preferred_tone: normalized_preferences.tone,
-        preferred_sequence_position:
-          normalized_preferences.sequence_position || sequence_position,
-        preferred_variant_group:
-          normalized_preferences.variant_group || variant_group,
-        preferred_agent_type:
-          normalized_preferences.paired_with_agent_type || paired_with_agent_type,
-        preferred_use_case: normalized_preferences.use_case || use_case,
-        preferred_language: normalized_preferences.language || language,
-        preferred_category: normalized_preferences.category || category,
-        preferred_secondary_category:
-          normalized_preferences.secondary_category || secondary_category,
+  if (use_cases.length) {
+    buckets.push({
+      source: "podio",
+      filter_sets: buildPriorityFilterSets({
+        source: "podio",
+        category,
+        secondary_category,
+        use_cases,
+        tone,
+        gender_variant,
+        languages: [requested_language],
+        sequence_position,
+        paired_with_agent_type,
+        fallback_agent_type,
+        include_variant_group: false,
       }),
-    }))
-    .sort((a, b) => b.score - a.score);
+    });
 
-  return scored;
+    if (fallback_languages.length) {
+      buckets.push({
+        source: "podio",
+        filter_sets: buildPriorityFilterSets({
+          source: "podio",
+          category,
+          secondary_category,
+          use_cases,
+          tone,
+          gender_variant,
+          languages: fallback_languages,
+          sequence_position,
+          paired_with_agent_type,
+          fallback_agent_type,
+          include_variant_group: false,
+        }),
+      });
+    }
+  }
+
+  if (allow_variant_group_fallback && variant_group) {
+    buckets.push({
+      source: "podio",
+      filter_sets: buildPriorityFilterSets({
+        source: "podio",
+        category,
+        secondary_category,
+        use_cases: [],
+        variant_group,
+        tone,
+        gender_variant,
+        languages: [requested_language],
+        sequence_position,
+        paired_with_agent_type,
+        fallback_agent_type,
+        include_variant_group: true,
+      }),
+    });
+
+    if (fallback_languages.length) {
+      buckets.push({
+        source: "podio",
+        filter_sets: buildPriorityFilterSets({
+          source: "podio",
+          category,
+          secondary_category,
+          use_cases: [],
+          variant_group,
+          tone,
+          gender_variant,
+          languages: fallback_languages,
+          sequence_position,
+          paired_with_agent_type,
+          fallback_agent_type,
+          include_variant_group: true,
+        }),
+      });
+    }
+  }
+
+  buckets.push({
+    source: "local_registry",
+    filter_sets: buildPriorityFilterSets({
+      source: "local_registry",
+      category,
+      secondary_category,
+      use_cases,
+      tone,
+      gender_variant,
+      languages,
+      sequence_position,
+      paired_with_agent_type,
+      fallback_agent_type,
+      include_variant_group: false,
+    }),
+  });
+
+  if (allow_variant_group_fallback && variant_group) {
+    buckets.push({
+      source: "local_registry",
+      filter_sets: buildPriorityFilterSets({
+        source: "local_registry",
+        category,
+        secondary_category,
+        use_cases: [],
+        variant_group,
+        tone,
+        gender_variant,
+        languages,
+        sequence_position,
+        paired_with_agent_type,
+        fallback_agent_type,
+        include_variant_group: true,
+      }),
+    });
+  }
+
+  for (const bucket of buckets) {
+    const scored = await collectBucketCandidates({
+      source: bucket.source,
+      filter_sets: bucket.filter_sets,
+      remote_fetcher,
+      local_fetcher,
+      recently_used_template_ids,
+      context,
+      template_render_overrides,
+      preferences,
+    });
+
+    if (scored.length) return scored;
+  }
+
+  return [];
 }
 
 /**
@@ -699,6 +981,12 @@ export async function loadTemplate({
   recently_used_template_ids = [],
   rotation_key = null,
   fallback_agent_type = "Warm Professional",
+  context = null,
+  template_render_overrides = {},
+  allow_language_fallback = true,
+  allow_variant_group_fallback = false,
+  remote_fetcher = fetchTemplatesCached,
+  local_fetcher = fetchLocalTemplates,
 }) {
   const scored = await loadTemplateCandidates({
     category,
@@ -712,6 +1000,12 @@ export async function loadTemplate({
     paired_with_agent_type,
     recently_used_template_ids,
     fallback_agent_type,
+    context,
+    template_render_overrides,
+    allow_language_fallback,
+    allow_variant_group_fallback,
+    remote_fetcher,
+    local_fetcher,
   });
 
   if (!scored.length) return null;

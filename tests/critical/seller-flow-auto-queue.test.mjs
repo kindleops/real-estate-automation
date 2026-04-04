@@ -92,7 +92,7 @@ test("seller-stage auto queue uses blank-use-case template lookup for stage 2 an
   assert.equal(queue_calls[0].scheduled_for_local, "2026-04-03 12:14:00");
 });
 
-test("seller-stage stage-1 replies still respect quiet hours outside the seller local window", async () => {
+test("seller-stage replies can send outside quiet hours once the seller has engaged, even from stage 1", async () => {
   const queue_calls = [];
 
   const result = await maybeQueueSellerStageReply({
@@ -113,9 +113,9 @@ test("seller-stage stage-1 replies still respect quiet hours outside the seller 
 
   assert.equal(result.ok, true);
   assert.equal(result.queued, true);
-  assert.equal(result.schedule.within_contact_window, false);
-  assert.match(result.schedule.scheduled_for_local, /^2026-04-03 /);
-  assert.equal(queue_calls[0].contact_window, "9AM-8PM CT");
+  assert.equal(result.schedule.within_contact_window, true);
+  assert.equal(result.schedule.scheduled_for_local, "2026-04-02 22:44:00");
+  assert.equal(queue_calls[0].contact_window, "12AM-11:59PM CT");
 });
 
 test("seller-stage replies after stage 1 can send outside quiet hours with latency only", async () => {

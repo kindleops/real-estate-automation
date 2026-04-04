@@ -18,6 +18,11 @@ const MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES = new Set([
 ]);
 
 const SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES = new Set([
+  "8AM-9PM CT",
+  "8AM-9PM ET",
+  "8AM-9PM MT",
+  "8AM-9PM PT",
+  "8AM-9PM Local",
   "9AM-8PM CT",
   "9AM-11AM ET",
   "12PM-1PM ET",
@@ -84,6 +89,12 @@ const SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES = new Set([
   "6AM-8AM Local",
   "5PM-8PM Local",
 ].map((value) => normalizeCategoryText(value)));
+
+function isValidSendQueueContactWindow(value) {
+  return /^(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s+(?:CT|ET|MT|PT|AT|HT|Local)$/i.test(
+    String(value ?? "").trim()
+  );
+}
 
 function normalizeCategoryText(value) {
   return String(value ?? "")
@@ -163,7 +174,10 @@ function shouldAllowRawCategoryCompatibility(app_id, external_id, value) {
   }
 
   if (normalized_app_id === APP_IDS.send_queue && normalized_external_id === "contact-window") {
-    return SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES.has(normalized);
+    return (
+      SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES.has(normalized) ||
+      isValidSendQueueContactWindow(value)
+    );
   }
 
   return false;

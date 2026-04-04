@@ -883,16 +883,16 @@ function useCaseFromSignals({
       who_is_this: "who_is_this",
       not_interested: "not_interested",
       already_listed: "already_listed",
-      need_more_money: "price_too_low",
+      need_more_money: "justify_price",
       need_time: "not_ready",
       need_family_ok: "family_discussion",
-      send_offer_first: "offer_reveal",
+      send_offer_first: "offer_reveal_cash",
       tenant_issue: "has_tenants",
       condition_bad: "condition_question_set",
       probate: "death_sensitivity",
       divorce: "divorce_sensitivity",
       financial_distress: "foreclosure_pressure",
-      has_other_buyer: "can_you_do_better",
+      has_other_buyer: "narrow_range",
       wants_retail: "seller_asking_price",
       needs_call: "call_me_later_redirect",
       needs_email: "email_for_docs",
@@ -934,7 +934,7 @@ function useCaseFromSignals({
     return "post_close_referral";
   }
   if (stage === STAGES.OWNERSHIP) return "ownership_check";
-  if (stage === STAGES.OFFER) return "offer_reveal";
+  if (stage === STAGES.OFFER) return "offer_reveal_cash";
 
   if (stage === STAGES.CONTRACT) {
     if (mentions_contract_sent) return "contract_sent";
@@ -1070,7 +1070,7 @@ function nextMoveFromSignals({ compliance_flag, objection, stage, emotion, use_c
     return "Confirm ownership cleanly before moving deeper.";
   }
 
-  if (use_case === "offer_reveal") {
+  if (use_case === "offer_reveal_cash") {
     return "Present number cleanly and guide toward the next step.";
   }
 

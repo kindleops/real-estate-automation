@@ -25,7 +25,9 @@ import { LIFECYCLE_STAGES, STAGES } from "@/lib/config/stages.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import {
   canonicalStageForUseCase,
+  followUpUseCaseForStage,
   inferCanonicalUseCaseFromOutboundText,
+  normalizeSellerFlowUseCase,
   preferredAgentTypeForSellerFlow,
 } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import {
@@ -34,7 +36,10 @@ import {
 } from "@/lib/domain/routing/choose-textgrid-number.js";
 import { resolveMarketSendingProfile } from "@/lib/config/market-sending-zones.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
-import { resolveQueueSchedule } from "@/lib/domain/queue/queue-schedule.js";
+import {
+  resolveQueueSchedule,
+  resolveSchedulingContactWindow,
+} from "@/lib/domain/queue/queue-schedule.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
   fetchAllItems,
@@ -1129,21 +1134,28 @@ function resolveLatestOutboundSellerFlow(history = null) {
   };
 }
 
-function deriveNoReplyFollowUpPlan({
+export function deriveNoReplyFollowUpPlan({
   history = null,
   default_category = "Residential",
   default_tone = "Warm",
 } = {}) {
   const latest = resolveLatestOutboundSellerFlow(history);
-  const base_use_case = clean(latest?.selected_use_case);
+  const base_use_case =
+    clean(latest?.next_expected_stage) ||
+    normalizeSellerFlowUseCase(
+      latest?.selected_use_case,
+      latest?.selected_variant_group
+    ) ||
+    null;
+  const follow_up_use_case = followUpUseCaseForStage(base_use_case);
 
-  if (!base_use_case) return null;
+  if (!base_use_case || !follow_up_use_case) return null;
 
   const tone = latest?.selected_tone || default_tone;
 
   const stage_follow_up = (variant_group, category = default_category, paired_with_agent_type = null) => ({
     base_use_case,
-    template_lookup_use_case: "follow_up",
+    template_lookup_use_case: follow_up_use_case,
     variant_group,
     tone,
     category,
@@ -1161,19 +1173,18 @@ function deriveNoReplyFollowUpPlan({
 
   switch (base_use_case) {
     case "ownership_check":
-      return stage_follow_up("Stage 1 — Ownership Confirmation Follow-Up");
+      return stage_follow_up("Stage 1 Follow-Up");
     case "consider_selling":
-      return stage_follow_up("Stage 2 — Consider Selling Follow-Up");
+      return stage_follow_up("Stage 2 Follow-Up");
     case "asking_price":
-      return stage_follow_up("Stage 3 — Asking Price Follow-Up");
+      return stage_follow_up("Stage 3 Follow-Up");
     case "price_works_confirm_basics":
       return stage_follow_up("Stage 4A — Confirm Basics Follow-Up");
     case "price_high_condition_probe":
       return stage_follow_up("Stage 4B — Condition Probe Follow-Up");
-    case "offer_reveal":
-      return stage_follow_up("Stage 5 — Offer Reveal Follow-Up");
-    case "mf_units":
-    case "mf_units_unknown":
+    case "offer_reveal_cash":
+      return stage_follow_up("Stage 5 — Offer No Response");
+    case "mf_confirm_units":
       return stage_follow_up(
         "Multifamily Underwrite — Units Follow-Up",
         "Landlord / Multifamily",
@@ -1823,9 +1834,14 @@ async function evaluateOwner({
     context.summary.timezone ||
     "Central";
   const resolved_contact_window =
-    getCategoryValue(owner_item, MASTER_OWNER_FIELDS.best_contact_window, null) ||
-    context.summary.contact_window ||
-    "9AM-8PM CT";
+    resolveSchedulingContactWindow({
+      contact_window:
+        getCategoryValue(owner_item, MASTER_OWNER_FIELDS.best_contact_window, null) ||
+        context.summary.contact_window ||
+        null,
+      timezone_label: resolved_timezone,
+      is_first_contact: touch_number <= 1,
+    });
   const rotation_key = [
     master_owner_id || "no-owner",
     selected_phone_record.phone_item_id || "no-phone",
@@ -1896,6 +1912,7 @@ async function evaluateOwner({
           follow_up_plan?.fallback_agent_type ||
           route?.template_filters?.fallback_agent_type ||
           "Warm Professional",
+        context,
       })
   );
 
@@ -1921,7 +1938,28 @@ async function evaluateOwner({
       lifecycle_stage: route?.lifecycle_stage || null,
       ai_route: route?.brain_ai_route || context.summary?.brain_ai_route || null,
     },
+    use_case: selected_template?.use_case || follow_up_plan?.template_lookup_use_case,
+    variant_group: selected_template?.variant_group || follow_up_plan?.variant_group,
   });
+
+  if (
+    render_result?.invalid_placeholders?.length ||
+    render_result?.missing_required_placeholders?.length
+  ) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "template_placeholder_validation_failed",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      property: summarizeProperty(property_item, owner_item),
+      template_id: selected_template.item_id,
+      invalid_placeholders: render_result?.invalid_placeholders || [],
+      missing_required_placeholders:
+        render_result?.missing_required_placeholders || [],
+    };
+  }
+
   const rendered_message_text = clean(render_result?.rendered_text || "");
 
   if (!rendered_message_text) {

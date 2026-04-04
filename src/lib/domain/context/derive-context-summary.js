@@ -10,6 +10,31 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function titleCaseIfShouting(value = "") {
+  const raw = clean(value);
+  if (!raw) return "";
+
+  const letters = raw.replace(/[^A-Za-z]+/g, "");
+  if (!letters) return raw;
+
+  const upper_ratio =
+    letters.split("").filter((char) => char === char.toUpperCase()).length / letters.length;
+
+  if (upper_ratio < 0.85) return raw;
+
+  return raw
+    .toLowerCase()
+    .split(/(\s+|-|\/)/)
+    .map((token) => {
+      if (!token || /^\s+$/.test(token) || token === "-" || token === "/") return token;
+      if (/^(n|s|e|w|ne|nw|se|sw)$/i.test(token)) return token.toUpperCase();
+      return token.replace(/\b([a-z])([a-z']*)/g, (_match, first, rest) => {
+        return `${first.toUpperCase()}${rest}`;
+      });
+    })
+    .join("");
+}
+
 function firstNonNull(...values) {
   for (const value of values) {
     if (value !== null && value !== undefined && value !== "") {
@@ -77,6 +102,19 @@ export function deriveContextSummary({
       getTextValue(prospect_item, "name-of-contact", ""),
       getTextValue(prospect_item, "title", "")
     ) || "";
+  const seller_first_name =
+    firstNonNull(
+      getTextValue(phone_item, "phone-first-name", ""),
+      clean(owner_name).split(" ")[0]
+    ) || "";
+  const raw_property_address =
+    firstNonNull(
+      getTextValue(property_item, "property-address", ""),
+      getTextValue(property_item, "title", ""),
+      seller_id_location.property_address
+    ) || "";
+  const raw_property_city =
+    firstNonNull(getTextValue(property_item, "city", ""), seller_id_location.property_city) || "";
 
   return {
     phone_item_id: phone_item?.item_id ?? null,
@@ -111,16 +149,11 @@ export function deriveContextSummary({
     last_outbound_message: getTextValue(brain_item, "last-outbound-message", ""),
 
     owner_name,
+    seller_first_name,
     contact_window: getCategoryValue(master_owner_item, "best-contact-window", null),
 
-    property_address:
-      firstNonNull(
-        getTextValue(property_item, "property-address", ""),
-        getTextValue(property_item, "title", ""),
-        seller_id_location.property_address
-      ) || "",
-    property_city:
-      firstNonNull(getTextValue(property_item, "city", ""), seller_id_location.property_city) || "",
+    property_address: titleCaseIfShouting(raw_property_address),
+    property_city: titleCaseIfShouting(raw_property_city),
     property_state:
       firstNonNull(
         getTextValue(property_item, "state", ""),

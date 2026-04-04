@@ -46,7 +46,7 @@ function createLocalTemplate({
 export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   createLocalTemplate({
     item_id: "local-template:follow_up:ownership:v1",
-    use_case: "follow_up",
+    use_case: "ownership_check_follow_up",
     variant_group: "Stage 1 — Ownership Confirmation Follow-Up",
     sequence_position: "V1",
     category_secondary: "Follow-Up",
@@ -57,7 +57,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:ownership:v2",
-    use_case: "follow_up",
+    use_case: "ownership_check_follow_up",
     variant_group: "Stage 1 — Ownership Confirmation Follow-Up",
     sequence_position: "V2",
     category_secondary: "Follow-Up",
@@ -68,7 +68,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:consider-selling:v1",
-    use_case: "follow_up",
+    use_case: "consider_selling_follow_up",
     variant_group: "Stage 2 — Consider Selling Follow-Up",
     sequence_position: "V1",
     category_secondary: "Follow-Up",
@@ -79,7 +79,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:consider-selling:v2",
-    use_case: "follow_up",
+    use_case: "consider_selling_follow_up",
     variant_group: "Stage 2 — Consider Selling Follow-Up",
     sequence_position: "V2",
     category_secondary: "Follow-Up",
@@ -90,7 +90,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:asking-price:v1",
-    use_case: "follow_up",
+    use_case: "asking_price_follow_up",
     variant_group: "Stage 3 — Asking Price Follow-Up",
     sequence_position: "V1",
     category_secondary: "Follow-Up",
@@ -101,7 +101,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:asking-price:v2",
-    use_case: "follow_up",
+    use_case: "asking_price_follow_up",
     variant_group: "Stage 3 — Asking Price Follow-Up",
     sequence_position: "V2",
     category_secondary: "Follow-Up",
@@ -112,7 +112,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:confirm-basics:v1",
-    use_case: "follow_up",
+    use_case: "price_works_confirm_basics_follow_up",
     variant_group: "Stage 4A — Confirm Basics Follow-Up",
     sequence_position: "V1",
     category_secondary: "Follow-Up",
@@ -123,7 +123,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:confirm-basics:v2",
-    use_case: "follow_up",
+    use_case: "price_works_confirm_basics_follow_up",
     variant_group: "Stage 4A — Confirm Basics Follow-Up",
     sequence_position: "V2",
     category_secondary: "Follow-Up",
@@ -134,7 +134,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:condition-probe:v1",
-    use_case: "follow_up",
+    use_case: "price_high_condition_probe_follow_up",
     variant_group: "Stage 4B — Condition Probe Follow-Up",
     sequence_position: "V1",
     category_secondary: "Follow-Up",
@@ -145,7 +145,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:condition-probe:v2",
-    use_case: "follow_up",
+    use_case: "price_high_condition_probe_follow_up",
     variant_group: "Stage 4B — Condition Probe Follow-Up",
     sequence_position: "V2",
     category_secondary: "Follow-Up",
@@ -156,7 +156,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:offer-reveal:v1",
-    use_case: "follow_up",
+    use_case: "offer_reveal_cash_follow_up",
     variant_group: "Stage 5 — Offer Reveal Follow-Up",
     sequence_position: "V1",
     category_secondary: "Follow-Up",
@@ -167,7 +167,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:offer-reveal:v2",
-    use_case: "follow_up",
+    use_case: "offer_reveal_cash_follow_up",
     variant_group: "Stage 5 — Offer Reveal Follow-Up",
     sequence_position: "V2",
     category_secondary: "Follow-Up",
@@ -288,7 +288,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:mf-units:v1",
-    use_case: "follow_up",
+    use_case: "mf_confirm_units_follow_up",
     variant_group: "Multifamily Underwrite — Units Follow-Up",
     sequence_position: "V1",
     category_primary: "Landlord / Multifamily",
@@ -300,7 +300,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:mf-occupancy:v1",
-    use_case: "follow_up",
+    use_case: "mf_occupancy_follow_up",
     variant_group: "Multifamily Underwrite — Occupancy Follow-Up",
     sequence_position: "V1",
     category_primary: "Landlord / Multifamily",
@@ -312,7 +312,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:mf-rents:v1",
-    use_case: "follow_up",
+    use_case: "mf_rents_follow_up",
     variant_group: "Multifamily Underwrite — Rents Follow-Up",
     sequence_position: "V1",
     category_primary: "Landlord / Multifamily",
@@ -324,7 +324,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:follow_up:mf-expenses:v1",
-    use_case: "follow_up",
+    use_case: "mf_expenses_follow_up",
     variant_group: "Multifamily Underwrite — Expenses Follow-Up",
     sequence_position: "V1",
     category_primary: "Landlord / Multifamily",
@@ -336,7 +336,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:mf_units_unknown:v1",
-    use_case: "mf_units_unknown",
+    use_case: "mf_confirm_units",
     variant_group: "Multifamily Underwrite - Units (Open)",
     sequence_position: "V1",
     category_primary: "Landlord / Multifamily",
@@ -346,7 +346,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:mf_units_unknown:v2",
-    use_case: "mf_units_unknown",
+    use_case: "mf_confirm_units",
     variant_group: "Multifamily Underwrite - Units (Open)",
     sequence_position: "V2",
     category_primary: "Landlord / Multifamily",
@@ -416,7 +416,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:mf_finalize_to_offer:v1",
-    use_case: "mf_finalize_to_offer",
+    use_case: "mf_underwriting_ack",
     variant_group: "Multifamily Underwrite — Finalize",
     sequence_position: "V1",
     category_primary: "Landlord / Multifamily",
@@ -426,7 +426,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
   }),
   createLocalTemplate({
     item_id: "local-template:mf_finalize_to_offer:v2",
-    use_case: "mf_finalize_to_offer",
+    use_case: "mf_underwriting_ack",
     variant_group: "Multifamily Underwrite — Finalize",
     sequence_position: "V2",
     category_primary: "Landlord / Multifamily",

@@ -5,7 +5,10 @@ import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
-import { resolveQueueSchedule } from "@/lib/domain/queue/queue-schedule.js";
+import {
+  resolveQueueSchedule,
+  resolveSchedulingContactWindow,
+} from "@/lib/domain/queue/queue-schedule.js";
 import { chooseTextgridNumber } from "@/lib/domain/routing/choose-textgrid-number.js";
 import { normalizeUsPhone10 } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
@@ -88,7 +91,14 @@ function deriveSendPriority({
     objection === "financial_distress" ||
     objection === "send_offer_first" ||
     emotion === "motivated" ||
-    use_case === "offer_reveal" ||
+    [
+      "offer_reveal",
+      "offer_reveal_cash",
+      "offer_reveal_lease_option",
+      "offer_reveal_subject_to",
+      "offer_reveal_novation",
+      "mf_offer_reveal",
+    ].includes(use_case) ||
     ["clear_to_close", "day_before_close", "seller_docs_needed", "probate_doc_needed"].includes(
       use_case
     )
@@ -130,7 +140,7 @@ function deriveContactWindow({
   return (
     explicit_contact_window ||
     context?.summary?.contact_window ||
-    "9AM-8PM CT"
+    "8AM-9PM Local"
   );
 }
 
@@ -148,6 +158,21 @@ function deriveRotationKey({
     use_case || "no-use-case",
     stage || "no-stage",
   ].join(":");
+}
+
+function deriveNextTouchNumber({
+  explicit_touch_number = null,
+  context = null,
+}) {
+  const parsed = Number(explicit_touch_number);
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+
+  const historical_touch_count =
+    context?.recent?.touch_count ||
+    context?.summary?.total_messages_sent ||
+    0;
+
+  return Math.max(1, Number(historical_touch_count || 0) + 1);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -348,13 +373,30 @@ export async function queueOutboundMessage({
     use_case: resolved_use_case,
     stage: resolved_lifecycle_stage || route?.stage,
   });
+  const resolved_message_type = deriveMessageType({
+    explicit_message_type: message_type,
+    use_case: resolved_use_case,
+    stage: route?.stage,
+    lifecycle_stage: resolved_lifecycle_stage,
+    compliance_flag: classification?.compliance_flag,
+  });
+  const resolved_touch_number = deriveNextTouchNumber({
+    explicit_touch_number: touch_number,
+    context,
+  });
   const resolved_timezone = deriveTimezone({
     explicit_timezone: timezone,
     context,
   });
-  const resolved_contact_window = deriveContactWindow({
+  const base_contact_window = deriveContactWindow({
     explicit_contact_window: contact_window,
     context,
+  });
+  const resolved_contact_window = resolveSchedulingContactWindow({
+    contact_window: base_contact_window,
+    timezone_label: resolved_timezone,
+    is_first_contact:
+      resolved_message_type === "Cold Outbound" && resolved_touch_number <= 1,
   });
 
   let selected_template = template_item || null;
@@ -374,6 +416,8 @@ export async function queueOutboundMessage({
         context?.recent?.recently_used_template_ids || [],
       rotation_key: resolved_rotation_key,
       fallback_agent_type: resolved_fallback_agent_type,
+      context,
+      template_render_overrides,
     });
   }
 
@@ -421,7 +465,37 @@ export async function queueOutboundMessage({
         ai_route: route?.brain_ai_route,
         ...(template_render_overrides || {}),
       },
+      use_case: selected_template?.use_case || resolved_template_lookup_use_case,
+      variant_group: selected_template?.variant_group || resolved_variant_group,
     });
+
+    if (
+      render_result?.invalid_placeholders?.length ||
+      render_result?.missing_required_placeholders?.length
+    ) {
+      warn("outbound.queue_message_template_placeholder_validation_failed", {
+        inbound_from: resolved_inbound_from,
+        phone_item_id: context?.ids?.phone_item_id || null,
+        template_id: selected_template_id,
+        invalid_placeholders: render_result?.invalid_placeholders || [],
+        missing_required_placeholders:
+          render_result?.missing_required_placeholders || [],
+      });
+
+      return {
+        ok: false,
+        stage: "render",
+        reason: "template_placeholder_validation_failed",
+        inbound_from: normalized_inbound_from,
+        context,
+        classification,
+        route,
+        template_id: selected_template_id,
+        invalid_placeholders: render_result?.invalid_placeholders || [],
+        missing_required_placeholders:
+          render_result?.missing_required_placeholders || [],
+      };
+    }
 
     final_message_text = clean(render_result?.rendered_text || "");
   }
@@ -516,17 +590,13 @@ export async function queueOutboundMessage({
       route,
     }),
     message_type: deriveMessageType({
-      explicit_message_type: message_type,
-      use_case: resolved_use_case,
-      stage: route?.stage,
-      lifecycle_stage: resolved_lifecycle_stage,
-      compliance_flag: classification?.compliance_flag,
+      explicit_message_type: resolved_message_type,
     }),
     max_retries,
     queue_status: deriveQueueStatus(queue_status),
     dnc_check,
     delivery_confirmed,
-    touch_number,
+    touch_number: resolved_touch_number,
     queue_id,
   });
 

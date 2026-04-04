@@ -57,6 +57,14 @@ test("send queue contact-window still rejects unknown labels", () => {
   );
 });
 
+test("send queue contact-window allows derived first-contact quiet-hour windows", () => {
+  const fields = normalizePodioFieldMap(APP_IDS.send_queue, {
+    "contact-window": "8AM-9AM CT",
+  });
+
+  assert.equal(fields["contact-window"], "8AM-9AM CT");
+});
+
 test("ai conversation brain linked-message-events accepts message event app refs", () => {
   const fields = normalizePodioFieldMap(APP_IDS.ai_conversation_brain, {
     "linked-message-events": [30541681, "30541682"],

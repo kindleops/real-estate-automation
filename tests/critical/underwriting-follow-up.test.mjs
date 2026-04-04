@@ -101,7 +101,46 @@ test("multifamily underwriting follow-up finalizes to internal offer when seller
   assert.equal(result.ok, true);
   assert.equal(result.queued, true);
   assert.equal(result.offer_ready, true);
-  assert.equal(result.follow_up.use_case, "mf_finalize_to_offer");
+  assert.equal(result.follow_up.use_case, "mf_underwriting_ack");
   assert.equal(queue_calls.length, 1);
-  assert.equal(queue_calls[0].use_case, "mf_finalize_to_offer");
+  assert.equal(queue_calls[0].use_case, "mf_underwriting_ack");
+});
+
+test("multifamily underwriting follow-up acknowledges and advances when rents are missing but seller does not know them", async () => {
+  const queue_calls = [];
+
+  const result = await maybeQueueUnderwritingFollowUp({
+    inbound_from: "+15550000001",
+    context: buildMultifamilyContext("mf_rents"),
+    message: "I don't know the rents off hand.",
+    underwriting: {
+      signals: {
+        unit_count: 12,
+        occupancy_status: "Tenant Occupied",
+        rents_present: false,
+        expenses_present: true,
+      },
+      strategy: {
+        property_type: "Multifamily",
+        strategy: "mf_auto_underwrite",
+        needs_manual_review: false,
+      },
+    },
+    queue_status: "Queued",
+    create_brain_if_missing: false,
+    classification: { language: "English", emotion: "calm" },
+    route: { stage: "Offer" },
+    created_by: "test",
+    queue_message: async (payload) => {
+      queue_calls.push(payload);
+      return { ok: true };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.queued, true);
+  assert.equal(result.offer_ready, true);
+  assert.equal(result.follow_up.use_case, "mf_underwriting_ack");
+  assert.equal(queue_calls.length, 1);
+  assert.equal(queue_calls[0].use_case, "mf_underwriting_ack");
 });

@@ -129,7 +129,7 @@ function normalizeTimezone(value) {
   return "Central";
 }
 
-function normalizeContactWindow(value, fallback = "9AM-8PM CT") {
+function normalizeContactWindow(value, fallback = "8AM-9PM Local") {
   const raw = String(value || "").trim();
   return raw || fallback;
 }
@@ -347,7 +347,7 @@ export async function buildSendQueueItem({
   const resolved_contact_window = normalizeContactWindow(
     contact_window ||
       context.summary?.contact_window ||
-      "9AM-8PM CT"
+      "8AM-9PM Local"
   );
 
   const template_field_value = maybeTemplateFieldValue(template_id, template_item);

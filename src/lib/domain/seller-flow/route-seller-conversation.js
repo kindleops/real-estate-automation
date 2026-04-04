@@ -3,6 +3,7 @@ import { formatUsd } from "@/lib/utils/money.js";
 import { extractUnderwritingSignals } from "@/lib/domain/underwriting/extract-underwriting-signals.js";
 import {
   SELLER_FLOW_STAGES,
+  normalizeSellerFlowUseCase,
   canonicalStageForUseCase,
   inferCanonicalUseCaseFromOutboundText,
   normalizeSellerFlowTone,
@@ -24,6 +25,22 @@ function includesAny(text, needles = []) {
 
 function hasAffirmative(message = "") {
   return /^(yes|yeah|yep|yup|correct|that'?s right|sure|ok|okay)\b/i.test(clean(message));
+}
+
+function hasTimelineHesitation(message = "", classification = null) {
+  if (clean(classification?.objection) === "need_time") return true;
+
+  return includesAny(message, [
+    "not sure yet",
+    "need some time",
+    "let me think",
+    "have to think about it",
+    "need to think about it",
+    "not ready yet",
+    "maybe later",
+    "circle back later",
+    "not there yet",
+  ]);
 }
 
 function detectIdentityRoute(message = "", classification = null) {
@@ -166,6 +183,7 @@ function hasCounterSignal(message = "", classification = null) {
 
   return includesAny(message, [
     "too low",
+    "seems low",
     "can you do better",
     "need more",
     "come up",
@@ -224,6 +242,7 @@ function hasEmotionalResistance(message = "", classification = null) {
 function hasSoftCounterSignal(message = "") {
   return includesAny(message, [
     "too low",
+    "seems low",
     "can you do better",
     "can you do a little better",
     "a little better",
@@ -266,10 +285,18 @@ function hasPropertyInfo(signals = {}) {
   return Boolean(
     signals.occupancy_status ||
       signals.condition_level ||
+      signals.estimated_repair_cost ||
       signals.timeline ||
       signals.unit_count ||
       signals.rents_present ||
       signals.expenses_present
+  );
+}
+
+function hasEnoughPropertyFactsForNegotiation(signals = {}) {
+  return Boolean(
+    signals.occupancy_status &&
+      (signals.condition_level || signals.estimated_repair_cost || signals.timeline)
   );
 }
 
@@ -353,10 +380,12 @@ function derivePreviousOutboundPlan({
   context = null,
   previous_outbound_use_case = null,
 } = {}) {
-  if (clean(previous_outbound_use_case)) {
+  const explicit_use_case = normalizeSellerFlowUseCase(previous_outbound_use_case);
+
+  if (explicit_use_case) {
     return {
-      selected_use_case: clean(previous_outbound_use_case),
-      next_expected_stage: canonicalStageForUseCase(previous_outbound_use_case),
+      selected_use_case: explicit_use_case,
+      next_expected_stage: canonicalStageForUseCase(explicit_use_case),
       selected_tone: null,
     };
   }
@@ -370,10 +399,14 @@ function derivePreviousOutboundPlan({
   );
 
   const metadata = latest_outbound?.metadata || {};
-  const selected_use_case = clean(
+  const selected_use_case = normalizeSellerFlowUseCase(
     metadata.selected_use_case ||
       latest_outbound?.selected_use_case ||
-      metadata.canonical_use_case
+      metadata.canonical_use_case,
+    metadata.selected_variant_group ||
+      metadata.variant_group ||
+      latest_outbound?.selected_variant_group ||
+      latest_outbound?.variant_group
   );
   const next_expected_stage = clean(
     metadata.next_expected_stage ||
@@ -420,7 +453,7 @@ function derivePreviousOutboundPlan({
   if (conversation_stage === "Follow-Up") {
     return {
       selected_use_case: "reengagement",
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: SELLER_FLOW_STAGES.REENGAGEMENT,
       selected_tone: "Warm",
     };
   }
@@ -458,6 +491,7 @@ function detectIntent({
     (
       hasHandoffTrigger(message, classification) ||
       hasEmotionalResistance(message, classification) ||
+      hasTimelineHesitation(message, classification) ||
       hasHardCounterSignal({
         message,
         counter_amount: signals.asking_price,
@@ -519,9 +553,105 @@ function resolveOfferAmount({
 
 function isPostOfferNegotiationStage(stage = null) {
   return [
-    SELLER_FLOW_STAGES.OFFER_REVEAL,
-    SELLER_FLOW_STAGES.NEGOTIATION,
+    SELLER_FLOW_STAGES.OFFER_REVEAL_CASH,
+    SELLER_FLOW_STAGES.OFFER_REVEAL_LEASE_OPTION,
+    SELLER_FLOW_STAGES.OFFER_REVEAL_SUBJECT_TO,
+    SELLER_FLOW_STAGES.OFFER_REVEAL_NOVATION,
+    SELLER_FLOW_STAGES.MF_OFFER_REVEAL,
+    SELLER_FLOW_STAGES.JUSTIFY_PRICE,
+    SELLER_FLOW_STAGES.ASK_TIMELINE,
+    SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER,
+    SELLER_FLOW_STAGES.NARROW_RANGE,
+    SELLER_FLOW_STAGES.CLOSE_HANDOFF,
   ].includes(clean(stage));
+}
+
+function determineCreativeRevealUseCase(signals = {}) {
+  const creative_strategy = lower(signals.creative_strategy);
+
+  if (signals.novation_interest === true || creative_strategy.includes("novation")) {
+    return SELLER_FLOW_STAGES.OFFER_REVEAL_NOVATION;
+  }
+
+  if (creative_strategy.includes("lease option") || creative_strategy.includes("lease purchase")) {
+    return SELLER_FLOW_STAGES.OFFER_REVEAL_LEASE_OPTION;
+  }
+
+  if (
+    signals.creative_terms_interest === true ||
+    creative_strategy.includes("subject") ||
+    creative_strategy.includes("seller finance") ||
+    creative_strategy.includes("creative")
+  ) {
+    return SELLER_FLOW_STAGES.OFFER_REVEAL_SUBJECT_TO;
+  }
+
+  return SELLER_FLOW_STAGES.OFFER_REVEAL_CASH;
+}
+
+function determineOfferRevealUseCase({ signals = {} } = {}) {
+  return determineCreativeRevealUseCase(signals);
+}
+
+function isCreativeEligible({ signals = {}, asking_price = null, max_cash_offer = null } = {}) {
+  if (!Number.isFinite(Number(asking_price)) || !Number.isFinite(Number(max_cash_offer))) {
+    return false;
+  }
+
+  if (Number(asking_price) <= Number(max_cash_offer)) return false;
+
+  return Boolean(
+    signals.creative_terms_interest === true ||
+      signals.novation_interest === true ||
+      clean(signals.creative_strategy)
+  );
+}
+
+function variantGroupForUseCase(use_case = null) {
+  switch (normalizeSellerFlowUseCase(use_case)) {
+    case SELLER_FLOW_STAGES.CONSIDER_SELLING:
+      return "Stage 2 Consider Selling";
+    case SELLER_FLOW_STAGES.ASKING_PRICE:
+      return "Stage 3 Asking Price";
+    case SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS:
+      return "Stage 4A Confirm Basics";
+    case SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE:
+      return "Stage 4B Condition Probe";
+    case SELLER_FLOW_STAGES.CREATIVE_PROBE:
+      return "Stage 4C Creative Probe";
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_CASH:
+      return "Stage 5A Cash Offer Reveal";
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_LEASE_OPTION:
+      return "Stage 5B Lease Option Reveal";
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_SUBJECT_TO:
+      return "Stage 5C Subject-To Reveal";
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_NOVATION:
+      return "Stage 5D Novation Reveal";
+    case SELLER_FLOW_STAGES.MF_CONFIRM_UNITS:
+      return "MF1 Confirm Units";
+    case SELLER_FLOW_STAGES.MF_OCCUPANCY:
+      return "MF2 Occupancy";
+    case SELLER_FLOW_STAGES.MF_RENTS:
+      return "MF3 Rents";
+    case SELLER_FLOW_STAGES.MF_EXPENSES:
+      return "MF4 Expenses";
+    case SELLER_FLOW_STAGES.MF_UNDERWRITING_ACK:
+      return "MF5 Underwriting Ack";
+    case SELLER_FLOW_STAGES.MF_OFFER_REVEAL:
+      return "MF6 Offer Reveal";
+    case SELLER_FLOW_STAGES.JUSTIFY_PRICE:
+      return "Stage 6A Justify Price";
+    case SELLER_FLOW_STAGES.ASK_TIMELINE:
+      return "Stage 6B Ask Timeline";
+    case SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER:
+      return "Stage 6C Ask Condition Clarifier";
+    case SELLER_FLOW_STAGES.NARROW_RANGE:
+      return "Stage 6D Narrow Range";
+    case SELLER_FLOW_STAGES.CLOSE_HANDOFF:
+      return "Stage 6E Close Handoff";
+    default:
+      return null;
+  }
 }
 
 function buildPlan({
@@ -590,7 +720,8 @@ function buildNegotiationPlan({
   });
   const soft_counter = hasSoftCounterSignal(message);
   const emotional_resistance = hasEmotionalResistance(message, classification);
-  const property_info_present = hasPropertyInfo(signals);
+  const timeline_hesitation = hasTimelineHesitation(message, classification);
+  const has_enough_property_facts = hasEnoughPropertyFactsForNegotiation(signals);
   const timeline_present = Boolean(signals.timeline);
 
   if (hasHandoffTrigger(message, classification)) {
@@ -598,11 +729,11 @@ function buildNegotiationPlan({
       detected_language,
       current_stage,
       detected_intent,
-      selected_use_case: "negotiation_follow_up",
-      template_use_case: "close_handoff",
-      selected_variant_group: "Stage 6 — Close / Handoff",
+      selected_use_case: SELLER_FLOW_STAGES.CLOSE_HANDOFF,
+      template_use_case: SELLER_FLOW_STAGES.CLOSE_HANDOFF,
+      selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.CLOSE_HANDOFF),
       selected_tone: "Warm",
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: SELLER_FLOW_STAGES.CLOSE_HANDOFF,
       reasoning_summary: "Seller is signaling readiness for the next step, so the flow should move toward handoff instead of re-trading price.",
       response_tier: "hot",
       offer_price_display,
@@ -610,24 +741,25 @@ function buildNegotiationPlan({
   }
 
   if (
-    current_stage === SELLER_FLOW_STAGES.OFFER_REVEAL &&
-    !property_info_present &&
+    !has_enough_property_facts &&
     !timeline_present &&
-    (hard_counter || soft_counter || emotional_resistance)
+    (hard_counter || soft_counter || emotional_resistance || timeline_hesitation)
   ) {
     return buildPlan({
       detected_language,
       current_stage,
       detected_intent,
-      selected_use_case: "negotiation_follow_up",
-      template_use_case: "ask_condition_clarifier",
-      selected_variant_group: "Negotiation — Condition Clarifier",
+      selected_use_case: SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER,
+      template_use_case: SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER,
+      selected_variant_group: variantGroupForUseCase(
+        SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER
+      ),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
-        selected_use_case: "negotiation_follow_up",
+        selected_use_case: SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER,
       }),
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER,
       reasoning_summary: "Seller pushed back on price before enough property facts were confirmed, so the next move is to clarify condition and occupancy.",
       response_tier: "hot",
       offer_price_display,
@@ -639,31 +771,31 @@ function buildNegotiationPlan({
       detected_language,
       current_stage,
       detected_intent,
-      selected_use_case: "negotiation_follow_up",
-      template_use_case: "narrow_range",
-      selected_variant_group: "Negotiation — Narrow Range",
+      selected_use_case: SELLER_FLOW_STAGES.NARROW_RANGE,
+      template_use_case: SELLER_FLOW_STAGES.NARROW_RANGE,
+      selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.NARROW_RANGE),
       selected_tone: "Direct",
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: SELLER_FLOW_STAGES.NARROW_RANGE,
       reasoning_summary: "Seller gave a firm counter, so the next move is to narrow the gap instead of repeating the same anchor.",
       response_tier: "hot",
       offer_price_display,
     });
   }
 
-  if (emotional_resistance && !soft_counter) {
+  if ((timeline_hesitation || emotional_resistance) && !soft_counter) {
     return buildPlan({
       detected_language,
       current_stage,
       detected_intent,
-      selected_use_case: "negotiation_follow_up",
-      template_use_case: "ask_timeline",
-      selected_variant_group: "Negotiation — Timeline",
+      selected_use_case: SELLER_FLOW_STAGES.ASK_TIMELINE,
+      template_use_case: SELLER_FLOW_STAGES.ASK_TIMELINE,
+      selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.ASK_TIMELINE),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
-        selected_use_case: "negotiation_follow_up",
+        selected_use_case: SELLER_FLOW_STAGES.ASK_TIMELINE,
       }),
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: SELLER_FLOW_STAGES.ASK_TIMELINE,
       reasoning_summary: "Seller is resisting the number emotionally without giving a clear counter, so the next move is to qualify timeline and urgency.",
       response_tier: "neutral",
       offer_price_display,
@@ -674,15 +806,15 @@ function buildNegotiationPlan({
     detected_language,
     current_stage,
     detected_intent,
-    selected_use_case: "negotiation_follow_up",
-    template_use_case: "justify_price",
-    selected_variant_group: "Negotiation — Justify Price",
+    selected_use_case: SELLER_FLOW_STAGES.JUSTIFY_PRICE,
+    template_use_case: SELLER_FLOW_STAGES.JUSTIFY_PRICE,
+    selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.JUSTIFY_PRICE),
     selected_tone: chooseConversationalTone({
       classification,
       previous_tone,
-      selected_use_case: "negotiation_follow_up",
+      selected_use_case: SELLER_FLOW_STAGES.JUSTIFY_PRICE,
     }),
-    next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+    next_expected_stage: SELLER_FLOW_STAGES.JUSTIFY_PRICE,
     reasoning_summary: "Seller is negotiating around price, so the next move is to justify the range and keep the conversation moving.",
     response_tier: "hot",
     offer_price_display,
@@ -840,7 +972,7 @@ export function routeSellerConversation({
       template_use_case: "not_interested",
       selected_variant_group: "Soft Close",
       selected_tone: "Calm",
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
       reasoning_summary: "Seller declined, so the flow uses a short polite close instead of continuing the pitch.",
       response_tier: "cold",
     });
@@ -861,36 +993,32 @@ export function routeSellerConversation({
       });
     }
 
-    const template_use_case =
-      previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
-        ? "close_ask_soft"
-        : clean(classification?.objection) === "need_more_money"
-          ? "can_you_do_better"
-          : "price_too_low";
-
-    const selected_variant_group =
-      template_use_case === "close_ask_soft"
-        ? "Stage 6 — Close / Handoff"
-        : template_use_case === "can_you_do_better"
-          ? "Negotiation — Improve Offer"
-          : "Objection — Price Too Low";
-
     return buildPlan({
       detected_language,
       current_stage: previous_stage,
       detected_intent,
-      selected_use_case: "negotiation_follow_up",
-      template_use_case,
-      selected_variant_group,
+      selected_use_case: previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
+        ? SELLER_FLOW_STAGES.CLOSE_HANDOFF
+        : SELLER_FLOW_STAGES.JUSTIFY_PRICE,
+      template_use_case: previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
+        ? SELLER_FLOW_STAGES.CLOSE_HANDOFF
+        : SELLER_FLOW_STAGES.JUSTIFY_PRICE,
+      selected_variant_group: variantGroupForUseCase(
+        previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
+          ? SELLER_FLOW_STAGES.CLOSE_HANDOFF
+          : SELLER_FLOW_STAGES.JUSTIFY_PRICE
+      ),
       selected_tone:
-        template_use_case === "close_ask_soft"
+        previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
           ? "Warm"
           : chooseConversationalTone({
               classification,
               previous_tone,
-              selected_use_case: "negotiation_follow_up",
+              selected_use_case: SELLER_FLOW_STAGES.JUSTIFY_PRICE,
             }),
-      next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
+      next_expected_stage: previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
+        ? SELLER_FLOW_STAGES.CLOSE_HANDOFF
+        : SELLER_FLOW_STAGES.JUSTIFY_PRICE,
       reasoning_summary: "Seller is negotiating against a prior number, so the next move stays in negotiation rather than restarting discovery.",
       response_tier: "hot",
     });
@@ -912,9 +1040,17 @@ export function routeSellerConversation({
     }
 
     const selected_use_case =
-      Number.isFinite(max_cash_offer) && Number.isFinite(asking_price) && asking_price <= max_cash_offer
-        ? "price_works_confirm_basics"
-        : "price_high_condition_probe";
+      Number.isFinite(max_cash_offer) &&
+      Number.isFinite(asking_price) &&
+      asking_price <= max_cash_offer
+        ? SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
+        : isCreativeEligible({
+            signals,
+            asking_price,
+            max_cash_offer,
+          })
+          ? SELLER_FLOW_STAGES.CREATIVE_PROBE
+          : SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE;
 
     return buildPlan({
       detected_language,
@@ -923,10 +1059,7 @@ export function routeSellerConversation({
       selected_use_case,
       template_use_case: null,
       template_lookup_use_case: null,
-      selected_variant_group:
-        selected_use_case === "price_works_confirm_basics"
-          ? "Stage 4A Confirm Basics"
-          : "Stage 4B Condition Probe",
+      selected_variant_group: variantGroupForUseCase(selected_use_case),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
@@ -934,27 +1067,31 @@ export function routeSellerConversation({
       }),
       next_expected_stage: canonicalStageForUseCase(selected_use_case),
       reasoning_summary:
-        selected_use_case === "price_works_confirm_basics"
+        selected_use_case === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS
           ? "Seller gave a price that fits the current buy box, so the next text confirms basics instead of countering."
+          : selected_use_case === SELLER_FLOW_STAGES.CREATIVE_PROBE
+            ? "Seller is above the cash buy box but showed creative-fit signals, so the next move is to test lease-option, subject-to, or novation openness."
           : "Seller gave a price above the current buy box or no internal ceiling was available, so the next text gathers condition and occupancy before countering.",
       response_tier: "hot",
     });
   }
 
   if (detected_intent === "No Asking Price / Reverse Offer Request") {
+    const reveal_use_case = determineOfferRevealUseCase({ signals });
+
     return buildPlan({
       detected_language,
       current_stage: previous_stage,
       detected_intent,
-      selected_use_case: "offer_reveal",
-      template_use_case: "offer_reveal",
-      selected_variant_group: "Stage 5 Offer Reveal",
+      selected_use_case: reveal_use_case,
+      template_use_case: reveal_use_case,
+      selected_variant_group: variantGroupForUseCase(reveal_use_case),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
-        selected_use_case: "offer_reveal",
+        selected_use_case: reveal_use_case,
       }),
-      next_expected_stage: SELLER_FLOW_STAGES.OFFER_REVEAL,
+      next_expected_stage: canonicalStageForUseCase(reveal_use_case),
       reasoning_summary: "Seller asked us for the number, so the flow can reveal a rough as-is offer without forcing them to set price first.",
       response_tier: "hot",
       offer_price_display,
@@ -962,38 +1099,37 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "Property Info Provided") {
-    if (previous_stage === SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE) {
+    if (
+      [
+        SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE,
+        SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS,
+        SELLER_FLOW_STAGES.CREATIVE_PROBE,
+      ].includes(previous_stage)
+    ) {
+      const reveal_use_case =
+        previous_stage === SELLER_FLOW_STAGES.CREATIVE_PROBE
+          ? determineOfferRevealUseCase({ signals })
+          : SELLER_FLOW_STAGES.OFFER_REVEAL_CASH;
+
       return buildPlan({
         detected_language,
         current_stage: previous_stage,
         detected_intent,
-        selected_use_case: "offer_reveal",
-        template_use_case: "offer_reveal",
-        selected_variant_group: "Stage 5 Offer Reveal",
+        selected_use_case: reveal_use_case,
+        template_use_case: reveal_use_case,
+        selected_variant_group: variantGroupForUseCase(reveal_use_case),
         selected_tone: chooseConversationalTone({
           classification,
           previous_tone,
-          selected_use_case: "offer_reveal",
+          selected_use_case: reveal_use_case,
         }),
-        next_expected_stage: SELLER_FLOW_STAGES.OFFER_REVEAL,
-        reasoning_summary: "Seller answered the condition probe, so the flow has enough context to reveal the number.",
+        next_expected_stage: canonicalStageForUseCase(reveal_use_case),
+        reasoning_summary:
+          previous_stage === SELLER_FLOW_STAGES.CREATIVE_PROBE
+            ? "Seller engaged on the creative branch, so the next move is to reveal the matching creative structure."
+            : "Seller answered the property-fact questions, so the flow now has enough context to reveal the number.",
         response_tier: "hot",
         offer_price_display,
-      });
-    }
-
-    if (previous_stage === SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS) {
-      return buildPlan({
-        detected_language,
-        current_stage: previous_stage,
-        detected_intent,
-        selected_use_case: "negotiation_follow_up",
-        template_use_case: "close_ask_soft",
-        selected_variant_group: "Stage 6 — Close / Handoff",
-        selected_tone: "Warm",
-        next_expected_stage: SELLER_FLOW_STAGES.NEGOTIATION,
-        reasoning_summary: "Seller confirmed the basics after an acceptable ask, so the flow moves toward the next step instead of re-asking discovery questions.",
-        response_tier: "hot",
       });
     }
   }
@@ -1006,7 +1142,7 @@ export function routeSellerConversation({
       selected_use_case: "asking_price",
       template_use_case: null,
       template_lookup_use_case: null,
-      selected_variant_group: "Stage 3 Asking Price",
+      selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.ASKING_PRICE),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
@@ -1026,7 +1162,7 @@ export function routeSellerConversation({
       selected_use_case: "consider_selling",
       template_use_case: null,
       template_lookup_use_case: null,
-      selected_variant_group: "Stage 2 Consider Selling",
+      selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.CONSIDER_SELLING),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,

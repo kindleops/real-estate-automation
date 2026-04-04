@@ -2,34 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
-
-function textField(external_id, value) {
-  return {
-    external_id,
-    values: [{ value }],
-  };
-}
-
-test("deriveContextSummary falls back to seller-id location and agent title first name", () => {
+import {
+  createPodioItem,
+  textField,
+} from "../helpers/test-helpers.js";
+test("deriveContextSummary falls back to phone-first-name and title-cases shouting address fields", () => {
   const summary = deriveContextSummary({
-    master_owner_item: {
-      item_id: 10,
-      fields: [
-        textField("seller-id", "P~SMITH|ZELFORD~2717 S 124TH EAST AVE|TULSA|OK|74129"),
-        textField("owner-full-name", "Zelford Smith Jr"),
-      ],
-    },
-    agent_item: {
-      item_id: 20,
-      fields: [
-        textField("title", "Rachel Kim"),
-      ],
-    },
+    phone_item: createPodioItem(11, {
+      "phone-first-name": textField("Sam"),
+    }),
+    master_owner_item: createPodioItem(10, {
+      "seller-id": textField("P~SMITH|ZELFORD~2717 S 124TH EAST AVE|TULSA|OK|74129"),
+      "owner-full-name": textField("Zelford Smith Jr"),
+    }),
+    agent_item: createPodioItem(20, {
+      title: textField("Rachel Kim"),
+    }),
   });
 
   assert.equal(summary.owner_name, "Zelford Smith Jr");
-  assert.equal(summary.property_address, "2717 S 124TH EAST AVE");
-  assert.equal(summary.property_city, "TULSA");
+  assert.equal(summary.seller_first_name, "Sam");
+  assert.equal(summary.property_address, "2717 S 124th East Ave");
+  assert.equal(summary.property_city, "Tulsa");
   assert.equal(summary.property_state, "OK");
   assert.equal(summary.agent_name, "Rachel Kim");
   assert.equal(summary.agent_first_name, "Rachel");

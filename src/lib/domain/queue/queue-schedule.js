@@ -100,6 +100,40 @@ function parseTimeToken(token) {
   return hour * 60 + minute;
 }
 
+function formatTimeToken(total_minutes = 0) {
+  const clamped = Math.max(0, Math.min(24 * 60 - 1, Number(total_minutes) || 0));
+  const hour24 = Math.floor(clamped / 60);
+  const minute = clamped % 60;
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  let hour12 = hour24 % 12;
+  if (hour12 === 0) hour12 = 12;
+
+  return minute === 0 ? `${hour12}${meridiem}` : `${hour12}:${pad2(minute)}${meridiem}`;
+}
+
+function timezoneLabelToWindowSuffix(timezone_label = "Central") {
+  switch (clean(timezone_label)) {
+    case "Eastern":
+      return "ET";
+    case "Mountain":
+      return "MT";
+    case "Pacific":
+      return "PT";
+    case "Alaska":
+      return "AT";
+    case "Hawaii":
+      return "HT";
+    case "Central":
+    default:
+      return "CT";
+  }
+}
+
+function extractContactWindowSuffix(contact_window = "", timezone_label = "Central") {
+  const match = clean(contact_window).match(/\b(Local|CT|ET|MT|PT|AT|HT)\s*$/i);
+  return match?.[1] || timezoneLabelToWindowSuffix(timezone_label);
+}
+
 export function parseQueueContactWindow(window_value) {
   const raw = clean(window_value);
   if (!raw) return null;
@@ -118,6 +152,65 @@ export function parseQueueContactWindow(window_value) {
   if (start === null || end === null) return null;
 
   return { start, end };
+}
+
+export function buildAlwaysOnContactWindow(timezone_label = "Central") {
+  return `12AM-11:59PM ${timezoneLabelToWindowSuffix(timezone_label)}`;
+}
+
+export function buildFirstContactWindow({
+  contact_window = null,
+  timezone_label = "Central",
+  min_minutes = 8 * 60,
+  max_minutes = 21 * 60,
+} = {}) {
+  const suffix = extractContactWindowSuffix(contact_window, timezone_label);
+  const parsed_window = parseQueueContactWindow(contact_window);
+
+  if (!parsed_window) {
+    return `${formatTimeToken(min_minutes)}-${formatTimeToken(max_minutes)} ${suffix}`;
+  }
+
+  const intervals =
+    parsed_window.end >= parsed_window.start
+      ? [[parsed_window.start, parsed_window.end]]
+      : [
+          [parsed_window.start, 24 * 60 - 1],
+          [0, parsed_window.end],
+        ];
+
+  const overlaps = intervals
+    .map(([start, end]) => [Math.max(start, min_minutes), Math.min(end, max_minutes)])
+    .filter(([start, end]) => end > start);
+
+  if (!overlaps.length) {
+    return `${formatTimeToken(min_minutes)}-${formatTimeToken(max_minutes)} ${suffix}`;
+  }
+
+  overlaps.sort((left, right) => {
+    const left_span = left[1] - left[0];
+    const right_span = right[1] - right[0];
+    if (right_span !== left_span) return right_span - left_span;
+    return left[0] - right[0];
+  });
+
+  const [start, end] = overlaps[0];
+  return `${formatTimeToken(start)}-${formatTimeToken(end)} ${suffix}`;
+}
+
+export function resolveSchedulingContactWindow({
+  contact_window = null,
+  timezone_label = "Central",
+  is_first_contact = false,
+} = {}) {
+  if (is_first_contact) {
+    return buildFirstContactWindow({
+      contact_window,
+      timezone_label,
+    });
+  }
+
+  return buildAlwaysOnContactWindow(timezone_label);
 }
 
 function formatPodioLocalDateTime(parts) {
@@ -350,8 +443,11 @@ export function resolveLatencyAwareQueueSchedule({
 }
 
 export default {
+  buildAlwaysOnContactWindow,
+  buildFirstContactWindow,
   mapQueueTimezoneToIana,
   parseQueueContactWindow,
   resolveQueueSchedule,
+  resolveSchedulingContactWindow,
   resolveLatencyAwareQueueSchedule,
 };

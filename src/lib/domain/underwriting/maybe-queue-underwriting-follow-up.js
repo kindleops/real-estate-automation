@@ -282,7 +282,7 @@ function buildFollowUpDecision({
 
   const unique_missing_fields = unique(missing_fields);
 
-  if (multifamily && latest_outbound_use_case === "mf_finalize_to_offer") {
+  if (multifamily && latest_outbound_use_case === "mf_underwriting_ack") {
     return {
       should_queue: false,
       reason: "multifamily_waiting_on_internal_offer",
@@ -357,10 +357,10 @@ function buildMultifamilyFollowUp({ decision = {} } = {}) {
 
   if (decision.completion_ack) {
     return {
-      use_case: "mf_finalize_to_offer",
+      use_case: "mf_underwriting_ack",
       category: "Landlord / Multifamily",
       secondary_category: "Underwriting",
-      variant_group: "Multifamily Underwrite — Finalize",
+      variant_group: "Multifamily Underwrite — Acknowledgment",
       tone: "Neutral",
       sequence_position: "V1",
       paired_with_agent_type: "Specialist-Landlord / Market-Local",
@@ -375,7 +375,7 @@ function buildMultifamilyFollowUp({ decision = {} } = {}) {
 
     return has_unit_guess
       ? {
-          use_case: "mf_units",
+          use_case: "mf_confirm_units",
           category: "Landlord / Multifamily",
           secondary_category: "Underwriting",
           variant_group: "Multifamily Underwrite — Units",
@@ -386,7 +386,7 @@ function buildMultifamilyFollowUp({ decision = {} } = {}) {
           render_overrides,
         }
       : {
-          use_case: "mf_units_unknown",
+          use_case: "mf_confirm_units",
           category: "Landlord / Multifamily",
           secondary_category: "Underwriting",
           variant_group: "Multifamily Underwrite - Units (Open)",

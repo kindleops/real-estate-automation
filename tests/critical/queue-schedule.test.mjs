@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildAlwaysOnContactWindow,
+  buildFirstContactWindow,
   resolveLatencyAwareQueueSchedule,
   resolveQueueSchedule,
+  resolveSchedulingContactWindow,
 } from "@/lib/domain/queue/queue-schedule.js";
 
 function parseLocalMinute(value) {
@@ -104,4 +107,36 @@ test("latency-aware queue schedule rolls a delayed reply into the next contact w
   assert.equal(result.within_contact_window, false);
   assert.ok(parseLocalMinute(result.scheduled_for_local) >= 17 * 60 + 5);
   assert.ok(parseLocalMinute(result.scheduled_for_local) <= 17 * 60 + 54);
+});
+
+test("first-contact scheduling clips seller morning windows to start at 8AM local", () => {
+  assert.equal(
+    buildFirstContactWindow({
+      contact_window: "7AM-9AM CT",
+      timezone_label: "Central",
+    }),
+    "8AM-9AM CT"
+  );
+});
+
+test("first-contact scheduling preserves seller-specific windows that already fit within quiet hours", () => {
+  assert.equal(
+    buildFirstContactWindow({
+      contact_window: "12PM-2PM CT",
+      timezone_label: "Central",
+    }),
+    "12PM-2PM CT"
+  );
+});
+
+test("non-first-contact scheduling uses an all-day window regardless of seller contact-window", () => {
+  assert.equal(buildAlwaysOnContactWindow("Central"), "12AM-11:59PM CT");
+  assert.equal(
+    resolveSchedulingContactWindow({
+      contact_window: "7AM-9AM CT",
+      timezone_label: "Central",
+      is_first_contact: false,
+    }),
+    "12AM-11:59PM CT"
+  );
 });

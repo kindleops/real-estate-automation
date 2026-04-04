@@ -1,6 +1,7 @@
 // ─── maybe-create-offer-from-context.js ──────────────────────────────────
 import { createOffer } from "@/lib/domain/offers/create-offer.js";
 import { selectOfferStrategy } from "@/lib/domain/offers/select-offer-strategy.js";
+import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { getCategoryValue, getNumberValue } from "@/lib/providers/podio.js";
 
 function clean(value) {
@@ -29,7 +30,7 @@ function shouldCreateOffer({
   const objection = classification?.objection || null;
   const emotion = classification?.emotion || null;
   const stage = route?.stage || context?.summary?.conversation_stage || "Ownership";
-  const use_case = route?.use_case || null;
+  const use_case = normalizeSellerFlowUseCase(route?.use_case) || route?.use_case || null;
   const msg = clean(message);
 
   if (classification?.compliance_flag === "stop_texting") {
@@ -40,7 +41,15 @@ function shouldCreateOffer({
     return { should_create: false, reason: "already_past_offer_stage" };
   }
 
-  if (use_case === "offer_reveal") {
+  if (
+    [
+      "offer_reveal_cash",
+      "offer_reveal_lease_option",
+      "offer_reveal_subject_to",
+      "offer_reveal_novation",
+      "mf_offer_reveal",
+    ].includes(use_case)
+  ) {
     return { should_create: true, reason: "route_offer_reveal" };
   }
 
