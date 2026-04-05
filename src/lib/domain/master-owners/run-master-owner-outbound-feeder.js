@@ -47,6 +47,7 @@ import {
   getCategoryValue,
   getDateValue,
   getFirstAppReferenceId,
+  getAppReferenceIds,
   getItem,
   getNumberValue,
   getPodioRetryAfterSeconds,
@@ -134,14 +135,14 @@ const FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES = new Set([
   "Post-Close",
 ]);
 
-// Variant groups that are allowed for first-touch Stage-1 ownership outbounds.
+// Variant groups that are allowed for first-touch Stage-1 cold ownership outbounds.
+// Follow-up variant groups are intentionally excluded: a cold lead has never been
+// contacted before so no follow-up framing is appropriate as a first message.
 const FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS = new Set([
   "Stage 1 — Ownership Confirmation",
   "Stage 1 — Ownership Check",
   "Stage 1 Ownership Check",
   "Stage 1 Ownership Confirmation",
-  "Stage 1 Follow-Up",
-  "Stage 1 — Ownership Confirmation Follow-Up",
 ]);
 
 function clean(value) {
@@ -851,6 +852,7 @@ async function selectBestProperty(
   phone_records = [],
   { owner_item = null, runtime = null, log = logger } = {}
 ) {
+  const master_owner_id = owner_item?.item_id ?? null;
   const related_property_ids = collectRelatedItemIdsByApp(owner_item, APP_IDS.properties);
   const candidate_ids = uniq([
     selected_phone_record?.primary_property_id,
@@ -864,7 +866,9 @@ async function selectBestProperty(
       log,
       call_name: "master_owner_feeder.podio_get_property_item",
       meta: {
+        master_owner_id,
         phone_item_id: selected_phone_record?.phone_item_id ?? null,
+        resolution_path: "phone_primary_or_owner_refs",
       },
     });
     if (property_item?.item_id) {
@@ -872,7 +876,6 @@ async function selectBestProperty(
     }
   }
 
-  const master_owner_id = owner_item?.item_id ?? null;
   if (master_owner_id) {
     try {
       const response = await timedStage(
@@ -892,6 +895,51 @@ async function selectBestProperty(
     } catch (error) {
       if (isTimeoutError(error)) {
         throw error;
+      }
+      // Log non-timeout errors so silent failures are visible in the logs.
+      log.warn("master_owner_feeder.property_lookup_by_master_owner_failed", {
+        master_owner_id,
+        phone_item_id: selected_phone_record?.phone_item_id ?? null,
+        error: serializeFeederError(error),
+      });
+    }
+  }
+
+  // Last-resort: load the brain item linked from master_owner.linked_conversations
+  // and pull property IDs from the brain's `properties` relation field.
+  const brain_item_id = getFirstAppReferenceId(
+    owner_item,
+    MASTER_OWNER_FIELDS.linked_conversations,
+    null
+  );
+  if (brain_item_id) {
+    const brain_item = await safeGetItem(brain_item_id, {
+      runtime,
+      log,
+      call_name: "master_owner_feeder.podio_get_brain_item_for_property",
+      meta: {
+        master_owner_id,
+        brain_item_id,
+        resolution_path: "brain_properties",
+      },
+    });
+
+    if (brain_item?.item_id) {
+      const brain_property_ids = getAppReferenceIds(brain_item, "properties");
+      for (const property_id of brain_property_ids) {
+        const property_item = await safeGetItem(property_id, {
+          runtime,
+          log,
+          call_name: "master_owner_feeder.podio_get_property_item",
+          meta: {
+            master_owner_id,
+            brain_item_id,
+            resolution_path: "brain_properties",
+          },
+        });
+        if (property_item?.item_id) {
+          return property_item;
+        }
       }
     }
   }
@@ -1909,9 +1957,28 @@ async function evaluateOwner({
   if (is_first_touch) {
     // Require a property relation — ownership templates need it for rendering.
     if (!property_item?.item_id && !context.ids?.property_id) {
+      const seller_id_location = parseSellerIdLocation(
+        getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "")
+      );
       warn("master_owner_feeder.first_touch_missing_property", {
         master_owner_id,
+        detected_first_touch: true,
         contact_status: owner_summary.contact_status,
+        contact_status_2: owner_summary.contact_status_2,
+        phone_slot: selected_phone_record.slot,
+        phone_item_id: selected_phone_record.phone_item_id,
+        phone_primary_property_id: selected_phone_record.primary_property_id ?? null,
+        all_phone_primary_properties: phone_selection.phone_records
+          .map((r) => r?.primary_property_id ?? null)
+          .filter(Boolean),
+        brain_item_id: getFirstAppReferenceId(
+          owner_item,
+          MASTER_OWNER_FIELDS.linked_conversations,
+          null
+        ),
+        seller_id_has_address: Boolean(seller_id_location.property_address),
+        seller_id_address: seller_id_location.property_address || null,
+        seller_id_city: seller_id_location.property_city || null,
       });
       return {
         ok: false,
@@ -1923,29 +1990,27 @@ async function evaluateOwner({
       };
     }
 
-    // Hard-block if the routing engine (mis)selected a forbidden later-stage use_case.
+    // If the routing engine selected a later-stage use_case or forbidden lifecycle,
+    // log it but do NOT return early. Template lookup is already hard-clamped to
+    // "ownership_check" / "Stage 1 — Ownership Confirmation" below, so polluted
+    // route output is harmless at this point. The final post-template guard will
+    // catch any case where loadTemplate somehow returns a wrong-stage template.
     const routed_use_case = route?.use_case || "ownership_check";
     const routed_lifecycle = route?.lifecycle_stage || null;
     if (
       FORBIDDEN_FIRST_TOUCH_USE_CASES.has(routed_use_case) ||
       (routed_lifecycle && FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES.has(routed_lifecycle))
     ) {
-      warn("master_owner_feeder.first_touch_forbidden_route", {
+      warn("master_owner_feeder.first_touch_forbidden_route_clamped", {
         master_owner_id,
+        detected_first_touch: true,
         routed_use_case,
         routed_lifecycle,
+        property_id: property_item?.item_id ?? null,
         contact_status: owner_summary.contact_status,
+        contact_status_2: owner_summary.contact_status_2,
+        action: "clamped_to_ownership_check",
       });
-      return {
-        ok: false,
-        skipped: true,
-        reason: "invalid_first_touch_template_selected",
-        owner: owner_summary,
-        phone: selected_phone_record.summary,
-        first_touch: true,
-        routed_use_case,
-        routed_lifecycle,
-      };
     }
   }
   // ────────────────────────────────────────────────────────────────────────
@@ -2110,6 +2175,18 @@ async function evaluateOwner({
     render_result?.invalid_placeholders?.length ||
     render_result?.missing_required_placeholders?.length
   ) {
+    if (is_first_touch) {
+      warn("master_owner_feeder.first_touch_placeholder_validation_failed", {
+        master_owner_id,
+        detected_first_touch: true,
+        property_id: property_item?.item_id ?? null,
+        template_id: selected_template.item_id,
+        use_case: selected_template.use_case ?? null,
+        variant_group: selected_template.variant_group ?? null,
+        invalid_placeholders: render_result?.invalid_placeholders || [],
+        missing_required_placeholders: render_result?.missing_required_placeholders || [],
+      });
+    }
     return {
       ok: false,
       skipped: true,
@@ -2117,6 +2194,7 @@ async function evaluateOwner({
       owner: owner_summary,
       phone: selected_phone_record.summary,
       property: summarizeProperty(property_item, owner_item),
+      first_touch: is_first_touch,
       template_id: selected_template.item_id,
       invalid_placeholders: render_result?.invalid_placeholders || [],
       missing_required_placeholders:
@@ -3178,6 +3256,7 @@ export async function runMasterOwnerOutboundFeeder({
       eligible_owner_count: summary.eligible_owner_count,
       queued_count: summary.queued_count,
       skipped_count: summary.skipped_count,
+      top_skip_reasons: skip_reason_counts.slice(0, 10),
       page_size,
     });
 

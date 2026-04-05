@@ -5,8 +5,10 @@
  *  1. Blank-status cold lead is always detected as first-touch → ownership_check clamping applies
  *  2. Prior polluted outbound history does NOT advance stage — only CRM contact_status does
  *  3. Later-stage use_cases are hard-blocked by FORBIDDEN_FIRST_TOUCH_USE_CASES
- *  4. Valid Stage-1 variant groups are not blocked; Stage-2+ variant groups ARE blocked
+ *  4. Valid Stage-1 cold-outbound variant groups are allowed; follow-up and Stage 2+ groups are NOT
  *  5. Non-blank contact_status (engaged, contacted, etc.) = NOT first-touch → no clamp
+ *  6. Polluted route output (forbidden use_case) does NOT block first-touch before template lookup
+ *  7. The final template guard still rejects a non-Stage-1 template that somehow passes loadTemplate
  */
 
 import test from "node:test";
@@ -137,27 +139,41 @@ test("FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES blocks Title, Closing, Contract, Di
   assert.equal(FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES.has("Offer"), false);
 });
 
-// ── test 5: Stage-1 variant groups are allowed; later stages are rejected ──────
+// ── test 5: only true cold-outbound Stage-1 groups are allowed; follow-ups are not ──
 
-test("FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS allows Stage 1 groups and implicitly rejects Stage 2+", () => {
-  const allowed = [
+test("FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS allows only Stage 1 cold-outbound groups, not follow-ups", () => {
+  // These four are the only valid cold first-touch variant groups.
+  const cold_outbound_allowed = [
     "Stage 1 — Ownership Confirmation",
     "Stage 1 — Ownership Check",
     "Stage 1 Ownership Check",
     "Stage 1 Ownership Confirmation",
-    "Stage 1 Follow-Up",
-    "Stage 1 — Ownership Confirmation Follow-Up",
   ];
 
-  for (const variant_group of allowed) {
+  for (const variant_group of cold_outbound_allowed) {
     assert.ok(
       FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(variant_group),
       `"${variant_group}" must be in FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS`
     );
   }
 
-  // Later-stage variant groups must NOT be allowed for first-touch
-  const disallowed = [
+  // Follow-up variant groups must NOT be allowed for cold first-touch outbounds.
+  // A cold lead has never been contacted — follow-up framing is wrong for a first message.
+  const follow_up_disallowed = [
+    "Stage 1 Follow-Up",
+    "Stage 1 — Ownership Confirmation Follow-Up",
+  ];
+
+  for (const variant_group of follow_up_disallowed) {
+    assert.equal(
+      FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(variant_group),
+      false,
+      `"${variant_group}" must NOT be in FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS — follow-up framing is wrong for a cold first message`
+    );
+  }
+
+  // Later-stage variant groups must also NOT be allowed.
+  const later_stage_disallowed = [
     "Stage 2 Consider Selling",
     "Stage 3 — Asking Price",
     "Stage 4A — Confirm Basics",
@@ -168,7 +184,7 @@ test("FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS allows Stage 1 groups and implicitly 
     "Close Handoff",
   ];
 
-  for (const variant_group of disallowed) {
+  for (const variant_group of later_stage_disallowed) {
     assert.equal(
       FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(variant_group),
       false,
@@ -205,4 +221,75 @@ test("detectFirstTouch returns false when contact_status_2 indicates engagement"
       `contact_status_2="${status_2}" should NOT be first-touch`
     );
   }
+});
+
+// ── test 6: polluted route output does NOT block first-touch before template lookup ─
+
+test("FORBIDDEN_FIRST_TOUCH_USE_CASES and FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES are for the final guard only — route use_case alone should not block queue creation", () => {
+  // This test documents the design contract:
+  // The forbidden-use-case check in the early route block was converted to warn-only.
+  // The final template guard (post loadTemplate) is where actual blocking happens.
+  //
+  // We verify that FORBIDDEN_FIRST_TOUCH_USE_CASES does NOT include "ownership_check"
+  // (the clamp target), confirming the final guard can always pass a clamped template.
+
+  assert.equal(
+    FORBIDDEN_FIRST_TOUCH_USE_CASES.has("ownership_check"),
+    false,
+    "ownership_check must not be forbidden — it is the hard-clamp target for first-touch"
+  );
+
+  // All genuinely first-touch cold-outbound use_cases must be passable.
+  const first_touch_use_cases = ["ownership_check"];
+  for (const use_case of first_touch_use_cases) {
+    assert.equal(
+      FORBIDDEN_FIRST_TOUCH_USE_CASES.has(use_case),
+      false,
+      `"${use_case}" must not be in the forbidden set — it is used for first-touch outbounds`
+    );
+  }
+
+  // Routing engine output of a later-stage use_case is logged and clamped, not blocked.
+  // The FORBIDDEN set still correctly identifies which use_cases would be wrong if they
+  // somehow made it into an actual template selection for a first-touch lead.
+  const later_stage_route_outputs = ["asking_price", "offer_reveal_cash", "reengagement"];
+  for (const use_case of later_stage_route_outputs) {
+    assert.ok(
+      FORBIDDEN_FIRST_TOUCH_USE_CASES.has(use_case),
+      `"${use_case}" must remain forbidden so the final template guard can catch it`
+    );
+  }
+});
+
+// ── test 7: final template guard rejects a non-Stage-1 template that loadTemplate returned ─
+
+test("FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS rejects variant groups that would slip through a misconfigured template selection", () => {
+  // Simulates the scenario where loadTemplate somehow returns a wrong-stage template.
+  // The final guard checks the actual selected template's variant_group.
+
+  const wrong_stage_variants_that_must_fail = [
+    "Stage 2 Consider Selling",
+    "Stage 3 — Asking Price",
+    "Stage 4A — Confirm Basics",
+    "Stage 4B — Condition Probe",
+    "Stage 5 — Offer Reveal",
+    "Stage 5 — Offer No Response",
+    "Stage 1 Follow-Up",                         // follow-up framing not valid for cold first outbound
+    "Stage 1 — Ownership Confirmation Follow-Up", // same
+  ];
+
+  for (const variant_group of wrong_stage_variants_that_must_fail) {
+    const variant_not_allowed = !FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(variant_group);
+    assert.ok(
+      variant_not_allowed,
+      `variant_group "${variant_group}" must NOT be in FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS — final guard must block it`
+    );
+  }
+
+  // The correctly clamped template variant must always pass.
+  const correct_first_touch_variant = "Stage 1 — Ownership Confirmation";
+  assert.ok(
+    FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(correct_first_touch_variant),
+    `"${correct_first_touch_variant}" must pass the final guard`
+  );
 });
