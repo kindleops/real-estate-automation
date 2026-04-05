@@ -944,6 +944,80 @@ async function selectBestProperty(
     }
   }
 
+  // Last-resort: parse address from seller_id and search the Properties app for
+  // an exact match. The parsed text is a LOOKUP SEED ONLY — we must find and
+  // return a real property item. If no exact match is found, we return null.
+  const seller_id_location = parseSellerIdLocation(
+    getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "")
+  );
+  const lookup_address = clean(seller_id_location.property_address);
+  const lookup_city = lower(seller_id_location.property_city);
+
+  if (lookup_address) {
+    try {
+      const addr_response = await timedStage(
+        log,
+        "master_owner_feeder.property_lookup_by_address",
+        {
+          master_owner_id,
+          lookup_address,
+          lookup_city: lookup_city || null,
+        },
+        () => findPropertyItems({ "property-address": lookup_address }, 5, 0)
+      );
+
+      const addr_candidates = Array.isArray(addr_response?.items)
+        ? addr_response.items
+        : Array.isArray(addr_response)
+          ? addr_response
+          : [];
+
+      // Post-filter: require exact case-insensitive address match to avoid
+      // Podio's partial-text filter returning unrelated properties.
+      const exact_matches = addr_candidates.filter((candidate) => {
+        const candidate_address = lower(
+          getTextValue(candidate, "property-address", "") || candidate?.title || ""
+        );
+        if (candidate_address !== lower(lookup_address)) return false;
+        // If we parsed a city, also require it to match to avoid cross-market collisions.
+        if (lookup_city) {
+          const candidate_city = lower(getTextValue(candidate, "city", ""));
+          if (candidate_city && candidate_city !== lookup_city) return false;
+        }
+        return Boolean(candidate?.item_id);
+      });
+
+      if (exact_matches.length === 1) {
+        log.info("master_owner_feeder.property_resolved_via_address_lookup", {
+          master_owner_id,
+          property_item_id: exact_matches[0].item_id,
+          lookup_address,
+          lookup_city: lookup_city || null,
+        });
+        return exact_matches[0];
+      }
+
+      if (addr_candidates.length > 0) {
+        log.warn("master_owner_feeder.property_address_lookup_no_exact_match", {
+          master_owner_id,
+          lookup_address,
+          lookup_city: lookup_city || null,
+          candidate_count: addr_candidates.length,
+          exact_match_count: exact_matches.length,
+        });
+      }
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        throw error;
+      }
+      log.warn("master_owner_feeder.property_lookup_by_address_failed", {
+        master_owner_id,
+        lookup_address,
+        error: serializeFeederError(error),
+      });
+    }
+  }
+
   return null;
 }
 
@@ -1752,7 +1826,17 @@ async function evaluateOwner({
   const latest_contact_ts = toTimestamp(resolved_latest_contact_at);
   const explicit_follow_up_due = next_follow_up_ts !== null && next_follow_up_ts <= now_ts;
 
+  // Detect first-touch here so suppression logic below can reference it.
+  // A lead whose contact_status and contact_status_2 are both blank has no
+  // CRM-confirmed engagement. Stale history from prior bad queue rows must not
+  // permanently suppress them — only pending same-phone rows do.
+  const is_first_touch = detectFirstTouch({ owner_item });
+
+  // For engaged/follow-up leads, suppress if contacted recently.
+  // For first-touch blank-status leads, skip this entirely — their stale outbound
+  // history is unreliable signal and must not block queue creation.
   if (
+    !is_first_touch &&
     !explicit_follow_up_due &&
     latest_contact_ts !== null &&
     latest_contact_ts >= now_ts - suppression_window_ms
@@ -1792,35 +1876,40 @@ async function evaluateOwner({
     };
   }
 
-  const recent_duplicate = await timedStage(
-    log,
-    "master_owner_feeder.message_event_duplicate_check",
-    {
-      evaluation_depth,
-      phone_item_id: selected_phone_record.phone_item_id,
-    },
-    () =>
-      Promise.resolve(
-        findRecentDuplicate(
-          history,
-          selected_phone_record.phone_item_id,
-          now_ts - suppression_window_ms
+  // For first-touch leads, skip sent-history suppression for the same reason as above:
+  // sent queue rows or message events from prior bad sends are not proof of engagement.
+  // The pending_duplicate guard above already prevents double-queuing same-phone items.
+  if (!is_first_touch) {
+    const recent_duplicate = await timedStage(
+      log,
+      "master_owner_feeder.message_event_duplicate_check",
+      {
+        evaluation_depth,
+        phone_item_id: selected_phone_record.phone_item_id,
+      },
+      () =>
+        Promise.resolve(
+          findRecentDuplicate(
+            history,
+            selected_phone_record.phone_item_id,
+            now_ts - suppression_window_ms
+          )
         )
-      )
-  );
+    );
 
-  if (recent_duplicate) {
-    return {
-      ok: false,
-      skipped: true,
-      reason: "duplicate_within_suppression_window",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      duplicate_source: recent_duplicate.type,
-      duplicate_item_id: recent_duplicate.item?.item_id ?? null,
-      duplicate_timestamp: recent_duplicate.timestamp || null,
-      suppression_window_days: cadence_days,
-    };
+    if (recent_duplicate) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "duplicate_within_suppression_window",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        duplicate_source: recent_duplicate.type,
+        duplicate_item_id: recent_duplicate.item?.item_id ?? null,
+        duplicate_timestamp: recent_duplicate.timestamp || null,
+        suppression_window_days: cadence_days,
+      };
+    }
   }
 
   const overdue_bonus = explicit_follow_up_due && next_follow_up_ts !== null
@@ -1946,10 +2035,8 @@ async function evaluateOwner({
   );
   const sequence_position = deriveSequencePosition(route?.stage || stage_hint, owner_touch_count);
 
-  // ── FIRST-TOUCH DETECTION ────────────────────────────────────────────────
-  // Detect before any template lookup or follow_up_plan application.
-  const is_first_touch = detectFirstTouch({ owner_item });
-
+  // ── FIRST-TOUCH TEMPLATE GATING ─────────────────────────────────────────
+  // is_first_touch was computed above (before suppression checks).
   // Suppress follow_up_plan for first-touch: any prior outbound history without
   // confirmed CRM engagement is contamination, not real stage progression.
   const effective_follow_up_plan = is_first_touch ? null : follow_up_plan;
@@ -3310,6 +3397,7 @@ export default runMasterOwnerOutboundFeeder;
 // ── Exported for testing ──────────────────────────────────────────────────────
 export {
   detectFirstTouch,
+  parseSellerIdLocation,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
