@@ -39,6 +39,8 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
         status: init?.status,
       }));
 
+  route_logger?.info?.("queue_run.route_enter", { method });
+
   try {
     const auth = require_cron_auth(request, route_logger);
     if (!auth.authorized) return auth.response;
@@ -88,10 +90,45 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       is_vercel_cron: auth.auth.is_vercel_cron,
     });
 
+    route_logger?.info?.("queue_run.before_run_send_queue", {
+      limit,
+      dry_run: dry_run_resolution.effective_dry_run,
+      dry_run_reason: dry_run_resolution.reason,
+      rollout_mode: dry_run_resolution.mode,
+      forced_dry_run: dry_run_resolution.forced,
+      master_owner_id: master_owner_scope.effective_id,
+      scope_reason: master_owner_scope.reason,
+    });
+
     const result = await run_send_queue({
       limit,
       dry_run: dry_run_resolution.effective_dry_run,
       master_owner_id: master_owner_scope.effective_id,
+    });
+
+    if (result?.skipped) {
+      route_logger?.warn?.("queue_run.early_return", {
+        reason: result.reason || "unknown",
+        skipped: true,
+        lock_expires_at: result.lock?.meta?.expires_at || null,
+        lock_owner: result.lock?.meta?.owner || null,
+        lock_acquired_at: result.lock?.meta?.acquired_at || null,
+        run_started_at: result.run_started_at || null,
+      });
+    }
+
+    route_logger?.info?.("queue_run.after_run_send_queue", {
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      dry_run: result?.dry_run ?? null,
+      reason: result?.reason || null,
+      processed_count: result?.processed_count ?? null,
+      sent_count: result?.sent_count ?? null,
+      failed_count: result?.failed_count ?? null,
+      skipped_count: result?.skipped_count ?? null,
+      due_rows: result?.due_rows ?? null,
+      future_rows: result?.future_rows ?? null,
+      total_rows_loaded: result?.total_rows_loaded ?? null,
     });
 
     return json_response(

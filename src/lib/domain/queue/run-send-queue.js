@@ -271,6 +271,14 @@ export async function runSendQueue({
       master_owner_id: scoped_master_owner_id,
     });
 
+    info_log("queue.run_fetch_started", {
+      send_queue_app_id: APP_IDS.send_queue,
+      filter: { "queue-status": "Queued" },
+      page_size: Math.max(limit, 50),
+      sort_by: "scheduled-for-utc",
+      run_started_at,
+    });
+
     const queued_items = await fetch_all_items(
       APP_IDS.send_queue,
       {
@@ -582,6 +590,19 @@ export async function runSendQueue({
       master_owner_id: scoped_master_owner_id,
     },
     onLocked: async (lock) => {
+      warn_log("queue.run_skipped_lock_active", {
+        reason: "queue_runner_lock_active",
+        lock_scope: lock?.scope || null,
+        lock_record_item_id: lock?.record_item_id || null,
+        lock_lease_token: lock?.meta?.lease_token || null,
+        lock_expires_at: lock?.meta?.expires_at || null,
+        lock_owner: lock?.meta?.owner || null,
+        lock_acquired_at: lock?.meta?.acquired_at || null,
+        lock_acquisition_count: lock?.meta?.acquisition_count ?? null,
+        run_started_at,
+        recovery_hint: "If this persists beyond the expires_at time, the lock is stuck. Call forceReleaseStaleLock({ scope }) to recover.",
+      });
+
       try {
         await record_system_alert({
           subsystem: "queue",

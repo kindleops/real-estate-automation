@@ -364,8 +364,95 @@ export async function withRunLock({
   }
 }
 
+/**
+ * Force-release a lock that is stuck (e.g. the process that acquired it crashed
+ * before calling releaseRunLock). This writes `status: "released"` to the lock
+ * record unconditionally, regardless of lease_token or expiry.
+ *
+ * Use this only for manual recovery — it does NOT check whether the lock is
+ * actually still held by an active process.
+ */
+export async function forceReleaseStaleLock({
+  scope,
+  reason = "force_released_stale",
+} = {}, _deps = {}) {
+  const find_record = _deps.findRunLockRecord || findRunLockRecord;
+  const update_event = _deps.updateMessageEvent || updateMessageEvent;
+
+  const normalized_scope = clean(scope);
+  if (!normalized_scope) {
+    return {
+      ok: false,
+      released: false,
+      reason: "missing_run_lock_scope",
+    };
+  }
+
+  const record = await find_record(normalized_scope);
+  if (!record?.item_id) {
+    return {
+      ok: true,
+      released: false,
+      reason: "no_lock_record_found",
+      scope: normalized_scope,
+    };
+  }
+
+  const existing_meta = parseRunLockMeta(record);
+  const was_active = isLeaseActive(existing_meta);
+
+  const forced_meta = {
+    ...existing_meta,
+    status: "released",
+    released_at: nowIso(),
+    outcome: reason,
+    last_error: `Force-released: ${reason}`,
+  };
+
+  const fields = {
+    "timestamp": { start: forced_meta.released_at },
+    "trigger-name": buildRunLockTriggerName(normalized_scope),
+    "source-app": "Runtime Lock",
+    "message": `Run lock ${normalized_scope} force-released (${reason})`,
+    "ai-output": JSON.stringify(forced_meta),
+  };
+
+  try {
+    await update_event(record.item_id, fields);
+  } catch (error) {
+    if (!isRevisionLimitExceeded(error)) throw error;
+    // Can't update this record — it's hit the revision limit. Since we are
+    // trying to clear a stuck lock, the most important thing is that future
+    // acquireRunLock calls don't re-read this record as active. Because
+    // acquireRunLock fetches with sort_desc: true, a newly created record will
+    // shadow this one. Nothing more we can do here.
+    return {
+      ok: true,
+      released: false,
+      reason: "force_release_revision_limit",
+      scope: normalized_scope,
+      record_item_id: record.item_id,
+      was_active,
+      note: "Lock record hit revision limit; it will be shadowed on next acquire attempt.",
+    };
+  }
+
+  return {
+    ok: true,
+    released: true,
+    reason,
+    scope: normalized_scope,
+    record_item_id: record.item_id,
+    was_active,
+    previous_expires_at: existing_meta?.expires_at || null,
+    previous_owner: existing_meta?.owner || null,
+    previous_acquired_at: existing_meta?.acquired_at || null,
+  };
+}
+
 export default {
   acquireRunLock,
   releaseRunLock,
   withRunLock,
+  forceReleaseStaleLock,
 };

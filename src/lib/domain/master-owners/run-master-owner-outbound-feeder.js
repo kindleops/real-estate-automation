@@ -98,6 +98,52 @@ const QUEUE_DUPLICATE_RECENT_STATUSES = new Set([
   "sent",
 ]);
 
+// ── First-touch guardrail constants ──────────────────────────────────────────
+// These use_cases must NEVER appear in a Stage-1 cold outbound to a lead whose
+// Master Owner contact_status is blank (i.e. no CRM-confirmed engagement yet).
+const FORBIDDEN_FIRST_TOUCH_USE_CASES = new Set([
+  "asking_price",
+  "asking_price_follow_up",
+  "price_works_confirm_basics",
+  "price_works_confirm_basics_follow_up",
+  "price_high_condition_probe",
+  "price_high_condition_probe_follow_up",
+  "creative_probe",
+  "creative_followup",
+  "offer_reveal_cash",
+  "offer_reveal_cash_follow_up",
+  "offer_reveal_lease_option",
+  "offer_reveal_subject_to",
+  "offer_reveal_novation",
+  "mf_offer_reveal",
+  "close_handoff",
+  "asks_contract",
+  "contract_sent",
+  "justify_price",
+  "narrow_range",
+  "ask_timeline",
+  "ask_condition_clarifier",
+  "reengagement",
+]);
+
+const FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES = new Set([
+  "Contract",
+  "Title",
+  "Closing",
+  "Disposition",
+  "Post-Close",
+]);
+
+// Variant groups that are allowed for first-touch Stage-1 ownership outbounds.
+const FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS = new Set([
+  "Stage 1 — Ownership Confirmation",
+  "Stage 1 — Ownership Check",
+  "Stage 1 Ownership Check",
+  "Stage 1 Ownership Confirmation",
+  "Stage 1 Follow-Up",
+  "Stage 1 — Ownership Confirmation Follow-Up",
+]);
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -518,6 +564,31 @@ function deriveSequencePosition(stage, owner_touch_count) {
   if (touch_number === 3) return "3rd Touch";
   if (touch_number === 4) return "4th Touch";
   return "Final";
+}
+
+/**
+ * A lead is first-touch when the CRM shows no real seller engagement.
+ * Definition: contact_status AND contact_status_2 are both blank.
+ *
+ * Prior bad queue rows (e.g. sent with wrong-stage templates) are NOT treated as
+ * genuine stage progression — only explicit CRM status changes prove engagement.
+ * This prevents polluted history from auto-upgrading a cold lead into a later stage.
+ */
+function detectFirstTouch({ owner_item }) {
+  const contact_status = lower(
+    getCategoryValue(owner_item, MASTER_OWNER_FIELDS.contact_status, null)
+  );
+  const contact_status_2 = lower(
+    getCategoryValue(owner_item, MASTER_OWNER_FIELDS.contact_status_2, null)
+  );
+
+  // Explicitly tracked engagement → not first-touch
+  if (contact_status && FOLLOW_UP_CONTACT_STATUSES.has(contact_status)) return false;
+  if (contact_status_2 && FOLLOW_UP_CONTACT_STATUS_2.has(contact_status_2)) return false;
+  if (contact_status && TERMINAL_CONTACT_STATUSES.has(contact_status)) return false;
+
+  // Blank CRM status = first-touch regardless of any prior outbound history
+  return !contact_status && !contact_status_2;
 }
 
 function deriveQueueMessageType(stage, lifecycle_stage = null) {
@@ -1826,6 +1897,58 @@ async function evaluateOwner({
     route?.secondary_category || null
   );
   const sequence_position = deriveSequencePosition(route?.stage || stage_hint, owner_touch_count);
+
+  // ── FIRST-TOUCH DETECTION ────────────────────────────────────────────────
+  // Detect before any template lookup or follow_up_plan application.
+  const is_first_touch = detectFirstTouch({ owner_item });
+
+  // Suppress follow_up_plan for first-touch: any prior outbound history without
+  // confirmed CRM engagement is contamination, not real stage progression.
+  const effective_follow_up_plan = is_first_touch ? null : follow_up_plan;
+
+  if (is_first_touch) {
+    // Require a property relation — ownership templates need it for rendering.
+    if (!property_item?.item_id && !context.ids?.property_id) {
+      warn("master_owner_feeder.first_touch_missing_property", {
+        master_owner_id,
+        contact_status: owner_summary.contact_status,
+      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: "missing_property_relation_for_first_touch",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        first_touch: true,
+      };
+    }
+
+    // Hard-block if the routing engine (mis)selected a forbidden later-stage use_case.
+    const routed_use_case = route?.use_case || "ownership_check";
+    const routed_lifecycle = route?.lifecycle_stage || null;
+    if (
+      FORBIDDEN_FIRST_TOUCH_USE_CASES.has(routed_use_case) ||
+      (routed_lifecycle && FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES.has(routed_lifecycle))
+    ) {
+      warn("master_owner_feeder.first_touch_forbidden_route", {
+        master_owner_id,
+        routed_use_case,
+        routed_lifecycle,
+        contact_status: owner_summary.contact_status,
+      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: "invalid_first_touch_template_selected",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        first_touch: true,
+        routed_use_case,
+        routed_lifecycle,
+      };
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
   const message_variant_seed = clean(
     getCategoryValue(owner_item, MASTER_OWNER_FIELDS.message_variant_seed, null)
   );
@@ -1890,26 +2013,31 @@ async function evaluateOwner({
     },
     () =>
       loadTemplate({
-        category: follow_up_plan?.category || primary_category,
-        secondary_category: follow_up_plan?.secondary_category ?? secondary_category,
-        use_case: follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check",
-        variant_group:
-          follow_up_plan?.variant_group ||
-          route?.variant_group ||
-          "Stage 1 — Ownership Confirmation",
-        tone: follow_up_plan?.tone || route?.tone || "Warm",
+        category: effective_follow_up_plan?.category || primary_category,
+        secondary_category: effective_follow_up_plan?.secondary_category ?? secondary_category,
+        // First-touch always clamped to Stage 1 ownership regardless of route output.
+        use_case: is_first_touch
+          ? "ownership_check"
+          : (effective_follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check"),
+        variant_group: is_first_touch
+          ? "Stage 1 — Ownership Confirmation"
+          : (effective_follow_up_plan?.variant_group || route?.variant_group || "Stage 1 — Ownership Confirmation"),
+        tone: is_first_touch
+          ? "Warm"
+          : (effective_follow_up_plan?.tone || route?.tone || "Warm"),
         gender_variant: "Neutral",
         language,
-        sequence_position,
-        paired_with_agent_type:
-          follow_up_plan?.paired_with_agent_type ||
-          route?.template_filters?.paired_with_agent_type ||
-          route?.persona ||
-          "Warm Professional",
+        sequence_position: is_first_touch ? "1st Touch" : sequence_position,
+        paired_with_agent_type: is_first_touch
+          ? "Warm Professional"
+          : (effective_follow_up_plan?.paired_with_agent_type ||
+              route?.template_filters?.paired_with_agent_type ||
+              route?.persona ||
+              "Warm Professional"),
         recently_used_template_ids: context?.recent?.recently_used_template_ids || [],
         rotation_key,
         fallback_agent_type:
-          follow_up_plan?.fallback_agent_type ||
+          effective_follow_up_plan?.fallback_agent_type ||
           route?.template_filters?.fallback_agent_type ||
           "Warm Professional",
         context,
@@ -1929,6 +2057,42 @@ async function evaluateOwner({
     };
   }
 
+  // ── FINAL FIRST-TOUCH TEMPLATE GUARD ──────────────────────────────────────
+  // Even if loadTemplate returned a candidate, reject it if the template itself
+  // belongs to a forbidden later-stage use_case or a non-Stage-1 variant group.
+  if (is_first_touch) {
+    const tmpl_use_case = selected_template.use_case || null;
+    const tmpl_variant = selected_template.variant_group || null;
+    const use_case_forbidden =
+      tmpl_use_case && FORBIDDEN_FIRST_TOUCH_USE_CASES.has(tmpl_use_case);
+    const variant_not_allowed =
+      tmpl_variant && !FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(tmpl_variant);
+
+    if (use_case_forbidden || variant_not_allowed) {
+      warn("master_owner_feeder.first_touch_template_guard_rejected", {
+        master_owner_id,
+        template_id: selected_template.item_id,
+        tmpl_use_case,
+        tmpl_variant,
+        use_case_forbidden,
+        variant_not_allowed,
+      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: "invalid_first_touch_template_selected",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        property: summarizeProperty(property_item, owner_item),
+        first_touch: true,
+        template_id: selected_template.item_id,
+        tmpl_use_case,
+        tmpl_variant,
+      };
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────────
+
   const render_result = renderTemplate({
     template_text: selected_template.text,
     context,
@@ -1938,8 +2102,8 @@ async function evaluateOwner({
       lifecycle_stage: route?.lifecycle_stage || null,
       ai_route: route?.brain_ai_route || context.summary?.brain_ai_route || null,
     },
-    use_case: selected_template?.use_case || follow_up_plan?.template_lookup_use_case,
-    variant_group: selected_template?.variant_group || follow_up_plan?.variant_group,
+    use_case: selected_template?.use_case || effective_follow_up_plan?.template_lookup_use_case,
+    variant_group: selected_template?.variant_group || effective_follow_up_plan?.variant_group,
   });
 
   if (
@@ -2004,23 +2168,23 @@ async function evaluateOwner({
     route: {
       stage: route?.stage || stage_hint,
       lifecycle_stage: route?.lifecycle_stage || null,
-      use_case: follow_up_plan?.base_use_case || route?.use_case || "ownership_check",
-      tone: follow_up_plan?.tone || route?.tone || "Warm",
+      use_case: effective_follow_up_plan?.base_use_case || route?.use_case || "ownership_check",
+      tone: effective_follow_up_plan?.tone || route?.tone || "Warm",
       variant_group:
-        follow_up_plan?.variant_group ||
+        effective_follow_up_plan?.variant_group ||
         route?.variant_group ||
         "Stage 1 — Ownership Confirmation",
       language,
       persona:
-        follow_up_plan?.paired_with_agent_type ||
+        effective_follow_up_plan?.paired_with_agent_type ||
         route?.template_filters?.paired_with_agent_type ||
         route?.persona ||
         "Warm Professional",
-      category: follow_up_plan?.category || primary_category,
-      secondary_category: follow_up_plan?.secondary_category ?? secondary_category,
+      category: effective_follow_up_plan?.category || primary_category,
+      secondary_category: effective_follow_up_plan?.secondary_category ?? secondary_category,
       sequence_position,
       next_expected_stage:
-        follow_up_plan?.next_expected_stage ||
+        effective_follow_up_plan?.next_expected_stage ||
         canonicalStageForUseCase(route?.use_case || "ownership_check"),
     },
     touch_number,
@@ -2055,7 +2219,7 @@ async function evaluateOwner({
     contact_window: resolved_contact_window,
     send_priority,
     message_type:
-      follow_up_plan
+      effective_follow_up_plan
         ? "Follow-Up"
         : deriveQueueMessageType(
             route?.stage || stage_hint,
@@ -3063,3 +3227,11 @@ export async function runMasterOwnerOutboundFeeder({
 }
 
 export default runMasterOwnerOutboundFeeder;
+
+// ── Exported for testing ──────────────────────────────────────────────────────
+export {
+  detectFirstTouch,
+  FORBIDDEN_FIRST_TOUCH_USE_CASES,
+  FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
+  FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
+};
