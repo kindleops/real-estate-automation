@@ -911,6 +911,13 @@ export function safeCategoryEquals(value, expected) {
   );
 }
 
+export function isRevisionLimitExceeded(error) {
+  if (!(error instanceof PodioError)) return false;
+  return String(error?.message || "")
+    .toLowerCase()
+    .includes("this item has exceeded the maximum number of revisions");
+}
+
 export default {
   PodioError,
   invalidateToken,
@@ -952,5 +959,6 @@ export default {
   normalizeUsPhone10,
   toCanonicalUsE164,
   safeCategoryEquals,
+  isRevisionLimitExceeded,
 };
 import { normalizeStage as normalizeConversationStage } from "@/lib/config/stages.js";

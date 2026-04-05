@@ -44,41 +44,6 @@ function firstNonNull(...values) {
   return null;
 }
 
-function parseSellerIdLocation(value) {
-  const raw = clean(value).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  if (!raw) {
-    return {
-      property_address: "",
-      property_city: "",
-      property_state: "",
-    };
-  }
-
-  const location_segment = raw
-    .split("~")
-    .map((segment) => clean(segment))
-    .find((segment) => segment.split("|").filter(Boolean).length >= 4);
-
-  if (!location_segment) {
-    return {
-      property_address: "",
-      property_city: "",
-      property_state: "",
-    };
-  }
-
-  const [property_address = "", property_city = "", property_state = ""] =
-    location_segment
-      .split("|")
-      .map((segment) => clean(segment));
-
-  return {
-    property_address,
-    property_city,
-    property_state,
-  };
-}
-
 export function deriveContextSummary({
   phone_item = null,
   brain_item = null,
@@ -90,9 +55,6 @@ export function deriveContextSummary({
   market_item = null,
   touch_count = 0,
 } = {}) {
-  const seller_id_location = parseSellerIdLocation(
-    getTextValue(master_owner_item, "seller-id", "")
-  );
   const owner_name =
     firstNonNull(
       getTextValue(master_owner_item, "owner-full-name", ""),
@@ -110,11 +72,9 @@ export function deriveContextSummary({
   const raw_property_address =
     firstNonNull(
       getTextValue(property_item, "property-address", ""),
-      getTextValue(property_item, "title", ""),
-      seller_id_location.property_address
+      getTextValue(property_item, "title", "")
     ) || "";
-  const raw_property_city =
-    firstNonNull(getTextValue(property_item, "city", ""), seller_id_location.property_city) || "";
+  const raw_property_city = getTextValue(property_item, "city", "") || "";
 
   return {
     phone_item_id: phone_item?.item_id ?? null,
@@ -154,11 +114,7 @@ export function deriveContextSummary({
 
     property_address: titleCaseIfShouting(raw_property_address),
     property_city: titleCaseIfShouting(raw_property_city),
-    property_state:
-      firstNonNull(
-        getTextValue(property_item, "state", ""),
-        seller_id_location.property_state
-      ) || "",
+    property_state: getTextValue(property_item, "state", "") || "",
 
     agent_name:
       firstNonNull(

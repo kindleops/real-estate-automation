@@ -14,6 +14,7 @@ import {
   createMessageEvent,
   PodioError,
   normalizeLanguage,
+  isRevisionLimitExceeded,
 } from "@/lib/providers/podio.js";
 
 import {
@@ -157,6 +158,8 @@ function isNegativeCategory(value) {
 
 function shouldRetryQueueUpdateWithoutTemplate(error) {
   if (!(error instanceof PodioError)) return false;
+  // Revision-limit errors must NOT be retried — the item cannot be written to at all.
+  if (isRevisionLimitExceeded(error)) return false;
 
   const message = clean(error?.message).toLowerCase();
   return (
@@ -168,6 +171,18 @@ function shouldRetryQueueUpdateWithoutTemplate(error) {
       message.includes("value")
     )
   );
+}
+
+function logRevisionLimitPhase(queue_item_id, operation, phase, err) {
+  if (!isRevisionLimitExceeded(err)) return;
+  warn("queue.process_revision_limit_at_phase", {
+    queue_item_id,
+    operation,
+    phase,
+    failure_bucket: "revision_limit_exceeded",
+    skipped: true,
+    message: err?.message || null,
+  });
 }
 
 function getTouchNumber(queue_item) {
@@ -370,7 +385,10 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     safeGetItem(market_id),
     safeGetItem(sms_agent_id),
   ]);
-  let property_item = queued_property_item;
+  let property_item =
+    queued_property_item ||
+    // Also check the brain item's properties relation before falling back to a lookup
+    (brain_item ? await safeGetItem(getFirstAppReferenceId(brain_item, "properties", null)) : null);
 
   if (!property_item?.item_id && master_owner_id) {
     try {
@@ -379,6 +397,15 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     } catch (_error) {
       property_item = null;
     }
+  }
+
+  if (!property_item?.item_id) {
+    warn("queue.deferred_message_property_not_found", {
+      queue_item_id,
+      master_owner_id,
+      queued_property_id: property_id || null,
+      message: "No property item resolved for deferred message — property_address may be missing",
+    });
   }
 
   const derived_market_id =
@@ -505,6 +532,25 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     },
   });
 
+  if (render_result?.missing_required_placeholders?.length || render_result?.invalid_placeholders?.length) {
+    warn("queue.deferred_message_placeholder_validation_failed", {
+      queue_item_id,
+      template_id: selected_template.item_id,
+      property_item_id: property_item?.item_id || null,
+      missing_required_placeholders: render_result.missing_required_placeholders || [],
+      invalid_placeholders: render_result.invalid_placeholders || [],
+    });
+    return {
+      ok: false,
+      reason: "template_placeholder_validation_failed",
+      details: {
+        template_id: selected_template.item_id,
+        missing_required_placeholders: render_result.missing_required_placeholders || [],
+        invalid_placeholders: render_result.invalid_placeholders || [],
+      },
+    };
+  }
+
   const rendered_message_text = clean(render_result?.rendered_text || "");
   if (!rendered_message_text) {
     return {
@@ -528,12 +574,18 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
   try {
     await updateItem(queue_item_id, queue_resolution_payload);
   } catch (error) {
+    logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write", error);
     if (!shouldRetryQueueUpdateWithoutTemplate(error)) {
       throw error;
     }
 
     delete queue_resolution_payload[QUEUE_FIELDS.template];
-    await updateItem(queue_item_id, queue_resolution_payload);
+    try {
+      await updateItem(queue_item_id, queue_resolution_payload);
+    } catch (retryError) {
+      logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write_retry", retryError);
+      throw retryError;
+    }
   }
 
   const refreshed_queue_item = await getItem(queue_item_id);
@@ -918,7 +970,8 @@ async function failQueueItem(
     failed_reason = "Network Error",
     retry_count = null,
     delivery_confirmed = "❌ Failed",
-  }
+    _phase = "status_update",
+  } = {}
 ) {
   const payload = {
     [QUEUE_FIELDS.queue_status]: queue_status,
@@ -930,7 +983,12 @@ async function failQueueItem(
     payload[QUEUE_FIELDS.retry_count] = retry_count;
   }
 
-  await updateItem(queue_item_id, payload);
+  try {
+    await updateItem(queue_item_id, payload);
+  } catch (error) {
+    logRevisionLimitPhase(queue_item_id, "fail_queue_item", _phase, error);
+    throw error;
+  }
 }
 
 async function claimQueueItemForSending(
@@ -948,7 +1006,12 @@ async function claimQueueItemForSending(
   };
 
   if (revision === null) {
-    await updateItem(queue_item_id, payload);
+    try {
+      await updateItem(queue_item_id, payload);
+    } catch (error) {
+      logRevisionLimitPhase(queue_item_id, "claim_for_sending", "status_transition", error);
+      throw error;
+    }
 
     return {
       ok: true,
@@ -974,6 +1037,7 @@ async function claimQueueItemForSending(
       };
     }
 
+    logRevisionLimitPhase(queue_item_id, "claim_for_sending", "optimistic_lock", error);
     throw error;
   }
 }
@@ -1132,6 +1196,7 @@ export async function processSendQueueItem(queue_item_id) {
     await failQueueItem(queue_item_id, {
       queue_status: "Blocked",
       failed_reason: "Network Error",
+      _phase: "message_resolution_failed",
     });
 
     return {

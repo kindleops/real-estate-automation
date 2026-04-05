@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 
 import APP_IDS from "@/lib/config/app-ids.js";
 import { createMessageEvent, updateMessageEvent } from "@/lib/podio/apps/message-events.js";
-import { getFirstMatchingItem, getTextValue } from "@/lib/providers/podio.js";
+import {
+  getFirstMatchingItem,
+  getTextValue,
+  isRevisionLimitExceeded,
+} from "@/lib/providers/podio.js";
+
+const RUN_LOCK_LOGGER_KEY = "domain.runs.run_locks";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -152,7 +158,37 @@ export async function acquireRunLock({
   };
 
   if (record?.item_id) {
-    await updateMessageEvent(record.item_id, fields);
+    try {
+      await updateMessageEvent(record.item_id, fields);
+    } catch (error) {
+      if (!isRevisionLimitExceeded(error)) throw error;
+      // Existing lock record has hit the Podio revision limit; create a fresh one.
+      // The stale record will be ignored on future reads since the new one will
+      // sort higher (sort_desc: true on message-id lookup).
+      console.warn(
+        JSON.stringify({
+          level: "WARN",
+          event: "run_lock.acquire_revision_limit_fresh_record",
+          meta: {
+            module: RUN_LOCK_LOGGER_KEY,
+            scope: normalized_scope,
+            old_record_item_id: record.item_id,
+            failure_bucket: "revision_limit_exceeded",
+            message: error?.message || null,
+          },
+        })
+      );
+      const fresh = await createMessageEvent(fields);
+      return {
+        ok: true,
+        acquired: true,
+        reason: "lock_acquired_fresh_record",
+        scope: normalized_scope,
+        record_item_id: fresh?.item_id || null,
+        lease_token,
+        meta: next_meta,
+      };
+    }
     return {
       ok: true,
       acquired: true,
@@ -204,13 +240,44 @@ export async function releaseRunLock({
     metadata: metadata && typeof metadata === "object" ? metadata : {},
   };
 
-  await updateMessageEvent(record_item_id, {
+  const release_fields = {
     "timestamp": { start: next_meta.released_at },
     "trigger-name": buildRunLockTriggerName(scope),
     "source-app": "Runtime Lock",
     "message": `Run lock ${clean(scope)} released (${clean(outcome) || "completed"})`,
     "ai-output": JSON.stringify(next_meta),
-  });
+  };
+
+  try {
+    await updateMessageEvent(record_item_id, release_fields);
+  } catch (error) {
+    if (!isRevisionLimitExceeded(error)) throw error;
+    // The lock record has hit the Podio revision limit. The run completed
+    // successfully; we cannot update the record but we do not need to.
+    // Log and return gracefully so the caller is not affected.
+    console.warn(
+      JSON.stringify({
+        level: "WARN",
+        event: "run_lock.release_revision_limit",
+        meta: {
+          module: RUN_LOCK_LOGGER_KEY,
+          scope: clean(scope),
+          record_item_id,
+          outcome: clean(outcome) || null,
+          failure_bucket: "revision_limit_exceeded",
+          message: error?.message || null,
+        },
+      })
+    );
+    return {
+      ok: true,
+      released: true,
+      reason: "run_lock_released_revision_limit",
+      record_item_id,
+      scope: clean(scope),
+      outcome: clean(outcome) || null,
+    };
+  }
 
   return {
     ok: true,

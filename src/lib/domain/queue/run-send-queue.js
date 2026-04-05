@@ -416,36 +416,58 @@ export async function runSendQueue({
     };
 
     if (failed_count > 0) {
-      await record_system_alert({
-        subsystem: "queue",
-        code: "runner_failed_items",
-        severity: "warning",
-        retryable: true,
-        summary: `Queue runner completed with ${failed_count} failed item(s).`,
-        dedupe_key: scoped_master_owner_id
-          ? `queue-run:${scoped_master_owner_id}`
-          : "queue-run",
-        affected_ids: results
-          .filter((result) => result?.ok === false)
-          .map((result) => result?.queue_item_id),
-        metadata: {
+      try {
+        await record_system_alert({
+          subsystem: "queue",
+          code: "runner_failed_items",
+          severity: "warning",
+          retryable: true,
+          summary: `Queue runner completed with ${failed_count} failed item(s).`,
+          dedupe_key: scoped_master_owner_id
+            ? `queue-run:${scoped_master_owner_id}`
+            : "queue-run",
+          affected_ids: results
+            .filter((result) => result?.ok === false)
+            .map((result) => result?.queue_item_id),
+          metadata: {
+            run_started_at,
+            processed_count: summary.processed_count,
+            failed_count,
+            sent_count,
+            skipped_count,
+            master_owner_id: scoped_master_owner_id,
+          },
+        });
+      } catch (alert_err) {
+        warn_log("queue.run_system_alert_write_failed", {
           run_started_at,
-          processed_count: summary.processed_count,
-          failed_count,
-          sent_count,
-          skipped_count,
-          master_owner_id: scoped_master_owner_id,
-        },
-      });
+          operation: "record_failed_items_alert",
+          failure_bucket: isRevisionLimitExceededError(alert_err)
+            ? "revision_limit_exceeded"
+            : "write_error",
+          message: alert_err?.message || null,
+        });
+      }
     } else {
-      await resolve_system_alert({
-        subsystem: "queue",
-        code: "runner_failed_items",
-        dedupe_key: scoped_master_owner_id
-          ? `queue-run:${scoped_master_owner_id}`
-          : "queue-run",
-        resolution_message: "Queue runner completed without failed items.",
-      });
+      try {
+        await resolve_system_alert({
+          subsystem: "queue",
+          code: "runner_failed_items",
+          dedupe_key: scoped_master_owner_id
+            ? `queue-run:${scoped_master_owner_id}`
+            : "queue-run",
+          resolution_message: "Queue runner completed without failed items.",
+        });
+      } catch (alert_err) {
+        warn_log("queue.run_system_alert_write_failed", {
+          run_started_at,
+          operation: "resolve_failed_items_alert",
+          failure_bucket: isRevisionLimitExceededError(alert_err)
+            ? "revision_limit_exceeded"
+            : "write_error",
+          message: alert_err?.message || null,
+        });
+      }
     }
 
     info_log("queue.run_completed", {
@@ -472,22 +494,32 @@ export async function runSendQueue({
       master_owner_id: scoped_master_owner_id,
     },
     onLocked: async (lock) => {
-      await record_system_alert({
-        subsystem: "queue",
-        code: "runner_overlap",
-        severity: "warning",
-        retryable: true,
-        summary: "Queue runner skipped because an active lease is already in progress.",
-        dedupe_key: scoped_master_owner_id
-          ? `queue-run:${scoped_master_owner_id}`
-          : "queue-run",
-        metadata: {
+      try {
+        await record_system_alert({
+          subsystem: "queue",
+          code: "runner_overlap",
+          severity: "warning",
+          retryable: true,
+          summary: "Queue runner skipped because an active lease is already in progress.",
+          dedupe_key: scoped_master_owner_id
+            ? `queue-run:${scoped_master_owner_id}`
+            : "queue-run",
+          metadata: {
+            run_started_at,
+            limit,
+            master_owner_id: scoped_master_owner_id,
+            lock,
+          },
+        });
+      } catch (alert_err) {
+        warn_log("queue.run_overlap_alert_write_failed", {
           run_started_at,
-          limit,
-          master_owner_id: scoped_master_owner_id,
-          lock,
-        },
-      });
+          failure_bucket: isRevisionLimitExceededError(alert_err)
+            ? "revision_limit_exceeded"
+            : "write_error",
+          message: alert_err?.message || null,
+        });
+      }
 
       return {
         ok: true,

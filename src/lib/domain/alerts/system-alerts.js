@@ -9,7 +9,7 @@ import {
   updateMessageEvent,
   findMessageEvents,
 } from "@/lib/podio/apps/message-events.js";
-import { getFirstMatchingItem, getTextValue } from "@/lib/providers/podio.js";
+import { getFirstMatchingItem, getTextValue, isRevisionLimitExceeded } from "@/lib/providers/podio.js";
 
 const logger = child({
   module: "domain.alerts.system_alerts",
@@ -458,7 +458,7 @@ export async function resolveSystemAlert({
   const existing_meta = parseAlertMeta(existing);
   const resolved_at = nowIso();
 
-  await updateMessageEvent(existing.item_id, {
+  const resolved_fields = {
     ...buildAlertFields({
       subsystem: normalized_subsystem,
       signature,
@@ -479,7 +479,25 @@ export async function resolveSystemAlert({
         },
       },
     }),
-  });
+  };
+
+  try {
+    await updateMessageEvent(existing.item_id, resolved_fields);
+  } catch (error) {
+    logger.warn("system_alert.resolve_failed", {
+      subsystem: normalized_subsystem,
+      code: normalized_code,
+      alert_item_id: existing.item_id,
+      failure_bucket: isRevisionLimitExceeded(error) ? "revision_limit_exceeded" : "write_error",
+      message: error?.message || "unknown_error",
+    });
+    return {
+      ok: false,
+      reason: isRevisionLimitExceeded(error)
+        ? "alert_item_revision_limit_exceeded"
+        : (clean(error?.message) || "resolve_failed"),
+    };
+  }
 
   return {
     ok: true,

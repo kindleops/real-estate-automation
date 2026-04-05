@@ -160,9 +160,24 @@ async function _loadContextInner({
   const brain_item_id = brain_item?.item_id ?? null;
   const assigned_agent_id = deriveAssignedAgentId(brain_item);
 
+  // If the phone item has no primary-property, fall back to the brain's properties link.
+  // This ensures the queue row always carries the Properties relation when the brain
+  // has already been linked to a property even if the phone record has not.
+  if (!property_id) {
+    property_id = getFirstAppReferenceId(brain_item, "properties", null);
+  }
+
+  if (!property_id && master_owner_id) {
+    log.warn("context.property_not_found", {
+      master_owner_id,
+      message: "No property item resolved from phone primary-property, brain.properties, or Podio lookup",
+    });
+  }
+
   log.info("context.brain_resolved", {
     brain_item_id,
     assigned_agent_id,
+    property_id,
   });
 
   const [
