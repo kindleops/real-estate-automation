@@ -283,30 +283,74 @@ export async function runSendQueue({
       }
     );
 
-    const runnable_items = sortByScheduledAtAsc(
-      queued_items.filter((item) => {
-        const status = getCategoryValue(item, "queue-status", null);
-        if (!isRunnableStatus(status)) return false;
+    let future_rows_count = 0;
+    let outside_window_count = 0;
+    const filter_diagnostics = [];
 
-        if (
-          scoped_master_owner_id &&
-          Number(getFirstAppReferenceId(item, "master-owner", 0) || 0) !==
-            scoped_master_owner_id
-        ) {
-          return false;
+    const all_due_runnable = queued_items.filter((item) => {
+      const item_id = item?.item_id;
+      const status = getCategoryValue(item, "queue-status", null);
+
+      if (!isRunnableStatus(status)) {
+        if (filter_diagnostics.length < 10) {
+          filter_diagnostics.push({ item_id, reason: "bad_status", status });
         }
+        return false;
+      }
 
-        if (!isDue(item, now_ts)) return false;
+      if (
+        scoped_master_owner_id &&
+        Number(getFirstAppReferenceId(item, "master-owner", 0) || 0) !==
+          scoped_master_owner_id
+      ) {
+        if (filter_diagnostics.length < 10) {
+          filter_diagnostics.push({ item_id, reason: "scoped_mismatch" });
+        }
+        return false;
+      }
 
-        const contact_window_check = isWithinContactWindow(item, now_date);
-        return contact_window_check.allowed;
-      })
-    ).slice(0, limit);
+      if (!isDue(item, now_ts)) {
+        future_rows_count += 1;
+        const scheduled =
+          getDateValue(item, "scheduled-for-utc", null) ||
+          getDateValue(item, "scheduled-for-local", null);
+        if (filter_diagnostics.length < 10) {
+          filter_diagnostics.push({ item_id, reason: "not_due_yet", scheduled });
+        }
+        return false;
+      }
+
+      const contact_window_check = isWithinContactWindow(item, now_date);
+      if (!contact_window_check.allowed) {
+        outside_window_count += 1;
+        if (filter_diagnostics.length < 10) {
+          filter_diagnostics.push({
+            item_id,
+            reason: "outside_contact_window",
+            timezone: contact_window_check.timezone_label,
+            contact_window: contact_window_check.contact_window,
+            local_minutes_since_midnight: contact_window_check.local_minutes_since_midnight,
+          });
+        }
+        return false;
+      }
+
+      return true;
+    });
+
+    const runnable_items = sortByScheduledAtAsc(all_due_runnable).slice(0, limit);
 
     info_log("queue.run_candidates_loaded", {
-      total_queued: queued_items.length,
+      now_utc: run_started_at,
+      total_rows_loaded: queued_items.length,
+      queued_rows_loaded: queued_items.length,
+      due_rows: all_due_runnable.length,
+      future_rows: future_rows_count,
+      outside_window_rows: outside_window_count,
       runnable_count: runnable_items.length,
       master_owner_id: scoped_master_owner_id,
+      first_10_candidate_item_ids: runnable_items.slice(0, 10).map((i) => i?.item_id),
+      first_10_filter_excluded: filter_diagnostics,
     });
 
     if (dry_run) {
@@ -328,13 +372,25 @@ export async function runSendQueue({
       };
 
       info_log("queue.run_completed", {
+        now_utc: run_started_at,
         run_started_at,
+        total_rows_loaded: queued_items.length,
+        queued_rows_loaded: queued_items.length,
+        due_rows: all_due_runnable.length,
+        future_rows: future_rows_count,
+        outside_window_rows: outside_window_count,
+        runnable_count: runnable_items.length,
         processed_count: summary.processed_count,
-        sent_count: summary.sent_count,
-        failed_count: summary.failed_count,
-        skipped_count: summary.skipped_count,
+        sent_rows: 0,
+        sent_count: 0,
+        blocked_rows: 0,
+        failed_count: 0,
+        skipped_rows: 0,
+        skipped_count: 0,
         dry_run: true,
         master_owner_id: scoped_master_owner_id,
+        first_10_candidate_item_ids: runnable_items.slice(0, 10).map((i) => i?.item_id),
+        first_10_skipped_item_ids_with_reason: [],
       });
 
       return summary;
@@ -344,6 +400,8 @@ export async function runSendQueue({
     let sent_count = 0;
     let failed_count = 0;
     let skipped_count = 0;
+    let blocked_count = 0;
+    const skipped_details = [];
 
     for (const item of runnable_items) {
       const queue_item_id = item?.item_id;
@@ -358,10 +416,22 @@ export async function runSendQueue({
 
         if (result?.skipped) {
           skipped_count += 1;
+          if (skipped_details.length < 10) {
+            skipped_details.push({ queue_item_id, reason: result.reason || "skipped" });
+          }
         } else if (result?.ok) {
           sent_count += 1;
         } else {
           failed_count += 1;
+          blocked_count += 1;
+          warn_log("queue.run_item_not_dispatched", {
+            queue_item_id,
+            reason: result.reason || "unknown",
+            details: result.details || null,
+          });
+          if (skipped_details.length < 10) {
+            skipped_details.push({ queue_item_id, reason: result.reason || "unknown" });
+          }
         }
       } catch (err) {
         if (isRevisionLimitExceededError(err)) {
@@ -372,6 +442,9 @@ export async function runSendQueue({
           });
 
           skipped_count += 1;
+          if (skipped_details.length < 10) {
+            skipped_details.push({ queue_item_id, reason: "revision_limit_exceeded" });
+          }
           results.push({
             queue_item_id,
             ok: true,
@@ -395,6 +468,9 @@ export async function runSendQueue({
         });
 
         failed_count += 1;
+        if (skipped_details.length < 10) {
+          skipped_details.push({ queue_item_id, reason: `crash:${err?.message || "unknown"}` });
+        }
         results.push({
           queue_item_id,
           ok: false,
@@ -471,12 +547,24 @@ export async function runSendQueue({
     }
 
     info_log("queue.run_completed", {
+      now_utc: run_started_at,
       run_started_at,
+      total_rows_loaded: queued_items.length,
+      queued_rows_loaded: queued_items.length,
+      due_rows: all_due_runnable.length,
+      future_rows: future_rows_count,
+      outside_window_rows: outside_window_count,
+      runnable_count: runnable_items.length,
       processed_count: summary.processed_count,
+      sent_rows: sent_count,
       sent_count,
+      blocked_rows: blocked_count,
       failed_count,
+      skipped_rows: skipped_count,
       skipped_count,
       master_owner_id: scoped_master_owner_id,
+      first_10_candidate_item_ids: runnable_items.slice(0, 10).map((i) => i?.item_id),
+      first_10_skipped_item_ids_with_reason: skipped_details,
     });
 
     return summary;
