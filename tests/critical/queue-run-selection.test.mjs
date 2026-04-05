@@ -240,3 +240,69 @@ test("runSendQueue processes the due row and excludes the future row from a mixe
   assert.equal(candidates.runnable_count, 1);
   assert.deepEqual(candidates.first_10_candidate_item_ids, [2010]);
 });
+
+// ─── test 7: diagnostic fields appear in returned summary (not just logs) ───────
+
+test("runSendQueue returns total_rows_loaded, due_rows, future_rows, first_10_excluded in summary object", async () => {
+  const { deps } = makeStubs();
+
+  const due_item = createPodioItem(3001, {
+    "queue-status": categoryField("Queued"),
+    "scheduled-for-utc": dateField("2026-04-04T10:00:00.000Z"),
+    "master-owner": appRefField(5001),
+  });
+
+  const future_item = createPodioItem(3002, {
+    "queue-status": categoryField("Queued"),
+    "scheduled-for-utc": dateField("2026-04-05T10:00:00.000Z"), // future
+    "master-owner": appRefField(5001),
+  });
+
+  deps.fetchAllItems = makeQueue([due_item, future_item]);
+
+  const result = await runSendQueue({ limit: 10, now: NOW }, deps);
+
+  assert.equal(result.total_rows_loaded, 2, "total_rows_loaded in returned summary");
+  assert.equal(result.queued_rows_loaded, 2, "queued_rows_loaded in returned summary");
+  assert.equal(result.due_rows, 1, "due_rows in returned summary");
+  assert.equal(result.future_rows, 1, "future_rows in returned summary");
+  assert.equal(result.outside_window_rows, 0, "outside_window_rows in returned summary");
+  assert.deepEqual(result.first_10_candidate_item_ids, [3001], "first_10_candidate_item_ids in returned summary");
+  assert.equal(result.first_10_excluded.length, 1, "first_10_excluded in returned summary");
+  assert.equal(result.first_10_excluded[0].item_id, 3002);
+  assert.equal(result.first_10_excluded[0].reason, "not_due_yet");
+});
+
+// ─── test 8: dry_run summary also includes diagnostic fields ─────────────────
+
+test("runSendQueue dry_run=true returns diagnostic fields in summary without processing rows", async () => {
+  const { deps } = makeStubs();
+
+  const due_item = createPodioItem(3010, {
+    "queue-status": categoryField("Queued"),
+    "scheduled-for-utc": dateField("2026-04-04T08:00:00.000Z"),
+    "master-owner": appRefField(5001),
+  });
+
+  const future_item = createPodioItem(3011, {
+    "queue-status": categoryField("Queued"),
+    "scheduled-for-utc": dateField("2026-04-06T08:00:00.000Z"),
+    "master-owner": appRefField(5001),
+  });
+
+  deps.fetchAllItems = makeQueue([due_item, future_item]);
+
+  const result = await runSendQueue({ limit: 10, now: NOW, dry_run: true }, deps);
+
+  assert.equal(result.dry_run, true, "dry_run flag set in summary");
+  assert.equal(result.total_rows_loaded, 2, "total_rows_loaded in dry_run summary");
+  assert.equal(result.due_rows, 1, "due_rows in dry_run summary");
+  assert.equal(result.future_rows, 1, "future_rows in dry_run summary");
+  assert.equal(result.outside_window_rows, 0, "outside_window_rows in dry_run summary");
+  assert.deepEqual(result.first_10_candidate_item_ids, [3010], "candidate ids in dry_run summary");
+  assert.equal(result.first_10_excluded.length, 1, "first_10_excluded in dry_run summary");
+  assert.equal(result.first_10_excluded[0].item_id, 3011);
+  assert.equal(result.first_10_excluded[0].reason, "not_due_yet");
+  assert.equal(result.sent_count, 0, "no rows sent in dry_run");
+  assert.equal(result.processed_count, 1, "processed_count reflects runnable rows even in dry_run");
+});

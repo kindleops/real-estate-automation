@@ -375,6 +375,48 @@ function parseSellerIdLocation(value) {
   };
 }
 
+// Expand common street-type abbreviations to their canonical long form.
+// Applied case-insensitively on word boundaries so partial words (e.g. "Drive"
+// already spelled out, "State") are not affected.
+// Use (?!\w) instead of \b after the optional dot so patterns like "Ave." at end-of-string
+// are consumed correctly (a trailing dot is non-word, so \b would not match after it).
+const STREET_TYPE_EXPANSIONS = [
+  [/\bSt\.?(?!\w)/gi, "Street"],
+  [/\bAve\.?(?!\w)/gi, "Avenue"],
+  [/\bBlvd\.?(?!\w)/gi, "Boulevard"],
+  [/\bDr\.?(?!\w)/gi, "Drive"],
+  [/\bRd\.?(?!\w)/gi, "Road"],
+  [/\bLn\.?(?!\w)/gi, "Lane"],
+  [/\bCt\.?(?!\w)/gi, "Court"],
+  [/\bCir\.?(?!\w)/gi, "Circle"],
+  [/\bPkwy\.?(?!\w)/gi, "Parkway"],
+  [/\bPl\.?(?!\w)/gi, "Place"],
+  [/\bTrl\.?(?!\w)/gi, "Trail"],
+  [/\bHwy\.?(?!\w)/gi, "Highway"],
+];
+
+function normalizeStreetAddress(address) {
+  let result = String(address ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+  for (const [pattern, replacement] of STREET_TYPE_EXPANSIONS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result.trim().replace(/\s+/g, " ");
+}
+
+// Returns the cleaned raw address and a de-duped array of lower-cased variants
+// (original + abbreviation-expanded) to use when post-filtering Podio results.
+function addressLookupVariants(raw_address) {
+  const cleaned = String(raw_address ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+  const expanded = normalizeStreetAddress(cleaned);
+  const variants = [lower(cleaned)];
+  if (lower(expanded) !== lower(cleaned)) variants.push(lower(expanded));
+  return { cleaned, expanded, variants };
+}
+
 function maskOwnerName(value) {
   const text = stripHtml(value);
   if (!text) return null;
@@ -950,10 +992,14 @@ async function selectBestProperty(
   const seller_id_location = parseSellerIdLocation(
     getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "")
   );
-  const lookup_address = clean(seller_id_location.property_address);
+  const raw_seller_address = clean(seller_id_location.property_address);
   const lookup_city = lower(seller_id_location.property_city);
+  const lookup_state = lower(seller_id_location.property_state);
 
-  if (lookup_address) {
+  if (raw_seller_address) {
+    const { cleaned: lookup_address, variants: address_variants } =
+      addressLookupVariants(raw_seller_address);
+
     try {
       const addr_response = await timedStage(
         log,
@@ -962,6 +1008,8 @@ async function selectBestProperty(
           master_owner_id,
           lookup_address,
           lookup_city: lookup_city || null,
+          lookup_state: lookup_state || null,
+          address_variants,
         },
         () => findPropertyItems({ "property-address": lookup_address }, 5, 0)
       );
@@ -972,17 +1020,21 @@ async function selectBestProperty(
           ? addr_response
           : [];
 
-      // Post-filter: require exact case-insensitive address match to avoid
-      // Podio's partial-text filter returning unrelated properties.
+      // Post-filter: require the candidate's address to match one of our lookup
+      // variants (exact + abbreviation-expanded), and optionally city + state,
+      // to avoid Podio's partial-text filter returning unrelated properties.
       const exact_matches = addr_candidates.filter((candidate) => {
         const candidate_address = lower(
           getTextValue(candidate, "property-address", "") || candidate?.title || ""
         );
-        if (candidate_address !== lower(lookup_address)) return false;
-        // If we parsed a city, also require it to match to avoid cross-market collisions.
+        if (!address_variants.includes(candidate_address)) return false;
         if (lookup_city) {
           const candidate_city = lower(getTextValue(candidate, "city", ""));
           if (candidate_city && candidate_city !== lookup_city) return false;
+        }
+        if (lookup_state) {
+          const candidate_state = lower(getTextValue(candidate, "state", ""));
+          if (candidate_state && candidate_state !== lookup_state) return false;
         }
         return Boolean(candidate?.item_id);
       });
@@ -993,6 +1045,8 @@ async function selectBestProperty(
           property_item_id: exact_matches[0].item_id,
           lookup_address,
           lookup_city: lookup_city || null,
+          lookup_state: lookup_state || null,
+          address_variants,
         });
         return exact_matches[0];
       }
@@ -1002,6 +1056,8 @@ async function selectBestProperty(
           master_owner_id,
           lookup_address,
           lookup_city: lookup_city || null,
+          lookup_state: lookup_state || null,
+          address_variants,
           candidate_count: addr_candidates.length,
           exact_match_count: exact_matches.length,
         });
@@ -3398,6 +3454,8 @@ export default runMasterOwnerOutboundFeeder;
 export {
   detectFirstTouch,
   parseSellerIdLocation,
+  normalizeStreetAddress,
+  addressLookupVariants,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,

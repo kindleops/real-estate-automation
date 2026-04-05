@@ -21,6 +21,8 @@ import assert from "node:assert/strict";
 import {
   detectFirstTouch,
   parseSellerIdLocation,
+  normalizeStreetAddress,
+  addressLookupVariants,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
@@ -481,4 +483,153 @@ test("address-lookup filter: zero matches when address is present but city confl
   });
 
   assert.equal(exact_matches.length, 0, "city mismatch on all candidates must yield zero matches — no property resolved");
+});
+
+// ── test 12: normalizeStreetAddress expands common abbreviations ──────────────
+
+test("normalizeStreetAddress expands common street-type abbreviations to canonical form", () => {
+  const cases = [
+    ["123 Main St", "123 Main Street"],
+    ["456 Oak Ave", "456 Oak Avenue"],
+    ["789 Elm Blvd", "789 Elm Boulevard"],
+    ["100 River Dr", "100 River Drive"],
+    ["200 Pine Rd", "200 Pine Road"],
+    ["300 Maple Ln", "300 Maple Lane"],
+    ["400 Cedar Ct", "400 Cedar Court"],
+    ["500 Birch Cir", "500 Birch Circle"],
+    ["600 Park Pkwy", "600 Park Parkway"],
+    ["700 Oak Pl", "700 Oak Place"],
+    // Already spelled out — must be unchanged
+    ["800 Elm Street", "800 Elm Street"],
+    // Trailing dot variant
+    ["900 Oak Ave.", "900 Oak Avenue"],
+  ];
+
+  for (const [input, expected] of cases) {
+    const result = normalizeStreetAddress(input);
+    assert.equal(result, expected, `normalizeStreetAddress("${input}") should be "${expected}"`);
+  }
+});
+
+test("normalizeStreetAddress collapses extra whitespace", () => {
+  assert.equal(normalizeStreetAddress("  123   Main   St  "), "123 Main Street");
+  assert.equal(normalizeStreetAddress("456  Oak  Ave"), "456 Oak Avenue");
+});
+
+// ── test 13: addressLookupVariants returns original + expanded variants ────────
+
+test("addressLookupVariants returns deduplicated lower-cased variants including expanded form", () => {
+  const { cleaned, expanded, variants } = addressLookupVariants("123 Main St");
+
+  assert.equal(cleaned, "123 Main St");
+  assert.equal(expanded, "123 Main Street");
+  assert.ok(variants.includes("123 main st"), "original lower-cased variant present");
+  assert.ok(variants.includes("123 main street"), "expanded lower-cased variant present");
+  assert.equal(variants.length, 2, "exactly two variants when original and expanded differ");
+});
+
+test("addressLookupVariants returns only one variant when address needs no expansion", () => {
+  const { variants } = addressLookupVariants("123 Main Street");
+
+  assert.equal(variants.length, 1, "already-canonical address should produce only one variant");
+  assert.deepEqual(variants, ["123 main street"]);
+});
+
+// ── test 14: address filter accepts candidate matching expanded variant ────────
+
+test("address-lookup filter: candidate matching expanded abbreviation qualifies via variants", () => {
+  // Simulates the updated post-filter in selectBestProperty that checks address_variants.
+  // seller_id has "123 Main St" → variants: ["123 main st", "123 main street"]
+  // Podio candidate has "123 Main Street" → must match via the expanded variant.
+
+  const { variants: address_variants } = addressLookupVariants("123 Main St");
+
+  function makePropertyCandidate(item_id, address, city = "", state = "") {
+    return createPodioItem(item_id, {
+      "property-address": textField(address),
+      ...(city ? { city: textField(city) } : {}),
+      ...(state ? { state: textField(state) } : {}),
+    });
+  }
+
+  const candidates = [
+    makePropertyCandidate(20, "123 Main Street", "Dallas", "TX"),  // expanded form — must qualify
+    makePropertyCandidate(21, "123 Main Drive", "Dallas", "TX"),   // different suffix — must not qualify
+    makePropertyCandidate(22, "123 Main St", "Austin", "TX"),      // wrong city — must not qualify
+  ];
+
+  function getTextValue(item, external_id, fallback = "") {
+    const field = item.fields.find((f) => f.external_id === external_id);
+    const first = field?.values?.[0];
+    return String(first?.value ?? fallback).trim();
+  }
+  function lower(v) { return String(v ?? "").trim().toLowerCase(); }
+
+  const lookup_city = "dallas";
+  const lookup_state = "tx";
+
+  const exact_matches = candidates.filter((candidate) => {
+    const candidate_address = lower(
+      getTextValue(candidate, "property-address", "") || candidate?.title || ""
+    );
+    if (!address_variants.includes(candidate_address)) return false;
+    if (lookup_city) {
+      const candidate_city = lower(getTextValue(candidate, "city", ""));
+      if (candidate_city && candidate_city !== lookup_city) return false;
+    }
+    if (lookup_state) {
+      const candidate_state = lower(getTextValue(candidate, "state", ""));
+      if (candidate_state && candidate_state !== lookup_state) return false;
+    }
+    return Boolean(candidate?.item_id);
+  });
+
+  assert.equal(exact_matches.length, 1, "exactly one candidate should match via expanded variant");
+  assert.equal(exact_matches[0].item_id, 20, "the expanded-form address+city+state match must be selected");
+});
+
+test("address-lookup filter: state mismatch eliminates an otherwise matching candidate", () => {
+  const { variants: address_variants } = addressLookupVariants("500 River Rd");
+
+  function makePropertyCandidate(item_id, address, city = "", state = "") {
+    return createPodioItem(item_id, {
+      "property-address": textField(address),
+      ...(city ? { city: textField(city) } : {}),
+      ...(state ? { state: textField(state) } : {}),
+    });
+  }
+
+  function getTextValue(item, external_id, fallback = "") {
+    const field = item.fields.find((f) => f.external_id === external_id);
+    const first = field?.values?.[0];
+    return String(first?.value ?? fallback).trim();
+  }
+  function lower(v) { return String(v ?? "").trim().toLowerCase(); }
+
+  const lookup_city = "dallas";
+  const lookup_state = "tx";
+
+  const candidates = [
+    makePropertyCandidate(30, "500 River Road", "Dallas", "OK"), // wrong state
+    makePropertyCandidate(31, "500 River Road", "Dallas", "TX"), // correct state — should match
+  ];
+
+  const exact_matches = candidates.filter((candidate) => {
+    const candidate_address = lower(
+      getTextValue(candidate, "property-address", "") || candidate?.title || ""
+    );
+    if (!address_variants.includes(candidate_address)) return false;
+    if (lookup_city) {
+      const candidate_city = lower(getTextValue(candidate, "city", ""));
+      if (candidate_city && candidate_city !== lookup_city) return false;
+    }
+    if (lookup_state) {
+      const candidate_state = lower(getTextValue(candidate, "state", ""));
+      if (candidate_state && candidate_state !== lookup_state) return false;
+    }
+    return Boolean(candidate?.item_id);
+  });
+
+  assert.equal(exact_matches.length, 1, "state mismatch must eliminate the wrong-state candidate");
+  assert.equal(exact_matches[0].item_id, 31, "only the TX candidate survives");
 });
