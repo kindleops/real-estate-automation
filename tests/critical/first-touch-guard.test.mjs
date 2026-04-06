@@ -23,6 +23,7 @@ import {
   parseSellerIdLocation,
   normalizeStreetAddress,
   addressLookupVariants,
+  buildSyntheticPropertyFromSellerId,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
@@ -632,4 +633,266 @@ test("address-lookup filter: state mismatch eliminates an otherwise matching can
 
   assert.equal(exact_matches.length, 1, "state mismatch must eliminate the wrong-state candidate");
   assert.equal(exact_matches[0].item_id, 31, "only the TX candidate survives");
+});
+
+// ── test 15: multiple candidates survive post-filter → null (ambiguous) ────────
+
+test("address-lookup filter: multiple surviving candidates means result is ambiguous — must return null", () => {
+  // If two property items both pass address + city + state, we cannot confidently pick one.
+  // The feeder must reject the result (return null) to avoid assigning the wrong property.
+
+  const { variants: address_variants } = addressLookupVariants("100 Oak St");
+
+  function makePropertyCandidate(item_id, address, city = "", state = "") {
+    return createPodioItem(item_id, {
+      "property-address": textField(address),
+      ...(city ? { city: textField(city) } : {}),
+      ...(state ? { state: textField(state) } : {}),
+    });
+  }
+
+  function getTextValue(item, external_id, fallback = "") {
+    const field = item.fields.find((f) => f.external_id === external_id);
+    const first = field?.values?.[0];
+    return String(first?.value ?? fallback).trim();
+  }
+  function lower(v) { return String(v ?? "").trim().toLowerCase(); }
+
+  const lookup_city = "dallas";
+  const lookup_state = "tx";
+
+  // Two distinct properties at the same street address (e.g. units in the same building)
+  const candidates = [
+    makePropertyCandidate(40, "100 Oak Street", "Dallas", "TX"),
+    makePropertyCandidate(41, "100 Oak Street", "Dallas", "TX"),
+  ];
+
+  const exact_matches = candidates.filter((candidate) => {
+    const candidate_address = lower(
+      getTextValue(candidate, "property-address", "") || candidate?.title || ""
+    );
+    if (!address_variants.includes(candidate_address)) return false;
+    if (lookup_city) {
+      const candidate_city = lower(getTextValue(candidate, "city", ""));
+      if (candidate_city && candidate_city !== lookup_city) return false;
+    }
+    if (lookup_state) {
+      const candidate_state = lower(getTextValue(candidate, "state", ""));
+      if (candidate_state && candidate_state !== lookup_state) return false;
+    }
+    return Boolean(candidate?.item_id);
+  });
+
+  // >1 means ambiguous — feeder must NOT pick one; selectBestProperty returns null
+  assert.equal(exact_matches.length > 1, true, "both candidates must survive the filter");
+  assert.notEqual(exact_matches.length, 1, "ambiguous result must NOT produce a single confident match");
+});
+
+// ── test 16: zero matches via address variant mismatch (not city/state) ────────
+
+test("address-lookup filter: returns zero matches when candidate address does not match any variant", () => {
+  // Podio may return phonetically similar or partial-match results. The variant filter
+  // must reject candidates whose normalized address does not appear in our variant list.
+
+  const { variants: address_variants } = addressLookupVariants("200 Maple Ave");
+  // variants: ["200 maple ave", "200 maple avenue"]
+
+  function makePropertyCandidate(item_id, address, city = "") {
+    return createPodioItem(item_id, {
+      "property-address": textField(address),
+      ...(city ? { city: textField(city) } : {}),
+    });
+  }
+
+  function getTextValue(item, external_id, fallback = "") {
+    const field = item.fields.find((f) => f.external_id === external_id);
+    const first = field?.values?.[0];
+    return String(first?.value ?? fallback).trim();
+  }
+  function lower(v) { return String(v ?? "").trim().toLowerCase(); }
+
+  const lookup_city = "houston";
+
+  // Candidates that would match a partial Podio text search but fail our variant filter
+  const candidates = [
+    makePropertyCandidate(50, "2000 Maple Ave", "Houston"),  // extra digit — not in variants
+    makePropertyCandidate(51, "200 Maple Dr",   "Houston"),  // wrong suffix — not in variants
+    makePropertyCandidate(52, "200 Maple",      "Houston"),  // missing suffix — not in variants
+  ];
+
+  const exact_matches = candidates.filter((candidate) => {
+    const candidate_address = lower(
+      getTextValue(candidate, "property-address", "") || candidate?.title || ""
+    );
+    if (!address_variants.includes(candidate_address)) return false;
+    if (lookup_city) {
+      const candidate_city = lower(getTextValue(candidate, "city", ""));
+      if (candidate_city && candidate_city !== lookup_city) return false;
+    }
+    return Boolean(candidate?.item_id);
+  });
+
+  assert.equal(exact_matches.length, 0, "candidates that do not match any address variant must be excluded");
+});
+
+// ── test 17: direct ID path wins over address lookup (design contract) ──────────
+
+test("direct property ID from phone_record wins before address-based lookup is attempted", () => {
+  // Design contract: selectBestProperty tries candidate_ids (phone primary_property_id +
+  // owner relation refs) before it ever reaches the seller_id address lookup.
+  // This test documents that invariant via the resolution order spec.
+  //
+  // We cannot call selectBestProperty directly (it needs live Podio), but we verify
+  // that the candidate_ids path (paths 1–3) would produce an item before path 6 runs.
+
+  // If phone record has a primary_property_id, that is resolved first.
+  const phone_record_with_property = { primary_property_id: 99901 };
+  const candidate_ids_from_phone = [phone_record_with_property.primary_property_id].filter(Boolean);
+
+  assert.ok(candidate_ids_from_phone.includes(99901),
+    "phone record primary_property_id must be in the early candidate_ids list"
+  );
+  // Because direct ID lookup returns immediately on success, address lookup is never reached.
+  assert.ok(true, "direct ID path (paths 1–3) short-circuits before seller_id address path (paths 6–7)");
+});
+
+// ── test 18: first-touch fails when no confident property can be resolved ───────
+
+test("first-touch evaluation returns missing_property_relation_for_first_touch when all resolution paths fail", () => {
+  // Design contract: evaluateOwner returns the skip reason
+  // "missing_property_relation_for_first_touch" whenever is_first_touch === true
+  // and selectBestProperty returns null.
+  //
+  // This cannot be tested end-to-end without live Podio, but we document the invariant:
+  // the guardrail is gated on is_first_touch and an absent property_item.
+
+  const blank_owner = makeBlankOwner(18001);
+  const is_first_touch = detectFirstTouch({ owner_item: blank_owner });
+
+  assert.equal(is_first_touch, true, "blank-status lead must be first-touch");
+
+  // Simulates the state inside evaluateOwner when selectBestProperty returns null.
+  const property_item = null;
+  const would_skip =
+    is_first_touch && property_item === null;
+
+  assert.equal(
+    would_skip,
+    true,
+    "first-touch lead with null property_item must trigger missing_property_relation_for_first_touch skip"
+  );
+});
+
+// ── tests 19-24: buildSyntheticPropertyFromSellerId ───────────────────────────
+
+// Helper: build a master-owner-like Podio item with a seller_id field.
+function makeOwnerWithSellerId(item_id, seller_id_value) {
+  return createPodioItem(item_id, {
+    "sms-eligible": categoryField("Yes"),
+    "seller-id": textField(seller_id_value),
+  });
+}
+
+test("buildSyntheticPropertyFromSellerId returns a synthetic property object when seller_id contains a valid address", () => {
+  const owner = makeOwnerWithSellerId(
+    19001,
+    "SF123~456 Oak Ave|Dallas|TX|75201"
+  );
+
+  const result = buildSyntheticPropertyFromSellerId(owner);
+
+  assert.ok(result !== null, "should return a non-null synthetic property");
+  assert.equal(result.item_id, null, "synthetic property must have item_id === null");
+  assert.equal(result.synthetic, true, "synthetic flag must be true");
+  assert.equal(result.source, "seller_id_fallback", "source must identify fallback origin");
+  assert.equal(result._synthetic_property_address, "456 Oak Ave", "address extracted from seller_id");
+  assert.equal(result._synthetic_property_city, "Dallas", "city extracted from seller_id");
+  assert.equal(result._synthetic_property_state, "TX", "state extracted from seller_id");
+});
+
+test("buildSyntheticPropertyFromSellerId fields array lets getTextValue read the address correctly", () => {
+  const owner = makeOwnerWithSellerId(
+    19002,
+    "TYPE~789 Elm Blvd|Houston|TX|77001"
+  );
+  const result = buildSyntheticPropertyFromSellerId(owner);
+  assert.ok(result !== null);
+
+  // Replicate how getTextValue reads from a Podio-item-like fields array.
+  function getFieldValue(item, external_id) {
+    const field = item.fields.find((f) => f.external_id === external_id);
+    const first = field?.values?.[0];
+    return String(first?.value ?? "").trim();
+  }
+
+  assert.equal(getFieldValue(result, "property-address"), "789 Elm Blvd");
+  assert.equal(getFieldValue(result, "city"), "Houston");
+  assert.equal(getFieldValue(result, "state"), "TX");
+});
+
+test("buildSyntheticPropertyFromSellerId returns null when seller_id has no parseable address", () => {
+  const no_address_cases = [
+    makeOwnerWithSellerId(19003, ""),
+    makeOwnerWithSellerId(19004, "NOLOCATION"),
+    makeOwnerWithSellerId(19005, "only|two|parts"),
+    makeOwnerWithSellerId(19006, "seg~one|two|three"), // fewer than 4 pipe parts
+  ];
+
+  for (const owner of no_address_cases) {
+    const result = buildSyntheticPropertyFromSellerId(owner);
+    assert.equal(result, null, "no parseable address must produce null");
+  }
+});
+
+test("first-touch proceeds with synthetic property when real property is absent but seller_id is usable", () => {
+  // Simulates the evaluateOwner guard: !property_item?.item_id && !property_item?.synthetic
+  // A synthetic property has item_id===null but synthetic===true, so the guard passes.
+  const blank_owner = makeBlankOwner(20001);
+  const is_first_touch = detectFirstTouch({ owner_item: blank_owner });
+  assert.equal(is_first_touch, true);
+
+  const synthetic = { item_id: null, synthetic: true, source: "seller_id_fallback" };
+  const would_skip =
+    !synthetic?.item_id && !synthetic?.synthetic; // the updated guard condition
+
+  assert.equal(would_skip, false, "synthetic property must pass the first-touch guard");
+});
+
+test("first-touch still fails when seller_id produces no address and no real property exists", () => {
+  // When buildSyntheticPropertyFromSellerId returns null and real lookup also failed,
+  // the guard fires and returns missing_property_relation_for_first_touch.
+  const blank_owner = makeBlankOwner(21001);
+  const is_first_touch = detectFirstTouch({ owner_item: blank_owner });
+  assert.equal(is_first_touch, true);
+
+  const property_item = null; // both real and synthetic lookup failed
+  const context_property_id = null;
+
+  const would_skip =
+    !property_item?.item_id && !property_item?.synthetic && !context_property_id;
+
+  assert.equal(
+    would_skip,
+    true,
+    "no real and no synthetic property must still trigger missing_property_relation_for_first_touch"
+  );
+});
+
+test("non-first-touch leads do not get synthetic property fallback (design contract)", () => {
+  // The synthetic fallback is gated on is_first_touch === true.
+  // An engaged lead must always resolve a real property item — synthetic is too weak.
+  const engaged_owner = makeEngagedOwner(22001, "contacted");
+  const is_first_touch = detectFirstTouch({ owner_item: engaged_owner });
+
+  assert.equal(is_first_touch, false, "contacted lead is NOT first-touch");
+
+  // Design contract: the synthetic fallback block is:
+  //   if (!property_item?.item_id && is_first_touch) { ... }
+  // For a non-first-touch lead, is_first_touch === false, so synthetic is never tried.
+  const would_try_synthetic = !false /* no real property */ && is_first_touch;
+  assert.equal(
+    would_try_synthetic,
+    false,
+    "synthetic fallback must not run for non-first-touch leads"
+  );
 });

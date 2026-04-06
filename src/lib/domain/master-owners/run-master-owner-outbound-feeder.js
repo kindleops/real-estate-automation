@@ -417,6 +417,50 @@ function addressLookupVariants(raw_address) {
   return { cleaned, expanded, variants };
 }
 
+// Builds a minimal synthetic property-like object from a parsed seller_id when no
+// real Podio property item could be resolved. Returned only when the seller_id yields
+// a usable street address; null otherwise.
+//
+// The object is shaped like a Podio item (fields array) so that getTextValue,
+// getCategoryValue, and deriveContextSummary all read it without modification.
+// item_id is intentionally null — buildSendQueueItem already handles null property_id.
+function buildSyntheticPropertyFromSellerId(owner_item) {
+  const seller_id_raw =
+    getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "") || null;
+  const location = parseSellerIdLocation(seller_id_raw ?? "");
+  const property_address = clean(location.property_address);
+  if (!property_address) return null;
+
+  const property_city = clean(location.property_city);
+  const property_state = clean(location.property_state);
+
+  return {
+    item_id: null,
+    title: property_address,
+    synthetic: true,
+    source: "seller_id_fallback",
+    // Internal metadata for logging — not consumed by Podio helpers.
+    _seller_id: seller_id_raw,
+    _synthetic_property_address: property_address,
+    _synthetic_property_city: property_city,
+    _synthetic_property_state: property_state,
+    // Podio-item-like fields array so getTextValue / deriveContextSummary
+    // resolve the three core address placeholders correctly.
+    fields: [
+      {
+        external_id: "property-address",
+        values: [{ value: property_address }],
+      },
+      ...(property_city
+        ? [{ external_id: "city", values: [{ value: property_city }] }]
+        : []),
+      ...(property_state
+        ? [{ external_id: "state", values: [{ value: property_state }] }]
+        : []),
+    ],
+  };
+}
+
 function maskOwnerName(value) {
   const text = stripHtml(value);
   if (!text) return null;
@@ -986,12 +1030,13 @@ async function selectBestProperty(
     }
   }
 
-  // Last-resort: parse address from seller_id and search the Properties app for
-  // an exact match. The parsed text is a LOOKUP SEED ONLY — we must find and
-  // return a real property item. If no exact match is found, we return null.
-  const seller_id_location = parseSellerIdLocation(
-    getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "")
-  );
+  // Seller-id address lookup: parse address from seller_id and search the Properties
+  // app for an exact match. The parsed text is a LOOKUP SEED ONLY — we must find and
+  // return a real property item. Only accept when exactly one candidate survives the
+  // post-filter (address + optional city + optional state). Return null otherwise.
+  const seller_id_raw =
+    getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "") || null;
+  const seller_id_location = parseSellerIdLocation(seller_id_raw ?? "");
   const raw_seller_address = clean(seller_id_location.property_address);
   const lookup_city = lower(seller_id_location.property_city);
   const lookup_state = lower(seller_id_location.property_state);
@@ -999,6 +1044,17 @@ async function selectBestProperty(
   if (raw_seller_address) {
     const { cleaned: lookup_address, variants: address_variants } =
       addressLookupVariants(raw_seller_address);
+
+    log.info("master_owner_feeder.property_lookup_by_seller_id_started", {
+      master_owner_id,
+      phone_item_id: selected_phone_record?.phone_item_id ?? null,
+      brain_item_id: brain_item_id ?? null,
+      seller_id: seller_id_raw,
+      parsed_property_address: raw_seller_address || null,
+      parsed_property_city: lookup_city || null,
+      parsed_property_state: lookup_state || null,
+      address_variants,
+    });
 
     try {
       const addr_response = await timedStage(
@@ -1040,26 +1096,48 @@ async function selectBestProperty(
       });
 
       if (exact_matches.length === 1) {
-        log.info("master_owner_feeder.property_resolved_via_address_lookup", {
+        log.info("master_owner_feeder.property_lookup_by_seller_id_matched", {
           master_owner_id,
-          property_item_id: exact_matches[0].item_id,
-          lookup_address,
-          lookup_city: lookup_city || null,
-          lookup_state: lookup_state || null,
+          phone_item_id: selected_phone_record?.phone_item_id ?? null,
+          brain_item_id: brain_item_id ?? null,
+          seller_id: seller_id_raw,
+          parsed_property_address: raw_seller_address || null,
+          parsed_property_city: lookup_city || null,
+          parsed_property_state: lookup_state || null,
           address_variants,
+          property_item_id: exact_matches[0].item_id,
+          resolution_path: "seller_id_address",
         });
         return exact_matches[0];
       }
 
-      if (addr_candidates.length > 0) {
-        log.warn("master_owner_feeder.property_address_lookup_no_exact_match", {
+      if (exact_matches.length > 1) {
+        log.warn("master_owner_feeder.property_lookup_by_seller_id_multiple_matches", {
           master_owner_id,
-          lookup_address,
-          lookup_city: lookup_city || null,
-          lookup_state: lookup_state || null,
+          phone_item_id: selected_phone_record?.phone_item_id ?? null,
+          brain_item_id: brain_item_id ?? null,
+          seller_id: seller_id_raw,
+          parsed_property_address: raw_seller_address || null,
+          parsed_property_city: lookup_city || null,
+          parsed_property_state: lookup_state || null,
+          address_variants,
+          candidate_count: exact_matches.length,
+          candidate_item_ids: exact_matches.map((c) => c.item_id),
+          resolution_path: "seller_id_address",
+        });
+      } else {
+        log.warn("master_owner_feeder.property_lookup_by_seller_id_no_match", {
+          master_owner_id,
+          phone_item_id: selected_phone_record?.phone_item_id ?? null,
+          brain_item_id: brain_item_id ?? null,
+          seller_id: seller_id_raw,
+          parsed_property_address: raw_seller_address || null,
+          parsed_property_city: lookup_city || null,
+          parsed_property_state: lookup_state || null,
           address_variants,
           candidate_count: addr_candidates.length,
-          exact_match_count: exact_matches.length,
+          candidate_item_ids: addr_candidates.map((c) => c.item_id),
+          resolution_path: "seller_id_address",
         });
       }
     } catch (error) {
@@ -1068,11 +1146,23 @@ async function selectBestProperty(
       }
       log.warn("master_owner_feeder.property_lookup_by_address_failed", {
         master_owner_id,
+        phone_item_id: selected_phone_record?.phone_item_id ?? null,
+        seller_id: seller_id_raw,
         lookup_address,
         error: serializeFeederError(error),
       });
     }
   }
+
+  log.warn("master_owner_feeder.property_resolution_failed", {
+    master_owner_id,
+    phone_item_id: selected_phone_record?.phone_item_id ?? null,
+    brain_item_id: brain_item_id ?? null,
+    seller_id: seller_id_raw ?? null,
+    parsed_property_address: raw_seller_address || null,
+    parsed_property_city: lookup_city || null,
+    parsed_property_state: lookup_state || null,
+  });
 
   return null;
 }
@@ -1998,7 +2088,7 @@ async function evaluateOwner({
     };
   }
 
-  const property_item = await timedStage(
+  let property_item = await timedStage(
     log,
     "master_owner_feeder.property_selection",
     {
@@ -2011,6 +2101,32 @@ async function evaluateOwner({
         log,
       })
   );
+
+  // Synthetic property fallback: for first-touch cold leads only, if no real
+  // property item was resolved but seller_id contains a parseable address, build
+  // a lightweight synthetic property so Stage-1 templates can render.
+  // This is intentionally gated on is_first_touch — follow-ups and later stages
+  // must always link to a real Podio property item.
+  if (!property_item?.item_id && is_first_touch) {
+    const synthetic = buildSyntheticPropertyFromSellerId(owner_item);
+    if (synthetic) {
+      property_item = synthetic;
+      log.info("master_owner_feeder.synthetic_property_fallback_used", {
+        master_owner_id,
+        seller_id: synthetic._seller_id ?? null,
+        parsed_property_address: synthetic._synthetic_property_address ?? null,
+        parsed_property_city: synthetic._synthetic_property_city ?? null,
+        parsed_property_state: synthetic._synthetic_property_state ?? null,
+      });
+    } else {
+      log.warn("master_owner_feeder.synthetic_property_fallback_unusable", {
+        master_owner_id,
+        seller_id:
+          getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "") || null,
+        parsed_property_address: null,
+      });
+    }
+  }
 
   const sms_agent_id = getFirstAppReferenceId(owner_item, MASTER_OWNER_FIELDS.sms_agent, null);
   const assigned_agent_id = getFirstAppReferenceId(owner_item, MASTER_OWNER_FIELDS.assigned_agent, null);
@@ -2098,8 +2214,11 @@ async function evaluateOwner({
   const effective_follow_up_plan = is_first_touch ? null : follow_up_plan;
 
   if (is_first_touch) {
-    // Require a property relation — ownership templates need it for rendering.
-    if (!property_item?.item_id && !context.ids?.property_id) {
+    // Require at minimum a real property item OR a synthetic property built from
+    // seller_id. The synthetic fallback was already attempted above before context
+    // was built, so property_item?.synthetic being true here means seller_id
+    // provided enough address context to continue.
+    if (!property_item?.item_id && !property_item?.synthetic && !context.ids?.property_id) {
       const seller_id_location = parseSellerIdLocation(
         getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "")
       );
@@ -3240,16 +3359,14 @@ export async function runMasterOwnerOutboundFeeder({
         Number(right?.plan?.priority_score || 0) -
         Number(left?.plan?.priority_score || 0)
     );
-    const priority_window = seed_owner?.item_id
-      ? ranked_candidates
-      : dry_run
-        ? ranked_candidates.slice(
-            0,
-            test_mode
-              ? effective_limit
-              : Math.min(effective_scan_limit, Math.max(effective_limit * 2, effective_limit))
-          )
-        : ranked_candidates;
+    // Evaluate all ranked candidates so dry-run diagnostics accurately reflect
+    // what live mode would do.  Previously the dry-run window was capped at
+    // effective_limit * 2, which caused the majority of eligible candidates to
+    // appear as outside_deep_evaluation_budget even when they would have been
+    // queueable.  The loop already stops at successful_count >= effective_limit,
+    // so the only practical difference is that we now see real skip reasons
+    // instead of the misleading outside_deep_evaluation_budget catch-all.
+    const priority_window = ranked_candidates;
     const deep_results_by_owner_id = new Map();
     const final_selected_owner_ids = new Set();
     let successful_count = 0;
@@ -3456,6 +3573,7 @@ export {
   parseSellerIdLocation,
   normalizeStreetAddress,
   addressLookupVariants,
+  buildSyntheticPropertyFromSellerId,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
