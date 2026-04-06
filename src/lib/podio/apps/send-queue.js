@@ -13,7 +13,7 @@ import {
 const APP_ID = APP_IDS.send_queue;
 
 const QUEUE_FIELDS = {
-  queue_id: "queue-id",
+  queue_id_2: "queue-id-2",
   queue_status: "queue-status",
   scheduled_for_local: "scheduled-for-local",
   scheduled_for_utc: "scheduled-for-utc",
@@ -116,7 +116,7 @@ export async function findSendQueueItems(filters = {}, limit = 30, offset = 0) {
 
 export async function findSendQueueItemByQueueId(queue_id) {
   if (!queue_id) return null;
-  return findByField(APP_ID, QUEUE_FIELDS.queue_id, queue_id);
+  return findByField(APP_ID, QUEUE_FIELDS.queue_id_2, queue_id);
 }
 
 export async function findQueuedSendQueueItems(limit = 25, offset = 0) {

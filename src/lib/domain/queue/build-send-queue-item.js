@@ -19,7 +19,8 @@ import { warn } from "@/lib/logging/logger.js";
 // ══════════════════════════════════════════════════════════════════════════
 
 const QUEUE_FIELDS = {
-  queue_id: "queue-id",
+  queue_id_2: "queue-id-2",
+  queue_sequence: "queue-sequence",
 
   scheduled_for_local: "scheduled-for-local",
   scheduled_for_utc: "scheduled-for-utc",
@@ -584,7 +585,7 @@ export async function buildSendQueueItem({
   }
 
   const fields = {
-    [QUEUE_FIELDS.queue_id]: queue_id || undefined,
+    [QUEUE_FIELDS.queue_id_2]: queue_id || undefined,
 
     [QUEUE_FIELDS.scheduled_for_local]: scheduled_local_value,
     [QUEUE_FIELDS.scheduled_for_utc]: scheduled_utc_value,
@@ -656,14 +657,12 @@ export async function buildSendQueueItem({
       "Template relation was skipped because Send Queue.template rejected the selected template reference.";
   }
 
-  const resolved_queue_id =
-    queue_id ||
-    (created?.item_id ? Number(created.item_id) : null) ||
-    null;
+  const resolved_queue_id = queue_id || null;
+  const queue_sequence_value = created?.item_id ? Number(created.item_id) : null;
 
-  if (created?.item_id && resolved_queue_id && !queue_id) {
+  if (created?.item_id && queue_sequence_value) {
     await update_item(created.item_id, {
-      [QUEUE_FIELDS.queue_id]: resolved_queue_id,
+      [QUEUE_FIELDS.queue_sequence]: queue_sequence_value,
     });
   }
 
@@ -671,6 +670,7 @@ export async function buildSendQueueItem({
     ok: true,
     queue_item_id: created?.item_id || null,
     queue_id: resolved_queue_id,
+    queue_sequence: queue_sequence_value,
     phone_item_id,
     textgrid_number_item_id,
     template_id,

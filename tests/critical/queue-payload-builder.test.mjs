@@ -471,3 +471,88 @@ test("Core fields (phone-number, scheduled-for-local) remain present when new pa
   // property-address should be written since real property_id exists
   assert.equal(captured_fields?.["property-address"], "789 Elm St");
 });
+
+// ── Part 6: queue-id-2 and queue-sequence field mapping ───────────────────────
+
+test("Part 6 — composite queue ID is written to queue-id-2 (text field)", async () => {
+  const composite_id = "mo:201:401:1";
+  const { captured_fields } = await buildAndCapture({ queue_id: composite_id });
+
+  assert.equal(
+    captured_fields?.["queue-id-2"],
+    composite_id,
+    "composite queue ID must be written to queue-id-2"
+  );
+});
+
+test("Part 6 — composite queue ID is NOT written to the old numeric queue-id field", async () => {
+  const composite_id = "mo:201:401:1";
+  const { captured_fields } = await buildAndCapture({ queue_id: composite_id });
+
+  assert.equal(
+    "queue-id" in (captured_fields || {}),
+    false,
+    "queue-id (old numeric field) must not appear in the creation payload"
+  );
+});
+
+test("Part 6 — queue-sequence receives a numeric value after item creation", async () => {
+  let update_fields = null;
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hello",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, _fields) => ({ item_id: 9200 }),
+    update_item: async (_item_id, fields) => {
+      update_fields = fields;
+    },
+  });
+
+  assert.ok(result.ok, "queue creation must succeed");
+  assert.ok(update_fields, "update_item must have been called");
+  assert.equal(typeof update_fields?.["queue-sequence"], "number", "queue-sequence must be a number");
+  assert.equal(update_fields?.["queue-sequence"], 9200, "queue-sequence must equal the created item_id");
+  assert.equal(result.queue_sequence, 9200, "result.queue_sequence must be returned");
+});
+
+test("Part 6 — no composite string is written into any numeric Podio field", async () => {
+  const composite_id = "mo:201:401:3";
+  const { captured_fields } = await buildAndCapture({ queue_id: composite_id });
+
+  for (const [key, value] of Object.entries(captured_fields || {})) {
+    if (typeof value === "string" && value.startsWith("mo:")) {
+      // The only field that should receive the composite string is queue-id-2
+      assert.equal(
+        key,
+        "queue-id-2",
+        `composite string must only appear in queue-id-2, found in: ${key}`
+      );
+    }
+  }
+  // queue-id-2 must be text (confirmed by the schema type: "text")
+  assert.equal(typeof captured_fields?.["queue-id-2"], "string");
+});
+
+test("Part 6 — queue-id-2 is absent from payload when no composite id is provided", async () => {
+  const { captured_fields } = await buildAndCapture({ queue_id: null });
+
+  assert.equal(
+    "queue-id-2" in (captured_fields || {}),
+    false,
+    "queue-id-2 must not appear when no queue_id is provided"
+  );
+});
+
+test("Part 6 — result.queue_id returns the composite string when provided", async () => {
+  const composite_id = "mo:201:401:2";
+  const { result } = await buildAndCapture({ queue_id: composite_id });
+
+  assert.equal(result.queue_id, composite_id);
+});
+
+test("Part 6 — result.queue_id is null when no composite id provided", async () => {
+  const { result } = await buildAndCapture({ queue_id: null });
+
+  assert.equal(result.queue_id, null);
+});

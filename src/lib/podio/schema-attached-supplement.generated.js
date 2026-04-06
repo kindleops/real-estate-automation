@@ -31,6 +31,22 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
     }),
     fields: {
       ...(BASE_SEND_QUEUE_SCHEMA?.fields || {}),
+      "queue-id-2": {
+        label: "Queue ID",
+        type: "text",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
+      "queue-sequence": {
+        label: "Queue Sequence",
+        type: "number",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
       "property-address": {
         label: "Property Address",
         type: "location",
