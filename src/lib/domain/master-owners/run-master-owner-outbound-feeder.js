@@ -780,7 +780,8 @@ function summarizePhone(phone_item, slot = null) {
     true_post_contact_suppression: signals.phone_post_contact_suppression,
     skip_reason: null,
     linked_master_owner_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.linked_master_owner, null),
-    primary_property_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.primary_property, null),
+    // Properties are NOT linked to Phones in this data model. primary_property_id
+    // is intentionally omitted — property resolution goes through owner relations.
   };
 }
 
@@ -912,7 +913,8 @@ async function selectBestPhone(owner_item, { runtime = null, log = logger } = {}
       phone_item,
       normalized_phone,
       prospect_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.linked_contact, null),
-      primary_property_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.primary_property, null),
+      // Properties are NOT linked to Phones — primary_property_id is not set here.
+      // Property resolution uses owner relations, not phone relations.
       market_id: getFirstAppReferenceId(phone_item, PHONE_FIELDS.market, null),
       summary: summarizePhone(phone_item, slot.label),
     };
@@ -935,30 +937,94 @@ async function selectBestPhone(owner_item, { runtime = null, log = logger } = {}
 
 async function selectBestProperty(
   selected_phone_record,
-  phone_records = [],
+  _phone_records = [], // kept for signature compatibility, phones do not link to properties
   { owner_item = null, runtime = null, log = logger } = {}
 ) {
   const master_owner_id = owner_item?.item_id ?? null;
-  const related_property_ids = collectRelatedItemIdsByApp(owner_item, APP_IDS.properties);
-  const candidate_ids = uniq([
-    selected_phone_record?.primary_property_id,
-    ...phone_records.map((record) => record?.primary_property_id),
-    ...related_property_ids,
-  ]);
 
-  for (const property_id of candidate_ids) {
-    const property_item = await safeGetItem(property_id, {
-      runtime,
-      log,
-      call_name: "master_owner_feeder.podio_get_property_item",
-      meta: {
+  // ── Step 1: Master Owner → related Properties (direct Podio relation)
+  // Properties are linked to Master Owners, NOT to Phones. Phone records carry
+  // no meaningful property reference and must not be used as a resolution path.
+  const related_property_ids = uniq(collectRelatedItemIdsByApp(owner_item, APP_IDS.properties));
+
+  if (related_property_ids.length > 0) {
+    // Fetch all related property items first.
+    const related_property_items = [];
+    for (const property_id of related_property_ids) {
+      const property_item = await safeGetItem(property_id, {
+        runtime,
+        log,
+        call_name: "master_owner_feeder.podio_get_property_item",
+        meta: {
+          master_owner_id,
+          phone_item_id: selected_phone_record?.phone_item_id ?? null,
+          resolution_path: "owner_property_refs",
+        },
+      });
+      if (property_item?.item_id) {
+        related_property_items.push(property_item);
+      }
+    }
+
+    if (related_property_items.length === 1) {
+      // Unambiguous: exactly one related property.
+      log.info("master_owner_feeder.property_resolved_from_owner_relation", {
+        master_owner_id,
+        property_item_id: related_property_items[0].item_id,
+        resolution_path: "owner_property_refs_single",
+      });
+      return related_property_items[0];
+    }
+
+    if (related_property_items.length > 1) {
+      // Multiple related properties — attempt disambiguation via seller_id address.
+      const seller_id_raw =
+        getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "") || null;
+      const seller_id_location = parseSellerIdLocation(seller_id_raw ?? "");
+      const raw_seller_address = clean(seller_id_location.property_address);
+
+      if (raw_seller_address) {
+        const { variants: address_variants } = addressLookupVariants(raw_seller_address);
+        const lookup_city = lower(seller_id_location.property_city);
+        const lookup_state = lower(seller_id_location.property_state);
+
+        const disambiguated = related_property_items.filter((candidate) => {
+          const candidate_address = lower(
+            getTextValue(candidate, "property-address", "") || candidate?.title || ""
+          );
+          if (!address_variants.includes(candidate_address)) return false;
+          if (lookup_city) {
+            const candidate_city = lower(getTextValue(candidate, "city", ""));
+            if (candidate_city && candidate_city !== lookup_city) return false;
+          }
+          if (lookup_state) {
+            const candidate_state = lower(getTextValue(candidate, "state", ""));
+            if (candidate_state && candidate_state !== lookup_state) return false;
+          }
+          return true;
+        });
+
+        if (disambiguated.length === 1) {
+          log.info("master_owner_feeder.property_resolved_from_owner_relation", {
+            master_owner_id,
+            property_item_id: disambiguated[0].item_id,
+            resolution_path: "owner_property_refs_address_disambiguated",
+            candidate_count: related_property_items.length,
+          });
+          return disambiguated[0];
+        }
+      }
+
+      // Cannot resolve unambiguously from owner relations.
+      log.warn("master_owner_feeder.property_owner_relation_ambiguous", {
         master_owner_id,
         phone_item_id: selected_phone_record?.phone_item_id ?? null,
-        resolution_path: "phone_primary_or_owner_refs",
-      },
-    });
-    if (property_item?.item_id) {
-      return property_item;
+        candidate_count: related_property_items.length,
+        candidate_item_ids: related_property_items.map((c) => c.item_id),
+        seller_id: getTextValue(owner_item, MASTER_OWNER_FIELDS.seller_id, "") || null,
+        resolution_path: "owner_property_refs",
+      });
+      return null;
     }
   }
 
@@ -2168,7 +2234,6 @@ async function evaluateOwner({
       synthetic_property_city: property_item._synthetic_property_city ?? null,
       synthetic_property_state: property_item._synthetic_property_state ?? null,
       attempted_paths: [
-        "phone_primary_property",
         "owner_property_refs",
         "find_by_master_owner",
         "brain_property_refs",
@@ -2363,10 +2428,6 @@ async function evaluateOwner({
         contact_status_2: owner_summary.contact_status_2,
         phone_slot: selected_phone_record.slot,
         phone_item_id: selected_phone_record.phone_item_id,
-        phone_primary_property_id: selected_phone_record.primary_property_id ?? null,
-        all_phone_primary_properties: phone_selection.phone_records
-          .map((r) => r?.primary_property_id ?? null)
-          .filter(Boolean),
         brain_item_id: getFirstAppReferenceId(
           owner_item,
           MASTER_OWNER_FIELDS.linked_conversations,
@@ -3747,6 +3808,7 @@ export {
   buildSyntheticPropertyFromSellerId,
   findPendingDuplicate,
   deriveOwnerTouchCount,
+  selectBestProperty,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
