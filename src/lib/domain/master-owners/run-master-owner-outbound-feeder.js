@@ -2339,11 +2339,14 @@ async function evaluateOwner({
       })
     : null;
 
-  if (market_item?.item_id) {
+  // Declare market_id so it can be referenced later in the plan object.
+  const market_id = market_item?.item_id ?? null;
+
+  if (market_id) {
     log.info("master_owner_feeder.queue_market_hydrated", {
       master_owner_id,
       property_item_id: property_item?.item_id ?? null,
-      market_id: market_item.item_id,
+      market_id,
       market_name: getTextValue(market_item, "title", "") || null,
       source: getFirstAppReferenceId(property_item, "market-2", null)
         ? "property_market_2"
@@ -2591,6 +2594,11 @@ async function evaluateOwner({
           route?.template_filters?.fallback_agent_type ||
           "Warm Professional",
         context,
+        // For first-touch cold outreach, constrain the scoring pool to Stage-1
+        // ownership-check variant groups only.  This prevents follow-up, Stage 4+,
+        // and other later-stage templates from being selected even if they happen
+        // to share the same use_case and score higher due to send stats.
+        allowed_variant_groups: is_first_touch ? FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS : undefined,
       })
   );
 
@@ -2619,8 +2627,10 @@ async function evaluateOwner({
   });
 
   // ── FINAL FIRST-TOUCH TEMPLATE GUARD ──────────────────────────────────────
-  // Even if loadTemplate returned a candidate, reject it if the template itself
-  // belongs to a forbidden later-stage use_case or a non-Stage-1 variant group.
+  // Safety net: allowed_variant_groups in loadTemplate should prevent later-stage
+  // templates from reaching here.  If one slips through anyway (e.g. a template
+  // with a forbidden use_case but no variant_group), reject it and treat the
+  // result as "no valid first-touch template available" rather than as an error.
   if (is_first_touch) {
     const tmpl_use_case = selected_template.use_case || null;
     const tmpl_variant = selected_template.variant_group || null;
@@ -2637,11 +2647,12 @@ async function evaluateOwner({
         tmpl_variant,
         use_case_forbidden,
         variant_not_allowed,
+        note: "allowed_variant_groups filter should have excluded this — check template data in Podio",
       });
       return {
         ok: false,
         skipped: true,
-        reason: "invalid_first_touch_template_selected",
+        reason: "no_valid_first_touch_template",
         owner: owner_summary,
         phone: selected_phone_record.summary,
         property: summarizeProperty(property_item, owner_item),

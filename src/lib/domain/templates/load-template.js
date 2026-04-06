@@ -664,6 +664,11 @@ async function collectBucketCandidates({
   context = null,
   template_render_overrides = {},
   preferences = {},
+  // When provided (Set), only templates whose variant_group is null/empty OR
+  // is in this set are kept.  Used by first-touch callers to exclude follow-up
+  // and later-stage templates from the scoring pool without needing a separate
+  // Podio query.
+  allowed_variant_groups = null,
 }) {
   let all_candidates = [];
 
@@ -685,6 +690,15 @@ async function collectBucketCandidates({
     context,
     template_render_overrides,
   });
+
+  // Restrict to allowed variant groups when a caller-supplied allow-list is present.
+  // Templates with null/empty variant_group are always permitted — they carry no
+  // stage metadata and therefore cannot be classified as a forbidden stage.
+  if (allowed_variant_groups?.size > 0) {
+    all_candidates = all_candidates.filter(
+      (t) => !t.variant_group || allowed_variant_groups.has(t.variant_group)
+    );
+  }
 
   if (!all_candidates.length) return [];
 
@@ -795,6 +809,7 @@ export async function loadTemplateCandidates({
   allow_variant_group_fallback = false,
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
+  allowed_variant_groups = null,
 }) {
   const normalized_preferences = normalizeTemplateFilters({
     category,
@@ -952,6 +967,7 @@ export async function loadTemplateCandidates({
       context,
       template_render_overrides,
       preferences,
+      allowed_variant_groups,
     });
 
     if (scored.length) return scored;
@@ -987,6 +1003,7 @@ export async function loadTemplate({
   allow_variant_group_fallback = false,
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
+  allowed_variant_groups = null,
 }) {
   const scored = await loadTemplateCandidates({
     category,
@@ -1006,6 +1023,7 @@ export async function loadTemplate({
     allow_variant_group_fallback,
     remote_fetcher,
     local_fetcher,
+    allowed_variant_groups,
   });
 
   if (!scored.length) return null;
