@@ -23,6 +23,7 @@ import {
   buildSendQueueItem,
   resolveQueueCategoryField,
   normalizeForQueueText,
+  _matchCategoryOption,
 } from "@/lib/domain/queue/build-send-queue-item.js";
 
 import {
@@ -257,24 +258,24 @@ test("resolveQueueCategoryField: empty value returns omitted=true with reason 'e
   }
 });
 
-test("resolveQueueCategoryField: unknown value returns omitted=true with schema mismatch reason", () => {
-  // "property-type" has no options in the supplement (options: []) so any value mismatches.
+test("resolveQueueCategoryField: value with empty options returns stale_empty_schema_options reason", () => {
+  // "property-type" has options: [] in the supplement — schema needs refresh from Podio.
   const result = resolveQueueCategoryField("property-type", "Residential");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "no_matching_category_option_in_schema");
+  assert.equal(result.reason, "stale_empty_schema_options");
   assert.equal(result.field_value, undefined);
 });
 
-test("resolveQueueCategoryField: unknown category field value returns omitted=true", () => {
+test("resolveQueueCategoryField: category field with empty options returns stale_empty_schema_options", () => {
   const result = resolveQueueCategoryField("category", "First Touch");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "no_matching_category_option_in_schema");
+  assert.equal(result.reason, "stale_empty_schema_options");
 });
 
-test("resolveQueueCategoryField: unknown use-case-template value returns omitted=true", () => {
+test("resolveQueueCategoryField: use-case-template with empty options returns stale_empty_schema_options", () => {
   const result = resolveQueueCategoryField("use-case-template", "first_touch_sfr");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "no_matching_category_option_in_schema");
+  assert.equal(result.reason, "stale_empty_schema_options");
 });
 
 // ── Part 3: new category fields omitted safely in payload ─────────────────────
@@ -382,6 +383,63 @@ test("Part 3 — null values for new params do not cause payload failures", asyn
   assert.equal(result.property_type_written, false);
   assert.equal(result.category_written, false);
   assert.equal(result.use_case_template_written, false);
+});
+
+// ── Core fields unaffected by new params ──────────────────────────────────────
+
+// ── Part 5: _matchCategoryOption — category matching logic unit tests ─────────
+// These tests exercise the matching logic directly with in-memory options, so
+// they are independent of the schema supplement state.  They confirm behaviour
+// once real options are populated in the supplement.
+
+const FAKE_SEND_QUEUE_OPTIONS = [
+  { id: 1, text: "Residential" },
+  { id: 2, text: "Probate / Trust" },
+  { id: 3, text: "Landlord / Multifamily" },
+  { id: 4, text: "Corporate / Institutional" },
+];
+
+test("_matchCategoryOption: exact label match returns correct option id", () => {
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Residential"), 1);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Probate / Trust"), 2);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Landlord / Multifamily"), 3);
+});
+
+test("_matchCategoryOption: case-insensitive normalized match", () => {
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "residential"), 1);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "RESIDENTIAL"), 1);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "probate / trust"), 2);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "PROBATE / TRUST"), 2);
+});
+
+test("_matchCategoryOption: punctuation-stripped normalized match", () => {
+  // normalizeCategoryLabel strips non-alphanumeric chars — 'Probate / Trust' → 'probate trust'
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Probate Trust"), 2);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Landlord Multifamily"), 3);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Corporate Institutional"), 4);
+});
+
+test("_matchCategoryOption: returns null when value not in options (no_matching case)", () => {
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "Commercial"), null);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "ownership_check"), null);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "first_touch_sfr"), null);
+});
+
+test("_matchCategoryOption: returns null for empty options list (stale schema)", () => {
+  assert.equal(_matchCategoryOption([], "Residential"), null);
+  assert.equal(_matchCategoryOption([], "anything"), null);
+});
+
+test("_matchCategoryOption: returns null for empty / null / undefined value", () => {
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, ""), null);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, null), null);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, undefined), null);
+});
+
+test("_matchCategoryOption: numeric id match when value is an option id", () => {
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, 1), 1);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, "2"), 2);
+  assert.equal(_matchCategoryOption(FAKE_SEND_QUEUE_OPTIONS, 99), null);
 });
 
 // ── Core fields unaffected by new params ──────────────────────────────────────

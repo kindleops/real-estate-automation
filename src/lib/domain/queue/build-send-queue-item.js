@@ -10,7 +10,7 @@ import {
   PodioError,
 } from "@/lib/providers/podio.js";
 
-import { getCategoryOptionId } from "@/lib/podio/schema.js";
+import { getCategoryOptionId, getAttachedFieldSchema } from "@/lib/podio/schema.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { warn } from "@/lib/logging/logger.js";
 
@@ -169,8 +169,41 @@ function normalizeContactWindow(value, fallback = "8AM-9PM Local") {
 // - field_value        the raw contact window string to include, or undefined if omitted
 // - category_option_id the resolved integer option id, or null
 // - omitted            true when the field should be excluded from the payload
-// - reason             diagnostic string
-//
+// - reason             diagnostic string:
+//                        'empty'                              value was blank
+//                        'stale_empty_schema_options'         schema has options: [] — supplement needs refresh
+//                        'no_matching_category_option_in_schema' options exist but none match the value
+
+// Normalise a category label the same way getCategoryOptionId does in schema.js,
+// so that _matchCategoryOption is consistent with the live lookup.
+function normalizeCategoryLabel(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+// Matches raw_value against an in-memory options list.  Used by tests so they
+// can verify matching logic without requiring a live Podio schema.
+// Returns the matched option id (integer) or null.
+export function _matchCategoryOption(options, raw_value) {
+  if (!Array.isArray(options) || !options.length) return null;
+  const cleaned = String(raw_value ?? "").trim();
+  if (!cleaned) return null;
+
+  const numeric = Number(cleaned);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return options.some((o) => o.id === numeric) ? numeric : null;
+  }
+
+  const normalized = normalizeCategoryLabel(cleaned);
+  if (!normalized) return null;
+
+  return options.find((o) => normalizeCategoryLabel(o.text) === normalized)?.id ?? null;
+}
+
 // Generic version for any Send Queue category field — used for property-type,
 // category, and use-case-template.  Same semantics as resolveContactWindowField:
 // if the schema has no option matching the value the field is omitted to prevent
@@ -181,17 +214,36 @@ function resolveQueueCategoryField(external_id, value) {
     return { field_value: undefined, category_option_id: null, omitted: true, reason: "empty" };
   }
 
+  const field_schema = getAttachedFieldSchema(APP_IDS.send_queue, external_id);
+  const available_labels = field_schema?.options?.map((o) => o.text) ?? [];
   const option_id = getCategoryOptionId(APP_IDS.send_queue, external_id, raw);
 
   if (option_id !== null) {
     return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
   }
 
+  // Distinguish "schema has no options at all" (stale supplement) from
+  // "options exist but none match" (label mismatch).
+  const reason =
+    available_labels.length === 0
+      ? "stale_empty_schema_options"
+      : "no_matching_category_option_in_schema";
+
+  warn("queue.category_field_resolve_miss", {
+    field: external_id,
+    source_raw_value: raw,
+    available_option_count: available_labels.length,
+    available_option_labels: available_labels.slice(0, 15),
+    matched_option_id: null,
+    omitted: true,
+    reason,
+  });
+
   return {
     field_value: undefined,
     category_option_id: null,
     omitted: true,
-    reason: "no_matching_category_option_in_schema",
+    reason,
   };
 }
 

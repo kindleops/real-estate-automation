@@ -9,10 +9,19 @@ const BASE_SEND_QUEUE_SCHEMA =
 
 export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
   // Send Queue — extends base schema with 4 enrichment fields added to the Podio
-  // app after the initial schema snapshot.  Category fields (property-type,
-  // category, use-case-template) start with empty options because the real Podio
-  // option IDs were created after this snapshot; resolveQueueCategoryField will
-  // safely omit them until the schema is refreshed with live IDs.
+  // app after the initial schema snapshot.
+  //
+  // Category fields (property-type, category, use-case-template) have options: []
+  // because the real Podio option IDs were created after this snapshot.
+  // resolveQueueCategoryField will safely omit them (reason: stale_empty_schema_options)
+  // until the schema is refreshed.  Run to populate:
+  //   node --import ./tests/register-aliases.mjs scripts/refresh-send-queue-schema.mjs
+  //
+  // property-address: declared as type "text" here.  If the Podio field was
+  // created as type "location", run the refresh script — it will flag the
+  // mismatch.  Plain-string writes are accepted by Podio location fields via
+  // geocoding, so queue creation succeeds either way, but the supplement type
+  // should match the actual Podio field type.
   [String(APP_IDS.send_queue)]: {
     ...(BASE_SEND_QUEUE_SCHEMA || {
       app_id: APP_IDS.send_queue,

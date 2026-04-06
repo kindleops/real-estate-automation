@@ -598,6 +598,13 @@ export async function queueOutboundMessage({
     delivery_confirmed,
     touch_number: resolved_touch_number,
     queue_id,
+    // Enrichment fields — populate Send Queue category fields for observability.
+    // Values are sourced from the selected template and resolved route parameters.
+    // resolveQueueCategoryField will safely omit any field whose value has no
+    // matching option in the Send Queue schema (e.g. stale supplement).
+    property_type: selected_template?.category_primary ?? resolved_category ?? null,
+    secondary_category: resolved_secondary_category,
+    use_case_template: selected_template?.use_case ?? null,
   });
 
   info("outbound.queue_message_completed", {
