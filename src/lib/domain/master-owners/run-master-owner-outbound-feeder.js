@@ -947,6 +947,14 @@ async function selectBestProperty(
   // no meaningful property reference and must not be used as a resolution path.
   const related_property_ids = uniq(collectRelatedItemIdsByApp(owner_item, APP_IDS.properties));
 
+  log.info("master_owner_feeder.property_resolution_step1_refs", {
+    master_owner_id,
+    phone_item_id: selected_phone_record?.phone_item_id ?? null,
+    refs_count: related_property_ids.length,
+    related_property_ids,
+    has_refs: Array.isArray(owner_item?.refs) ? owner_item.refs.length : null,
+  });
+
   if (related_property_ids.length > 0) {
     // Fetch all related property items first.
     const related_property_items = [];
@@ -1037,7 +1045,7 @@ async function selectBestProperty(
           master_owner_id,
           phone_item_id: selected_phone_record?.phone_item_id ?? null,
         },
-        () => findPropertyItems({ "master-owner": master_owner_id }, 1, 0)
+        () => findPropertyItems({ "linked-master-owner": master_owner_id }, 1, 0)
       );
 
       const matched_property = response?.items?.[0] ?? response?.[0] ?? null;
@@ -1244,14 +1252,20 @@ function collectRelatedItemIdsByApp(root, target_app_id, depth = 0, seen = new S
 
   if (typeof root !== "object") return [];
 
-  const object_key = `${depth}:${root?.item_id || ""}:${root?.app?.app_id || root?.app_id || ""}`;
-  if (seen.has(object_key)) return [];
-  seen.add(object_key);
-
   const matches = [];
   const candidate_item_id = Number(root?.item_id || 0) || null;
   const candidate_app_id =
     Number(root?.app?.app_id || root?.app_id || root?.appId || 0) || null;
+
+  // Only guard against cycles when the object has a stable identity (item_id or
+  // app_id).  Wrapper objects like Podio's { type: "item", data: {...} } have no
+  // top-level id, so their key would collide and silently skip sibling entries in
+  // the same refs array.  For id-less objects, depth capping (> 4) is sufficient.
+  if (candidate_item_id || candidate_app_id) {
+    const object_key = `${depth}:${candidate_item_id || ""}:${candidate_app_id || ""}`;
+    if (seen.has(object_key)) return [];
+    seen.add(object_key);
+  }
 
   if (candidate_item_id && candidate_app_id === Number(target_app_id)) {
     matches.push(candidate_item_id);
@@ -1265,6 +1279,10 @@ function collectRelatedItemIdsByApp(root, target_app_id, depth = 0, seen = new S
     root.items,
     root.item,
     root.value,
+    // Podio GET item returns refs as [{type:"item", data:{item_id,app:{app_id}}}]
+    // — walk `data` so the real API response format is handled in addition to the
+    // flat {item_id, app_id} format used in tests.
+    root.data,
   ];
 
   return uniq([

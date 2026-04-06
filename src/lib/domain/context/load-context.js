@@ -100,7 +100,7 @@ async function _loadContextInner({
 
   if (!property_id && master_owner_id) {
     try {
-      const response = await findPropertyItems({ "master-owner": master_owner_id }, 1, 0);
+      const response = await findPropertyItems({ "linked-master-owner": master_owner_id }, 1, 0);
       property_id = response?.items?.[0]?.item_id ?? response?.[0]?.item_id ?? null;
     } catch (_error) {
       property_id = null;

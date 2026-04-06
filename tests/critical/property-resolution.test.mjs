@@ -11,7 +11,7 @@
  *      a. Single result        → use it directly
  *      b. Multiple results     → disambiguate via seller_id address match
  *      c. Still ambiguous      → return null (skip with clear log)
- *   2. findPropertyItems({ "master-owner": id }) Podio search
+ *   2. findPropertyItems({ "linked-master-owner": id }) Podio search  ← correct field name
  *   3. Brain item → properties relation
  *   4. seller_id address lookup in Properties app
  *   5. null  (synthetic fallback handled upstream by evaluateOwner)
@@ -313,4 +313,80 @@ test("Part 6.5 — owner with no related properties and no seller_id returns nul
   // candidate (old code), it would have returned null immediately anyway.
   // Under the new code the phone array is ignored entirely.
   assert.equal("primary_property_id" in phone, false);
+});
+
+// ── Part 6.6: real Podio refs format (data wrapper) ──────────────────────────
+//
+// The Podio GET item API returns reverse-references in `refs` as:
+//   [{ type: "item", data: { item_id: X, app: { app_id: Y } } }]
+// collectRelatedItemIdsByApp must traverse `root.data` to handle this format
+// in addition to the flat {item_id, app_id} format used in unit tests.
+
+function makeOwnerWithPodioStyleRefs(owner_id, property_ids = [], seller_id = "") {
+  const owner = createPodioItem(owner_id, {
+    "sms-eligible": categoryField("Yes"),
+    "seller-id": textField(seller_id),
+  });
+  // Real Podio GET item refs format: { type: "item", data: { item_id, app: { app_id } } }
+  owner.refs = property_ids.map((pid) => ({
+    type: "item",
+    data: {
+      item_id: pid,
+      app: { app_id: APP_IDS.properties },
+    },
+  }));
+  return owner;
+}
+
+test("Part 6.6 — real Podio refs format (data wrapper) resolves single property", async () => {
+  const property = makePropertyItem(6001, { address: "500 Market St", city: "Portland", state: "OR" });
+  const owner = makeOwnerWithPodioStyleRefs(241, [6001]);
+  const phone = makePhoneRecord(401);
+  const runtime = makeRuntime([property]);
+
+  const result = await selectBestProperty(phone, [], {
+    owner_item: owner,
+    runtime,
+    log: noop_log,
+  });
+
+  assert.ok(result, "must resolve property from real Podio refs data-wrapper format");
+  assert.equal(result.item_id, 6001);
+});
+
+test("Part 6.6 — real Podio refs format with two properties disambiguates by address", async () => {
+  const prop_a = makePropertyItem(6002, { address: "10 River Rd", city: "Seattle", state: "WA" });
+  const prop_b = makePropertyItem(6003, { address: "20 Lake Ave", city: "Seattle", state: "WA" });
+  const owner = makeOwnerWithPodioStyleRefs(
+    242,
+    [6002, 6003],
+    "SFR~10 River Rd|Seattle|WA|98101"
+  );
+  const phone = makePhoneRecord(401);
+  const runtime = makeRuntime([prop_a, prop_b]);
+
+  const result = await selectBestProperty(phone, [], {
+    owner_item: owner,
+    runtime,
+    log: noop_log,
+  });
+
+  assert.ok(result, "must resolve the address-matched property");
+  assert.equal(result.item_id, 6002);
+});
+
+test("Part 6.6 — real Podio refs format with ambiguous properties returns null", async () => {
+  const prop_a = makePropertyItem(6004, { address: "30 Hill Blvd", city: "Phoenix", state: "AZ" });
+  const prop_b = makePropertyItem(6005, { address: "40 Valley Dr", city: "Phoenix", state: "AZ" });
+  const owner = makeOwnerWithPodioStyleRefs(243, [6004, 6005], ""); // no seller_id
+  const phone = makePhoneRecord(401);
+  const runtime = makeRuntime([prop_a, prop_b]);
+
+  const result = await selectBestProperty(phone, [], {
+    owner_item: owner,
+    runtime,
+    log: noop_log,
+  });
+
+  assert.equal(result, null, "ambiguous Podio-format refs must return null");
 });
