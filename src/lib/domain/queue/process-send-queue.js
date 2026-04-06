@@ -44,6 +44,7 @@ import { deriveContextSummary } from "@/lib/domain/context/derive-context-summar
 import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
+import { normalizeForQueueText } from "@/lib/domain/queue/build-send-queue-item.js";
 import {
   deriveCanonicalSellerFlowFromTemplate,
   inferCanonicalUseCaseFromOutboundText,
@@ -551,7 +552,11 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     };
   }
 
-  const rendered_message_text = clean(render_result?.rendered_text || "");
+  // Use normalizeForQueueText (not clean) to collapse embedded newlines into
+  // spaces before writing to the Send Queue message-text field.  That field is
+  // a single-line Podio text field: passing a multiline string causes Podio to
+  // store only the first line, truncating the message to "Hi" / "Hola".
+  const rendered_message_text = normalizeForQueueText(render_result?.rendered_text || "");
   if (!rendered_message_text) {
     return {
       ok: false,

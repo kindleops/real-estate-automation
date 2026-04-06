@@ -20,7 +20,10 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_DELAY_MS = 10_000;
-const TEXTGRID_MESSAGES_RESOURCE = "/messages";
+// TextGrid follows the Twilio-compatible REST path:
+//   POST /v1/Accounts/{AccountSid}/Messages
+// The legacy constant below is kept for the explicit-base-URL fallback only.
+const TEXTGRID_MESSAGES_RESOURCE = "/Messages";
 
 const TEXTGRID_PROVIDER_CAPABILITIES = Object.freeze({
   message_status_lookup: {
@@ -90,6 +93,7 @@ export function getTextgridSendCredentialStatus() {
     account_sid_present: Boolean(credentials.account_sid),
     auth_token_present: Boolean(credentials.auth_token),
     base_url: TEXTGRID_BASE_URL,
+    send_endpoint: getTextgridSendEndpoint(credentials.account_sid),
   };
 }
 
@@ -97,7 +101,36 @@ export function hasTextgridSendCredentials() {
   return getTextgridSendCredentials().configured;
 }
 
-export function getTextgridSendEndpoint() {
+// Build the send endpoint.
+//
+// TextGrid uses a Twilio-compatible URL scheme:
+//   POST https://api.textgrid.com/v1/Accounts/{AccountSid}/Messages
+//
+// If TEXTGRID_API_BASE_URL already embeds the /Accounts/{sid} segment (e.g.
+// a custom proxy), the raw /Messages suffix is appended without duplication.
+// If account_sid is omitted and the base URL does NOT contain /accounts/, the
+// function falls back to the legacy flat path so the credential-missing guard
+// in sendTextgridSMS can surface a clean error rather than silently sending to
+// a guaranteed-404 URL.
+export function getTextgridSendEndpoint(account_sid = null) {
+  const sid = clean(
+    account_sid ||
+      ENV.TEXTGRID_ACCOUNT_SID ||
+      process.env.TEXTGRID_ACCOUNT_SID
+  );
+
+  // Operator supplied a fully-qualified base URL that already contains the
+  // accounts segment — don't double-insert.
+  if (TEXTGRID_BASE_URL.toLowerCase().includes("/accounts/")) {
+    return `${TEXTGRID_BASE_URL}${TEXTGRID_MESSAGES_RESOURCE}`;
+  }
+
+  if (sid) {
+    return `${TEXTGRID_BASE_URL}/Accounts/${encodeURIComponent(sid)}${TEXTGRID_MESSAGES_RESOURCE}`;
+  }
+
+  // Credentials not yet available — return legacy flat path so downstream
+  // credential-missing guard fires with a recognisable endpoint in logs.
   return `${TEXTGRID_BASE_URL}${TEXTGRID_MESSAGES_RESOURCE}`;
 }
 
@@ -302,13 +335,15 @@ export async function sendTextgridSMS({
     const missing_message =
       `[TextGrid] Missing required env vars: ${credentials.missing.join(", ")}`;
 
+    const missing_endpoint = getTextgridSendEndpoint();
+
     warn("textgrid.send_failed", {
       to: normalized_to,
       from: normalized_from,
       status: null,
       message: missing_message,
       error_data: null,
-      endpoint: getTextgridSendEndpoint(),
+      endpoint: missing_endpoint,
     });
 
     await recordSystemAlert({
@@ -335,8 +370,11 @@ export async function sendTextgridSMS({
       to: normalized_to,
       from: normalized_from,
       body: trimmed_body,
+      endpoint: missing_endpoint,
     };
   }
+
+  const send_endpoint = getTextgridSendEndpoint(credentials.account_sid);
 
   const payload = {
     to: normalized_to,
@@ -350,7 +388,7 @@ export async function sendTextgridSMS({
   try {
     const res = await requestWithRetry({
       method: "post",
-      url: getTextgridSendEndpoint(),
+      url: send_endpoint,
       data: payload,
       headers: {
         Authorization: `Bearer ${buildTextgridBearerToken(credentials)}`,
@@ -369,7 +407,7 @@ export async function sendTextgridSMS({
       to: normalized_to,
       from: normalized_from,
       body: trimmed_body,
-      endpoint: getTextgridSendEndpoint(),
+      endpoint: send_endpoint,
     };
   } catch (err) {
     const tge = toTextGridError(err);
@@ -382,7 +420,7 @@ export async function sendTextgridSMS({
       status: tge.status,
       message: tge.message,
       error_data: tge.data,
-      endpoint: getTextgridSendEndpoint(),
+      endpoint: send_endpoint,
       resource: TEXTGRID_MESSAGES_RESOURCE,
       client_reference_id,
     });
@@ -398,6 +436,7 @@ export async function sendTextgridSMS({
       metadata: {
         status: tge.status,
         data: tge.data,
+        endpoint: send_endpoint,
       },
     });
 
@@ -412,7 +451,7 @@ export async function sendTextgridSMS({
       to: normalized_to,
       from: normalized_from,
       body: trimmed_body,
-      endpoint: getTextgridSendEndpoint(),
+      endpoint: send_endpoint,
     };
   }
 }

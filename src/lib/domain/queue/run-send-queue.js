@@ -5,6 +5,7 @@ import {
   getCategoryValue,
   getDateValue,
   getFirstAppReferenceId,
+  getNumberValue,
   PodioError,
 } from "@/lib/providers/podio.js";
 
@@ -346,7 +347,45 @@ export async function runSendQueue({
       return true;
     });
 
-    const runnable_items = sortByScheduledAtAsc(all_due_runnable).slice(0, limit);
+    const sorted_candidates = sortByScheduledAtAsc(all_due_runnable).slice(0, limit);
+
+    // Within-batch duplicate guard: if the same (master_owner_id, phone_item_id,
+    // touch_number) appears more than once in the batch, only the earliest-
+    // scheduled item is processed.  Duplicates are skipped with a warning so
+    // the operator can investigate why multiple queue rows exist for the same
+    // send target and touch sequence.
+    const seen_send_keys = new Set();
+    const batch_duplicate_details = [];
+
+    const runnable_items = sorted_candidates.filter((item) => {
+      const owner_id = getFirstAppReferenceId(item, "master-owner", null);
+      const phone_id = getFirstAppReferenceId(item, "phone-number", null);
+      const touch_num = getNumberValue(item, "touch-number", null);
+
+      if (owner_id && phone_id && touch_num !== null) {
+        const dedup_key = `${owner_id}:${phone_id}:${touch_num}`;
+        if (seen_send_keys.has(dedup_key)) {
+          batch_duplicate_details.push({
+            item_id: item?.item_id,
+            owner_id,
+            phone_id,
+            touch_num,
+            reason: "duplicate_owner_phone_touch_in_batch",
+          });
+          return false;
+        }
+        seen_send_keys.add(dedup_key);
+      }
+      return true;
+    });
+
+    if (batch_duplicate_details.length > 0) {
+      warn_log("queue.run_batch_duplicates_suppressed", {
+        duplicate_count: batch_duplicate_details.length,
+        first_5_duplicates: batch_duplicate_details.slice(0, 5),
+        run_started_at,
+      });
+    }
 
     info_log("queue.run_candidates_loaded", {
       now_utc: run_started_at,
