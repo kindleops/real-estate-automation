@@ -4,7 +4,58 @@ import PODIO_ATTACHED_BASE_SCHEMA from "@/lib/podio/schema-attached.generated.js
 const BASE_BRAIN_SCHEMA =
   PODIO_ATTACHED_BASE_SCHEMA[String(APP_IDS.ai_conversation_brain)] || null;
 
+const BASE_SEND_QUEUE_SCHEMA =
+  PODIO_ATTACHED_BASE_SCHEMA[String(APP_IDS.send_queue)] || null;
+
 export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
+  // Send Queue — extends base schema with 4 enrichment fields added to the Podio
+  // app after the initial schema snapshot.  Category fields (property-type,
+  // category, use-case-template) start with empty options because the real Podio
+  // option IDs were created after this snapshot; resolveQueueCategoryField will
+  // safely omit them until the schema is refreshed with live IDs.
+  [String(APP_IDS.send_queue)]: {
+    ...(BASE_SEND_QUEUE_SCHEMA || {
+      app_id: APP_IDS.send_queue,
+      app_name: "Send Queue",
+      item_name: "Message",
+      fields: {},
+    }),
+    fields: {
+      ...(BASE_SEND_QUEUE_SCHEMA?.fields || {}),
+      "property-address": {
+        label: "Property Address",
+        type: "text",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
+      "property-type": {
+        label: "Property Type",
+        type: "category",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
+      "category": {
+        label: "Category",
+        type: "category",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
+      "use-case-template": {
+        label: "Use Case / Template",
+        type: "category",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
+    },
+  },
   [String(APP_IDS.ai_conversation_brain)]: {
     ...(BASE_BRAIN_SCHEMA || {
       app_id: APP_IDS.ai_conversation_brain,

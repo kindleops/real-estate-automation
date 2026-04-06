@@ -10,6 +10,7 @@ import {
   PodioError,
 } from "@/lib/providers/podio.js";
 
+import { getCategoryOptionId } from "@/lib/podio/schema.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { warn } from "@/lib/logging/logger.js";
 
@@ -50,6 +51,11 @@ const QUEUE_FIELDS = {
   message_text: "message-text",
   personalization_tags_used: "personalization-tags-used",
   character_count: "character-count",
+
+  property_address: "property-address",
+  property_type: "property-type",
+  category: "category",
+  use_case_template: "use-case-template",
 };
 
 // Current known mismatch:
@@ -68,6 +74,18 @@ function countCharacters(value) {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+// Flatten a rendered SMS for persistence in the Send Queue message-text field.
+// The field was changed from multiline to single-line text in Podio; passing a
+// string with embedded newlines causes only the first line to be stored.
+// This normalizer replaces all CRLF/CR/LF sequences with a single space,
+// collapses any resulting runs of whitespace, and trims.
+function normalizeForQueueText(value) {
+  return String(value ?? "")
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 function unique(list) {
@@ -138,6 +156,72 @@ function normalizeTimezone(value) {
 function normalizeContactWindow(value, fallback = "8AM-9PM Local") {
   const raw = String(value || "").trim();
   return raw || fallback;
+}
+
+// Checks whether the resolved contact window has a matching category option in
+// the Send Queue app schema.  The attached schema may be stale — it only has a
+// subset of the real Podio options.  If no option ID exists the field must be
+// omitted from the creation payload: the compat bypass in normalizeCategoryValue
+// returns the raw string, which Podio rejects with 400 because category fields
+// require integer option IDs, not text.
+//
+// Returns { field_value, category_option_id, omitted, reason }
+// - field_value        the raw contact window string to include, or undefined if omitted
+// - category_option_id the resolved integer option id, or null
+// - omitted            true when the field should be excluded from the payload
+// - reason             diagnostic string
+//
+// Generic version for any Send Queue category field — used for property-type,
+// category, and use-case-template.  Same semantics as resolveContactWindowField:
+// if the schema has no option matching the value the field is omitted to prevent
+// a Podio 400 error.
+function resolveQueueCategoryField(external_id, value) {
+  const raw = clean(value);
+  if (!raw) {
+    return { field_value: undefined, category_option_id: null, omitted: true, reason: "empty" };
+  }
+
+  const option_id = getCategoryOptionId(APP_IDS.send_queue, external_id, raw);
+
+  if (option_id !== null) {
+    return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
+  }
+
+  return {
+    field_value: undefined,
+    category_option_id: null,
+    omitted: true,
+    reason: "no_matching_category_option_in_schema",
+  };
+}
+
+function resolveContactWindowField(contact_window) {
+  const raw = clean(contact_window);
+  if (!raw) {
+    return { field_value: undefined, category_option_id: null, omitted: true, reason: "empty" };
+  }
+
+  const option_id = getCategoryOptionId(
+    APP_IDS.send_queue,
+    QUEUE_FIELDS.contact_window,
+    raw
+  );
+
+  if (option_id !== null) {
+    // A valid schema option was found — include the text and let normalizePodioFieldMap
+    // convert it to the correct option ID.
+    return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
+  }
+
+  // No option ID found.  Omitting is safer than passing a raw string that Podio
+  // will reject.  Scheduling is already encoded in scheduled_for_local/utc, and
+  // the queue runner allows sending when contact-window is absent.
+  return {
+    field_value: undefined,
+    category_option_id: null,
+    omitted: true,
+    reason: "no_matching_category_option_in_schema",
+  };
 }
 
 function derivePersonalizationTagsUsed({
@@ -252,6 +336,9 @@ export async function buildSendQueueItem({
   failed_reason = null,
   sent_at = null,
   delivered_at = null,
+  property_type = null,
+  secondary_category = null,
+  use_case_template = null,
   create_item = createItem,
   update_item = updateItem,
 }) {
@@ -259,7 +346,7 @@ export async function buildSendQueueItem({
     throw new Error("buildSendQueueItem: context not found");
   }
 
-  const message_text = clean(rendered_message_text);
+  const message_text = normalizeForQueueText(rendered_message_text);
   if (!defer_message_resolution && !message_text) {
     throw new Error("buildSendQueueItem: missing rendered_message_text");
   }
@@ -378,6 +465,41 @@ export async function buildSendQueueItem({
       "8AM-9PM Local"
   );
 
+  // Validate the contact window against the Send Queue category field schema.
+  // Omit the field if no matching option ID exists to prevent Podio 400 errors.
+  const contact_window_field = resolveContactWindowField(resolved_contact_window);
+
+  if (contact_window_field.omitted) {
+    warn("queue.contact_window_category_write_omitted", {
+      source_contact_window: resolved_contact_window,
+      target_field: QUEUE_FIELDS.contact_window,
+      field_type: "category",
+      category_option_id: null,
+      omitted: true,
+      reason: contact_window_field.reason,
+    });
+  }
+
+  const property_type_field = resolveQueueCategoryField(QUEUE_FIELDS.property_type, property_type);
+  const category_field = resolveQueueCategoryField(QUEUE_FIELDS.category, secondary_category);
+  const use_case_template_field = resolveQueueCategoryField(QUEUE_FIELDS.use_case_template, use_case_template);
+
+  for (const [field_name, source_value, resolved] of [
+    [QUEUE_FIELDS.property_type, property_type, property_type_field],
+    [QUEUE_FIELDS.category, secondary_category, category_field],
+    [QUEUE_FIELDS.use_case_template, use_case_template, use_case_template_field],
+  ]) {
+    if (resolved.omitted && resolved.reason !== "empty") {
+      warn("queue.category_field_write_omitted", {
+        field: field_name,
+        source_value: source_value ?? null,
+        category_option_id: null,
+        omitted: true,
+        reason: resolved.reason,
+      });
+    }
+  }
+
   const template_field_value = maybeTemplateFieldValue(template_id, template_item);
   const missing_relation_warnings = [];
 
@@ -415,7 +537,13 @@ export async function buildSendQueueItem({
     [QUEUE_FIELDS.scheduled_for_local]: scheduled_local_value,
     [QUEUE_FIELDS.scheduled_for_utc]: scheduled_utc_value,
     [QUEUE_FIELDS.timezone]: resolved_timezone,
-    [QUEUE_FIELDS.contact_window]: resolved_contact_window,
+    // Only write contact-window when a valid Podio category option ID exists.
+    // If the schema doesn't recognise the value (e.g. stale options list), the
+    // field is omitted here and a warning is logged above.  The queue runner
+    // handles a null contact-window by allowing sending (no_contact_window).
+    ...(contact_window_field.omitted
+      ? {}
+      : { [QUEUE_FIELDS.contact_window]: contact_window_field.field_value }),
     [QUEUE_FIELDS.send_priority]: normalizePriority(send_priority),
     [QUEUE_FIELDS.retry_count]: 0,
     [QUEUE_FIELDS.max_retries]: Number(max_retries) || 3,
@@ -443,6 +571,13 @@ export async function buildSendQueueItem({
     ...(personalization_tags_used.length
       ? { [QUEUE_FIELDS.personalization_tags_used]: personalization_tags_used }
       : {}),
+    // New enrichment fields — omitted when schema has no matching option ID or value is absent.
+    ...(property_id && property_address
+      ? { [QUEUE_FIELDS.property_address]: property_address }
+      : {}),
+    ...(property_type_field.omitted ? {} : { [QUEUE_FIELDS.property_type]: property_type_field.field_value }),
+    ...(category_field.omitted ? {} : { [QUEUE_FIELDS.category]: category_field.field_value }),
+    ...(use_case_template_field.omitted ? {} : { [QUEUE_FIELDS.use_case_template]: use_case_template_field.field_value }),
   };
 
   Object.keys(fields).forEach((key) => {
@@ -493,6 +628,14 @@ export async function buildSendQueueItem({
     normalized_target,
     touch_number: next_touch_number,
     queue_status: normalizeQueueStatus(queue_status),
+    contact_window_written: !contact_window_field.omitted,
+    contact_window_omit_reason: contact_window_field.omitted
+      ? contact_window_field.reason
+      : null,
+    property_address_written: Boolean(property_id && property_address),
+    property_type_written: !property_type_field.omitted,
+    category_written: !category_field.omitted,
+    use_case_template_written: !use_case_template_field.omitted,
     warnings: [
       ...missing_relation_warnings,
       ...(defer_message_resolution && !message_text
@@ -504,9 +647,15 @@ export async function buildSendQueueItem({
             "Template relation was skipped because Send Queue.template may still reference an older Podio template app.",
           ]
         : []),
+      ...(contact_window_field.omitted && contact_window_field.reason !== "empty"
+        ? [
+            `contact-window field omitted: no matching category option for "${resolved_contact_window}" in Send Queue schema.`,
+          ]
+        : []),
     ],
     raw: created,
   };
 }
 
+export { resolveContactWindowField, resolveQueueCategoryField, normalizeForQueueText };
 export default buildSendQueueItem;

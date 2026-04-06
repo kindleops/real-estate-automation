@@ -233,9 +233,13 @@ test("forceDueQueuedItems caps eligible_rows to the requested limit (hard cap 25
 // ─── 7. older_than_minutes filter: future rows pass, recent-due rows skip ─────
 
 test("forceDueQueuedItems older_than_minutes targets future and long-overdue rows only", async () => {
-  const FUTURE = "2026-04-06 10:00:00";       // 16 h from FIXED_NOW → future
-  const JUST_PAST = "2026-04-05 17:50:00";    // 10 min ago → inside threshold
-  const LONG_PAST = "2026-04-05 10:00:00";    // 8 h ago → overdue past threshold
+  // All timestamps use the UTC "Z" suffix so new Date() parses them as UTC
+  // regardless of the test machine's local timezone.  Space-separated strings
+  // without "Z" are parsed as local time in V8, which breaks comparisons with
+  // FIXED_NOW (which IS in UTC format).
+  const FUTURE = "2030-01-01T10:00:00.000Z";       // far future → eligible
+  const JUST_PAST = "2026-04-05T17:50:00.000Z";    // 10 min before FIXED_NOW (18:00Z) → inside 30-min threshold → skip
+  const LONG_PAST = "2026-04-05T10:00:00.000Z";    // 8 h before FIXED_NOW → overdue past threshold → eligible
 
   const items = [
     makeQueuedItem(701, { "scheduled-for-utc": FUTURE }),    // eligible

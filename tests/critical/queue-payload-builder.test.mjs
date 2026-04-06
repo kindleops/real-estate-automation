@@ -1,0 +1,415 @@
+/**
+ * Send Queue payload builder tests — message-text normalization and new enrichment fields.
+ *
+ * Part 1: message-text truncation fix
+ *   - Multiline rendered SMS is flattened to a single space-separated line
+ *   - character-count is based on the normalized single-line value
+ *   - CRLF, LF, and CR variants are all handled
+ *
+ * Part 2+3: New enrichment fields
+ *   - property-address written from a real Property item (omitted when no real property_id)
+ *   - property-type safely omitted when schema has no matching option
+ *   - category safely omitted when schema has no matching option
+ *   - use-case-template safely omitted when schema has no matching option
+ *   - resolveQueueCategoryField unit behaviour
+ *
+ * Part 4: normalizeForQueueText unit behaviour
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  buildSendQueueItem,
+  resolveQueueCategoryField,
+  normalizeForQueueText,
+} from "@/lib/domain/queue/build-send-queue-item.js";
+
+import {
+  appRefField,
+  categoryField,
+  createPodioItem,
+  textField,
+} from "../helpers/test-helpers.js";
+
+// ── helpers ────────────────────────────────────────────────────────────────────
+
+function makeActivePhoneItem(item_id = 401) {
+  return createPodioItem(item_id, {
+    "phone-activity-status": categoryField("Active for 12 months or longer"),
+    "phone-hidden": textField("9188102617"),
+    "canonical-e164": textField("+19188102617"),
+    "linked-master-owner": appRefField(201),
+    "linked-contact": appRefField(301),
+  });
+}
+
+function makeBaseContext({ property_item = null, market_item = null } = {}) {
+  return {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item: createPodioItem(201),
+      property_item,
+      agent_item: null,
+      market_item,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: property_item?.item_id ?? null,
+      market_id: market_item?.item_id ?? null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+}
+
+async function buildAndCapture(overrides = {}) {
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9000 };
+    },
+    update_item: async () => {},
+    ...overrides,
+  });
+  return { result, captured_fields };
+}
+
+// ── Part 4: normalizeForQueueText unit tests ───────────────────────────────────
+
+test("normalizeForQueueText: LF newlines replaced by single space", () => {
+  assert.equal(normalizeForQueueText("Hello\nWorld"), "Hello World");
+});
+
+test("normalizeForQueueText: CRLF newlines replaced by single space", () => {
+  assert.equal(normalizeForQueueText("Hello\r\nWorld"), "Hello World");
+});
+
+test("normalizeForQueueText: CR-only replaced by single space", () => {
+  assert.equal(normalizeForQueueText("Hello\rWorld"), "Hello World");
+});
+
+test("normalizeForQueueText: mixed newlines collapsed and trimmed", () => {
+  assert.equal(
+    normalizeForQueueText("  Line one\r\nLine two\nLine three  "),
+    "Line one Line two Line three"
+  );
+});
+
+test("normalizeForQueueText: repeated whitespace collapsed to single space", () => {
+  assert.equal(normalizeForQueueText("Hello   World"), "Hello World");
+});
+
+test("normalizeForQueueText: empty / null / undefined returns empty string", () => {
+  assert.equal(normalizeForQueueText(""), "");
+  assert.equal(normalizeForQueueText(null), "");
+  assert.equal(normalizeForQueueText(undefined), "");
+});
+
+test("normalizeForQueueText: single-line text is unchanged (apart from trim)", () => {
+  assert.equal(normalizeForQueueText("  Hello World  "), "Hello World");
+});
+
+// ── Part 1: message-text and character-count use normalized value ──────────────
+
+test("Part 1 — message-text written as single-line when rendered SMS has LF newlines", async () => {
+  const multiline = "Hi Ryan,\nWe noticed your property at 123 Main St.\nInterested in selling?";
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: multiline });
+
+  const written = captured_fields?.["message-text"];
+  assert.ok(written, "message-text must be present");
+  assert.ok(!written.includes("\n"), "message-text must contain no LF characters");
+  assert.ok(!written.includes("\r"), "message-text must contain no CR characters");
+  assert.equal(written, "Hi Ryan, We noticed your property at 123 Main St. Interested in selling?");
+});
+
+test("Part 1 — message-text written as single-line when rendered SMS has CRLF newlines", async () => {
+  const multiline = "Hello\r\nLine two\r\nLine three";
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: multiline });
+
+  assert.equal(captured_fields?.["message-text"], "Hello Line two Line three");
+});
+
+test("Part 1 — character-count reflects the normalized single-line length", async () => {
+  const multiline = "Hello\nWorld";
+  const expected_text = "Hello World";
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: multiline });
+
+  assert.equal(captured_fields?.["character-count"], expected_text.length);
+});
+
+test("Part 1 — character-count does NOT count newline characters from the original multiline text", async () => {
+  // 3-line message: 5 + 1(LF) + 5 + 1(LF) + 5 = 17 chars raw; normalized = 15 chars + 2 spaces = 17 chars
+  // but without newlines the space-separated version is shorter than the raw with newlines
+  const line1 = "AAAAA";
+  const line2 = "BBBBB";
+  const line3 = "CCCCC";
+  const multiline = `${line1}\n${line2}\n${line3}`;
+  const normalized = `${line1} ${line2} ${line3}`;
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: multiline });
+
+  assert.equal(captured_fields?.["character-count"], normalized.length, "character-count must equal normalized length");
+  assert.equal(captured_fields?.["message-text"], normalized);
+});
+
+test("Part 1 — single-line message-text is written unchanged (no regression)", async () => {
+  const single = "Hi there, interested in selling your property?";
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: single });
+
+  assert.equal(captured_fields?.["message-text"], single);
+  assert.equal(captured_fields?.["character-count"], single.length);
+});
+
+// ── Part 2: property-address ──────────────────────────────────────────────────
+
+test("Part 2 — property-address written when real property_id and address available", async () => {
+  const real_property = createPodioItem(5001, {
+    "property-address": textField("123 Main St"),
+  });
+  let captured_fields = null;
+
+  await buildSendQueueItem({
+    context: makeBaseContext({ property_item: real_property }),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9001 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(captured_fields?.["property-address"], "123 Main St");
+});
+
+test("Part 2 — property-address omitted when no real property_id (context.ids.property_id is null)", async () => {
+  let captured_fields = null;
+
+  await buildSendQueueItem({
+    context: makeBaseContext({ property_item: null }),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9002 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(
+    "property-address" in (captured_fields || {}),
+    false,
+    "property-address must be absent when no real property item"
+  );
+});
+
+test("Part 2 — result.property_address_written is true when address was included", async () => {
+  const real_property = createPodioItem(5002, {
+    "property-address": textField("456 Oak Ave"),
+  });
+
+  const result = await buildSendQueueItem({
+    context: makeBaseContext({ property_item: real_property }),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async () => ({ item_id: 9003 }),
+    update_item: async () => {},
+  });
+
+  assert.equal(result.property_address_written, true);
+});
+
+test("Part 2 — result.property_address_written is false when no real property", async () => {
+  const result = await buildSendQueueItem({
+    context: makeBaseContext({ property_item: null }),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async () => ({ item_id: 9004 }),
+    update_item: async () => {},
+  });
+
+  assert.equal(result.property_address_written, false);
+});
+
+// ── Part 3: resolveQueueCategoryField unit tests ───────────────────────────────
+
+test("resolveQueueCategoryField: empty value returns omitted=true with reason 'empty'", () => {
+  for (const value of ["", null, undefined]) {
+    const result = resolveQueueCategoryField("property-type", value);
+    assert.equal(result.omitted, true, `should be omitted for: ${JSON.stringify(value)}`);
+    assert.equal(result.reason, "empty");
+    assert.equal(result.field_value, undefined);
+    assert.equal(result.category_option_id, null);
+  }
+});
+
+test("resolveQueueCategoryField: unknown value returns omitted=true with schema mismatch reason", () => {
+  // "property-type" has no options in the supplement (options: []) so any value mismatches.
+  const result = resolveQueueCategoryField("property-type", "Residential");
+  assert.equal(result.omitted, true);
+  assert.equal(result.reason, "no_matching_category_option_in_schema");
+  assert.equal(result.field_value, undefined);
+});
+
+test("resolveQueueCategoryField: unknown category field value returns omitted=true", () => {
+  const result = resolveQueueCategoryField("category", "First Touch");
+  assert.equal(result.omitted, true);
+  assert.equal(result.reason, "no_matching_category_option_in_schema");
+});
+
+test("resolveQueueCategoryField: unknown use-case-template value returns omitted=true", () => {
+  const result = resolveQueueCategoryField("use-case-template", "first_touch_sfr");
+  assert.equal(result.omitted, true);
+  assert.equal(result.reason, "no_matching_category_option_in_schema");
+});
+
+// ── Part 3: new category fields omitted safely in payload ─────────────────────
+
+test("Part 3 — property-type absent from payload when schema has no matching option", async () => {
+  let captured_fields = null;
+
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    property_type: "Residential",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9005 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok, "queue creation must succeed");
+  assert.equal(result.property_type_written, false);
+  assert.equal(
+    "property-type" in (captured_fields || {}),
+    false,
+    "property-type must be absent when schema has no option for the value"
+  );
+});
+
+test("Part 3 — category absent from payload when schema has no matching option", async () => {
+  let captured_fields = null;
+
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    secondary_category: "Follow-Up",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9006 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.category_written, false);
+  assert.equal("category" in (captured_fields || {}), false);
+});
+
+test("Part 3 — use-case-template absent from payload when schema has no matching option", async () => {
+  let captured_fields = null;
+
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    use_case_template: "first_touch_sfr",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9007 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.use_case_template_written, false);
+  assert.equal("use-case-template" in (captured_fields || {}), false);
+});
+
+test("Part 3 — queue creation succeeds even when all three new category fields are omitted", async () => {
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hello, interested in selling?",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    property_type: "Residential",
+    secondary_category: "First Touch",
+    use_case_template: "sfr_cold_outbound_v1",
+    create_item: async () => ({ item_id: 9008 }),
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok, "queue creation must succeed when all new fields are omitted");
+  assert.equal(result.property_type_written, false);
+  assert.equal(result.category_written, false);
+  assert.equal(result.use_case_template_written, false);
+});
+
+test("Part 3 — null values for new params do not cause payload failures", async () => {
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    property_type: null,
+    secondary_category: null,
+    use_case_template: null,
+    create_item: async () => ({ item_id: 9009 }),
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.property_type_written, false);
+  assert.equal(result.category_written, false);
+  assert.equal(result.use_case_template_written, false);
+});
+
+// ── Core fields unaffected by new params ──────────────────────────────────────
+
+test("Core fields (phone-number, scheduled-for-local) remain present when new params are passed", async () => {
+  let captured_fields = null;
+  const real_property = createPodioItem(5003, {
+    "property-address": textField("789 Elm St"),
+  });
+
+  await buildSendQueueItem({
+    context: makeBaseContext({ property_item: real_property }),
+    rendered_message_text: "Hello",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    property_type: "Residential",
+    secondary_category: "First Touch",
+    use_case_template: "sfr_first_touch",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9010 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(captured_fields?.["phone-number"], "phone-number must still be present");
+  assert.ok(captured_fields?.["scheduled-for-local"], "scheduled-for-local must still be present");
+  assert.ok(captured_fields?.["message-text"], "message-text must still be present");
+  // property-address should be written since real property_id exists
+  assert.equal(captured_fields?.["property-address"], "789 Elm St");
+});

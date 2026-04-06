@@ -73,7 +73,12 @@ test("ai conversation brain linked-message-events accepts message event app refs
   assert.deepEqual(fields["linked-message-events"], [30541681, 30541682]);
 });
 
-test("queue builder preserves live Master Owners contact-window values on create", async () => {
+test("queue builder omits contact-window when the value has no matching option in the Send Queue schema", async () => {
+  // "12PM-2PM CT" is a valid seller contact window from Master Owners, but the
+  // Send Queue app schema only has one option ("9AM-8PM CT", id=1).  Writing
+  // the raw string to a category field causes Podio to return 400.
+  // The safe fix is to omit the field — the queue runner allows sending when
+  // contact-window is absent (allowed:true, reason:"no_contact_window").
   let created_fields = null;
 
   const result = await buildSendQueueItem({
@@ -125,6 +130,12 @@ test("queue builder preserves live Master Owners contact-window values on create
     },
   });
 
-  assert.equal(result.queue_item_id, 123);
-  assert.equal(created_fields["contact-window"], "12PM-2PM CT");
+  assert.equal(result.queue_item_id, 123, "queue item must be created successfully");
+  assert.equal(
+    "contact-window" in (created_fields || {}),
+    false,
+    "contact-window must be omitted from the payload to prevent a 400 error"
+  );
+  assert.equal(result.contact_window_written, false);
+  assert.equal(result.contact_window_omit_reason, "no_matching_category_option_in_schema");
 });

@@ -1381,16 +1381,27 @@ function deriveOwnerTouchCount(history) {
   return Math.max(max_queue_touch, history.outbound_events.length);
 }
 
-function findPendingDuplicate(history, phone_item_id) {
+// Checks for an active (Queued/Sending) duplicate for the given phone.
+// When touch_number is provided, only same-touch rows are considered duplicates.
+// This prevents an active touch-1 row from blocking a legitimate touch-2 queue
+// while still blocking two cron runs from creating the same touch for the same phone.
+function findPendingDuplicate(history, phone_item_id, touch_number = null) {
   return (
     history.queue_items.find((item) => {
       const status = lower(getCategoryValue(item, "queue-status", null));
       const candidate_phone_item_id = getFirstAppReferenceId(item, "phone-number", null);
 
-      return (
-        QUEUE_DUPLICATE_PENDING_STATUSES.has(status) &&
-        String(candidate_phone_item_id || "") === String(phone_item_id || "")
-      );
+      if (!QUEUE_DUPLICATE_PENDING_STATUSES.has(status)) return false;
+      if (String(candidate_phone_item_id || "") !== String(phone_item_id || "")) return false;
+
+      // If a touch_number is supplied, only consider it a duplicate when the existing
+      // row shares the same touch sequence number.
+      if (touch_number !== null) {
+        const candidate_touch = Number(getNumberValue(item, "touch-number", 0) || 0);
+        return candidate_touch === touch_number;
+      }
+
+      return true;
     }) || null
   );
 }
@@ -2007,10 +2018,17 @@ async function evaluateOwner({
     },
     () =>
       Promise.resolve(
-        findPendingDuplicate(history, selected_phone_record.phone_item_id)
+        findPendingDuplicate(history, selected_phone_record.phone_item_id, touch_number)
       )
   );
   if (pending_duplicate) {
+    log.info("master_owner_feeder.duplicate_active_queue_blocked", {
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      touch_number,
+      duplicate_queue_item_id: pending_duplicate.item_id,
+      duplicate_queue_status: getCategoryValue(pending_duplicate, "queue-status", null),
+    });
     return {
       ok: false,
       skipped: true,
@@ -2104,7 +2122,7 @@ async function evaluateOwner({
 
   // Synthetic property fallback: for first-touch cold leads only, if no real
   // property item was resolved but seller_id contains a parseable address, build
-  // a lightweight synthetic property so Stage-1 templates can render.
+  // a lightweight synthetic property so Stage-1 templates can render in dry_run.
   // This is intentionally gated on is_first_touch — follow-ups and later stages
   // must always link to a real Podio property item.
   if (!property_item?.item_id && is_first_touch) {
@@ -2117,6 +2135,7 @@ async function evaluateOwner({
         parsed_property_address: synthetic._synthetic_property_address ?? null,
         parsed_property_city: synthetic._synthetic_property_city ?? null,
         parsed_property_state: synthetic._synthetic_property_state ?? null,
+        dry_run,
       });
     } else {
       log.warn("master_owner_feeder.synthetic_property_fallback_unusable", {
@@ -2126,6 +2145,68 @@ async function evaluateOwner({
         parsed_property_address: null,
       });
     }
+  }
+
+  // Part 1 — Real property gate for live queue rows.
+  // dry_run diagnostics may continue with a synthetic property (useful for
+  // understanding which first-touch leads lack a property record). Live queue
+  // creation is blocked — a synthetic item has no item_id and therefore cannot
+  // populate the Properties relation on the queue row.
+  //
+  // Override: set ALLOW_SYNTHETIC_FIRST_TOUCH_QUEUE=true to bypass this gate
+  // while the property backfill is in progress.
+  if (
+    property_item?.synthetic &&
+    !dry_run &&
+    process.env.ALLOW_SYNTHETIC_FIRST_TOUCH_QUEUE !== "true"
+  ) {
+    log.info("master_owner_feeder.live_queue_blocked_missing_real_property", {
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      seller_id_raw: property_item._seller_id ?? null,
+      synthetic_property_address: property_item._synthetic_property_address ?? null,
+      synthetic_property_city: property_item._synthetic_property_city ?? null,
+      synthetic_property_state: property_item._synthetic_property_state ?? null,
+      attempted_paths: [
+        "phone_primary_property",
+        "owner_property_refs",
+        "find_by_master_owner",
+        "brain_property_refs",
+        "seller_id_address_lookup",
+      ],
+    });
+    return {
+      ok: false,
+      skipped: true,
+      reason: "real_property_required_for_live_queue",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      first_touch: true,
+      diagnostics: {
+        seller_id_raw: property_item._seller_id ?? null,
+        synthetic_property_address: property_item._synthetic_property_address ?? null,
+        synthetic_property_city: property_item._synthetic_property_city ?? null,
+        master_owner_id,
+        phone_item_id: selected_phone_record.phone_item_id,
+      },
+    };
+  }
+
+  // Structured resolution log so dashboards can distinguish real vs synthetic.
+  if (property_item?.item_id) {
+    log.info("master_owner_feeder.property_resolution_real_matched", {
+      master_owner_id,
+      property_item_id: property_item.item_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+    });
+  } else if (property_item?.synthetic) {
+    // Only reaches here in dry_run or when ALLOW_SYNTHETIC_FIRST_TOUCH_QUEUE=true.
+    log.info("master_owner_feeder.property_resolution_synthetic_only", {
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      synthetic_property_address: property_item._synthetic_property_address ?? null,
+      dry_run,
+    });
   }
 
   const sms_agent_id = getFirstAppReferenceId(owner_item, MASTER_OWNER_FIELDS.sms_agent, null);
@@ -2151,17 +2232,70 @@ async function evaluateOwner({
         : Promise.resolve(null)
   );
 
-  const market_id =
+  // Part 2 — Populate Market from the resolved real property item.
+  // market_item is used by buildOwnerContext to populate context.summary.market_name,
+  // market_timezone, etc., and by buildSendQueueItem to write the Market relation
+  // on the queue row.  We derive market_id from the property's market-2 field first,
+  // then fall back to the phone record's market association.
+  const raw_market_id =
     getFirstAppReferenceId(property_item, "market-2", null) ||
+    getFirstAppReferenceId(property_item, "market", null) ||
     selected_phone_record.market_id ||
     null;
+
+  const market_item = raw_market_id
+    ? await safeGetItem(raw_market_id, {
+        runtime,
+        log,
+        call_name: "master_owner_feeder.podio_get_market_item",
+        meta: {
+          master_owner_id,
+          market_id: raw_market_id,
+          property_item_id: property_item?.item_id ?? null,
+        },
+      })
+    : null;
+
+  if (market_item?.item_id) {
+    log.info("master_owner_feeder.queue_market_hydrated", {
+      master_owner_id,
+      property_item_id: property_item?.item_id ?? null,
+      market_id: market_item.item_id,
+      market_name: getTextValue(market_item, "title", "") || null,
+      source: getFirstAppReferenceId(property_item, "market-2", null)
+        ? "property_market_2"
+        : getFirstAppReferenceId(property_item, "market", null)
+          ? "property_market"
+          : "phone_record_market",
+    });
+  }
+
+  // Part 3 — Load brain_item so recently_used_template_ids is populated.
+  // safeGetItem uses the runtime cache, so if selectBestProperty already fetched
+  // the brain item (for property resolution) this is a free cache hit.
+  const owner_brain_item_id = getFirstAppReferenceId(
+    owner_item,
+    MASTER_OWNER_FIELDS.linked_conversations,
+    null
+  );
+  const brain_item = owner_brain_item_id
+    ? await safeGetItem(owner_brain_item_id, {
+        runtime,
+        log,
+        call_name: "master_owner_feeder.podio_get_brain_item",
+        meta: {
+          master_owner_id,
+          brain_item_id: owner_brain_item_id,
+        },
+      })
+    : null;
 
   const context = buildOwnerContext({
     owner_item,
     phone_item: selected_phone_record.phone_item,
     property_item,
-    market_item: null,
-    brain_item: null,
+    market_item,
+    brain_item,
     agent_item,
     sms_agent_id: resolved_agent_id,
     owner_touch_count,
@@ -2292,13 +2426,23 @@ async function evaluateOwner({
       timezone_label: resolved_timezone,
       is_first_contact: touch_number <= 1,
     });
+  // Part 3 — Improved rotation key for broader template spread.
+  // master_owner_id is the primary seed (always unique per owner).
+  // seller_id and synthetic address prevent first-touch owners with no real
+  // property from all landing on the same "no-property" bucket.
+  // primary_category and language ensure cross-bucket variation.
   const rotation_key = [
     master_owner_id || "no-owner",
-    selected_phone_record.phone_item_id || "no-phone",
-    property_item?.item_id || "no-property",
+    owner_summary.seller_id ||
+      selected_phone_record.phone_item_id ||
+      "no-seed",
+    property_item?.item_id ||
+      property_item?._synthetic_property_address ||
+      "no-property",
+    primary_category || "no-category",
+    language || "no-language",
     route?.use_case || "no-use-case",
-    route?.stage || stage_hint || "no-stage",
-    message_variant_seed || "no-seed",
+    message_variant_seed || "",
   ].join(":");
 
   const outbound_number = await timedStage(
@@ -2383,6 +2527,17 @@ async function evaluateOwner({
       outbound_number_diagnostics: outbound_number.diagnostics || null,
     };
   }
+
+  // Part 3 — Log the selected template so template rotation can be monitored.
+  log.info("master_owner_feeder.template_rotation_selected", {
+    master_owner_id,
+    template_id: selected_template.item_id,
+    use_case: selected_template.use_case || null,
+    variant_group: selected_template.variant_group || null,
+    rotation_key,
+    recently_used_count: context?.recent?.recently_used_template_ids?.length || 0,
+    brain_item_id: owner_brain_item_id ?? null,
+  });
 
   // ── FINAL FIRST-TOUCH TEMPLATE GUARD ──────────────────────────────────────
   // Even if loadTemplate returned a candidate, reject it if the template itself
@@ -2546,6 +2701,18 @@ async function evaluateOwner({
     };
   }
 
+  // Part 4 — Deterministic idempotency key for queue rows.
+  // If two cron runs attempt to create the same first/follow-up touch for the same
+  // owner+phone, the pending duplicate check (findPendingDuplicate) blocks the second
+  // run. The idempotency key is written to the queue-id field as a cross-run signal —
+  // it makes duplicates identifiable even after the queue is processed.
+  const idempotency_queue_id = [
+    "mo",
+    master_owner_id,
+    selected_phone_record.phone_item_id,
+    touch_number,
+  ].join(":");
+
   const queue_result = await buildSendQueueItem({
     context,
     rendered_message_text,
@@ -2570,6 +2737,10 @@ async function evaluateOwner({
     dnc_check: "✅ Cleared",
     delivery_confirmed: "⏳ Pending",
     touch_number,
+    queue_id: idempotency_queue_id,
+    property_type: primary_category || null,
+    secondary_category: secondary_category || null,
+    use_case_template: selected_template?.use_case || null,
   });
 
   return {
@@ -3574,6 +3745,7 @@ export {
   normalizeStreetAddress,
   addressLookupVariants,
   buildSyntheticPropertyFromSellerId,
+  findPendingDuplicate,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
