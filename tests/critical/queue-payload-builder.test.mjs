@@ -258,24 +258,28 @@ test("resolveQueueCategoryField: empty value returns omitted=true with reason 'e
   }
 });
 
-test("resolveQueueCategoryField: value with empty options returns stale_empty_schema_options reason", () => {
-  // "property-type" has options: [] in the supplement — schema needs refresh from Podio.
+test("resolveQueueCategoryField: value not in real options returns no_matching_category_option_in_schema", () => {
+  // The supplement now has real Send Queue property-type options (Single Family, Multi-Family, etc.).
+  // "Residential" is the property-class value — it doesn't match any Send Queue property-type option.
   const result = resolveQueueCategoryField("property-type", "Residential");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "stale_empty_schema_options");
+  assert.equal(result.reason, "no_matching_category_option_in_schema");
   assert.equal(result.field_value, undefined);
 });
 
-test("resolveQueueCategoryField: category field with empty options returns stale_empty_schema_options", () => {
+test("resolveQueueCategoryField: category field with unrecognised value returns no_matching_category_option_in_schema", () => {
+  // Send Queue category options are Corporate, Individual, Trust / Estate, etc.
+  // "First Touch" is not one of them.
   const result = resolveQueueCategoryField("category", "First Touch");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "stale_empty_schema_options");
+  assert.equal(result.reason, "no_matching_category_option_in_schema");
 });
 
-test("resolveQueueCategoryField: use-case-template with empty options returns stale_empty_schema_options", () => {
+test("resolveQueueCategoryField: use-case-template with unrecognised slug returns no_matching_category_option_in_schema", () => {
+  // "first_touch_sfr" is not in the supplement's use-case-template options list.
   const result = resolveQueueCategoryField("use-case-template", "first_touch_sfr");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "stale_empty_schema_options");
+  assert.equal(result.reason, "no_matching_category_option_in_schema");
 });
 
 // ── Part 3: new category fields omitted safely in payload ─────────────────────
@@ -555,4 +559,441 @@ test("Part 6 — result.queue_id is null when no composite id provided", async (
   const { result } = await buildAndCapture({ queue_id: null });
 
   assert.equal(result.queue_id, null);
+});
+
+// ── Part 7: live field-quality fixes ─────────────────────────────────────────
+// These tests verify the 5 critical field-quality issues reported in live queue rows.
+//
+// Issue 1: message-text stored only "Hi" — template text contained HTML markup
+//          from Podio's rich-text editor.  normalizeForQueueText now strips HTML
+//          before persisting so the full plain-text body is written.
+//
+// Issue 2: property-type blank — caller supplied property-class ("Residential")
+//          instead of property-type ("Single Family").  buildSendQueueItem now
+//          reads property-type directly from the property item.
+//
+// Issue 3: category blank — secondary_category was always null.  buildSendQueueItem
+//          now reads owner-type from the master owner item and maps it.
+//
+// Issue 4: contact-window blank — resolveContactWindowField omitted any value
+//          without a schema option ID.  Values matching CONTACT_WINDOW_PATTERN are
+//          now passed through to schema.js's compat bypass.
+//
+// Issue 5: property-address ugly format — handled by formatPropertyAddress()
+//          reading structured sub-fields (street_address, city, state, postal_code).
+
+// ── Part 7.1: HTML stripping in normalizeForQueueText ────────────────────────
+
+test("Part 7 — normalizeForQueueText strips <p> HTML tags and preserves full body", () => {
+  const html_message =
+    "<p>Hi Ryan,</p><p>We have a cash offer ready for your property at 5139 W 11th St.</p><p>Interested in a quick close?</p>";
+  const result = normalizeForQueueText(html_message);
+  assert.equal(
+    result,
+    "Hi Ryan, We have a cash offer ready for your property at 5139 W 11th St. Interested in a quick close?"
+  );
+});
+
+test("Part 7 — normalizeForQueueText converts <br> to space", () => {
+  const html = "Line one<br>Line two<br/>Line three";
+  const result = normalizeForQueueText(html);
+  assert.equal(result, "Line one Line two Line three");
+});
+
+test("Part 7 — normalizeForQueueText decodes HTML entities", () => {
+  const html = "Seller&#39;s name is Smith &amp; Sons";
+  assert.equal(normalizeForQueueText(html), "Seller's name is Smith & Sons");
+});
+
+test("Part 7 — message-text stores full plain-text body when template contains HTML", async () => {
+  const html_template =
+    "<p>Hi there,</p><p>We are interested in purchasing your property at 5139 W 11th St, Tulsa OK.</p><p>Can we make you an offer?</p>";
+  const expected =
+    "Hi there, We are interested in purchasing your property at 5139 W 11th St, Tulsa OK. Can we make you an offer?";
+
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: html_template });
+
+  assert.equal(captured_fields?.["message-text"], expected, "must store full body, not just 'Hi'");
+  assert.equal(captured_fields?.["character-count"], expected.length);
+});
+
+test("Part 7 — character-count reflects stripped plain-text length (not HTML)", async () => {
+  const html = "<p>Hi</p>";
+  // HTML is 9 chars, plain text is "Hi" = 2 chars
+  const { captured_fields } = await buildAndCapture({ rendered_message_text: html });
+  assert.equal(captured_fields?.["message-text"], "Hi");
+  assert.equal(captured_fields?.["character-count"], 2);
+  assert.notEqual(captured_fields?.["character-count"], 9, "must not count HTML markup chars");
+});
+
+// ── Part 7.2: property-type reads directly from the property item ─────────────
+
+test("Part 7 — property-type written as 'Single Family' when property item has that value", async () => {
+  const property_item = createPodioItem(5100, {
+    "property-address": textField("5139 W 11th St"),
+    "property-type": categoryField("Single Family"),
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item: createPodioItem(201),
+      property_item,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: property_item.item_id,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    property_type: "Residential", // caller passes wrong source; should be overridden
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9200 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.property_type_written, true, "property-type must be written");
+  assert.equal(
+    captured_fields?.["property-type"],
+    "Single Family",
+    "property-type must come from property item, not caller-supplied property_type"
+  );
+});
+
+test("Part 7 — property-type written as 'Multi-Family' from property item", async () => {
+  const property_item = createPodioItem(5101, {
+    "property-type": categoryField("Multi-Family"),
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item: createPodioItem(201),
+      property_item,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: property_item.item_id,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    property_type: "Residential",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9201 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(captured_fields?.["property-type"], "Multi-Family");
+});
+
+// ── Part 7.3: category reads from master owner's owner-type ──────────────────
+
+test("Part 7 — category written as 'Corporate' when master owner has LLC/CORP | ABSENTEE", async () => {
+  const master_owner_item = createPodioItem(201, {
+    "owner-type": categoryField("LLC/CORP | ABSENTEE"),
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item,
+      property_item: null,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: null,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9202 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.category_written, true, "category must be written");
+  assert.equal(
+    captured_fields?.["category"],
+    "Corporate",
+    "category must map LLC/CORP | ABSENTEE → Corporate"
+  );
+});
+
+test("Part 7 — category written as 'Individual' for INDIVIDUAL | ABSENTEE owner-type", async () => {
+  const master_owner_item = createPodioItem(202, {
+    "owner-type": categoryField("INDIVIDUAL | ABSENTEE"),
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item,
+      property_item: null,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 202,
+      prospect_id: 301,
+      property_id: null,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9203 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(captured_fields?.["category"], "Individual");
+});
+
+test("Part 7 — category written as 'Trust / Estate' for TRUST/ESTATE | ABSENTEE", async () => {
+  const master_owner_item = createPodioItem(203, {
+    "owner-type": categoryField("TRUST/ESTATE | ABSENTEE"),
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item,
+      property_item: null,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 203,
+      prospect_id: 301,
+      property_id: null,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9204 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(captured_fields?.["category"], "Trust / Estate");
+});
+
+// ── Part 7.4: contact-window written via pattern bypass ───────────────────────
+
+test("Part 7 — contact-window '8AM-9PM Local' is written (matches CONTACT_WINDOW_PATTERN)", async () => {
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    contact_window: "8AM-9PM Local",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9210 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.contact_window_written, true, "contact-window must be written");
+  assert.equal(captured_fields?.["contact-window"], "8AM-9PM Local");
+});
+
+test("Part 7 — contact-window '9AM-8PM CT' is written (matches pattern and schema option)", async () => {
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    contact_window: "9AM-8PM CT",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9211 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.contact_window_written, true);
+  assert.equal(captured_fields?.["contact-window"], "9AM-8PM CT");
+});
+
+test("Part 7 — contact-window '7AM-8PM ET' is written via pattern bypass", async () => {
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    contact_window: "7AM-8PM ET",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9212 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.contact_window_written, true, "7AM-8PM ET must be passed through");
+  assert.equal(captured_fields?.["contact-window"], "7AM-8PM ET");
+});
+
+test("Part 7 — contact-window with invalid format is omitted", async () => {
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context: makeBaseContext(),
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    contact_window: "whenever",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9213 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.contact_window_written, false, "invalid format must be omitted");
+  assert.equal("contact-window" in (captured_fields || {}), false);
+});
+
+// ── Part 7.5: property-address structured location format ─────────────────────
+
+test("Part 7 — property-address formatted as 'Street, City, State ZIP' from structured location", async () => {
+  // Simulate a Podio location field value with structured sub-fields.
+  // Podio exposes street_address, city, state, postal_code alongside .value.
+  const property_item = createPodioItem(5200, {
+    "property-address": {
+      street_address: "5139 W 11th St",
+      city: "Tulsa",
+      state: "OK",
+      postal_code: "74127",
+      value: "Tulsa 74127 OK 5139 W 11th St", // ugly geocoded string
+    },
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item: createPodioItem(201),
+      property_item,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: property_item.item_id,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 9220 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(
+    captured_fields?.["property-address"],
+    "5139 W 11th St, Tulsa OK 74127",
+    "must use structured sub-fields, not the ugly geocoded string"
+  );
+  assert.notEqual(
+    captured_fields?.["property-address"],
+    "Tulsa 74127 OK 5139 W 11th St",
+    "must NOT use the ugly geocoded string"
+  );
 });

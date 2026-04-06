@@ -76,6 +76,7 @@ test("send queue row persists property, template, phone, and master owner relati
       created_fields = fields;
       return { item_id: 123 };
     },
+    update_item: async () => {},
   });
 
   assert.equal(result.ok, true);

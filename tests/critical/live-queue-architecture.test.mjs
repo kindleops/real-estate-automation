@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import {
   buildSyntheticPropertyFromSellerId,
   findPendingDuplicate,
+  findPendingPriorTouch,
   deriveOwnerTouchCount,
 } from "@/lib/domain/master-owners/run-master-owner-outbound-feeder.js";
 
@@ -448,4 +449,96 @@ test("Part 5 — no ReferenceError: module loads and findPendingDuplicate is cal
     threw = true;
   }
   assert.equal(threw, false, "no error must be thrown during pending duplicate check");
+});
+
+// ── Part 6: findPendingPriorTouch — touch progression guard ──────────────────
+//
+// Bug: same owner/phone pairs were advancing from touch 2 to touch 3 within
+// minutes because findPendingDuplicate only blocks same-touch-number rows.
+// findPendingPriorTouch blocks touch N+1 when a Queued/Sending row with touch
+// number < N exists — preventing the queue runner seeing out-of-order rows.
+
+test("Part 6 — findPendingPriorTouch returns null for touch-1 (no prior touch to block)", () => {
+  const history = {
+    queue_items: [],
+    outbound_events: [],
+  };
+  assert.equal(findPendingPriorTouch(history, 401, 1), null);
+});
+
+test("Part 6 — findPendingPriorTouch blocks touch-2 when touch-1 is still Queued", () => {
+  const history = {
+    queue_items: [
+      makeQueueItem(9100, { status: "Queued", phone_item_id: 401, touch_number: 1 }),
+    ],
+    outbound_events: [],
+  };
+
+  const blocking_row = findPendingPriorTouch(history, 401, 2);
+  assert.ok(blocking_row, "must return the blocking touch-1 Queued row");
+  assert.equal(blocking_row.item_id, 9100);
+});
+
+test("Part 6 — findPendingPriorTouch blocks touch-3 when touch-2 is still Sending", () => {
+  const history = {
+    queue_items: [
+      makeQueueItem(9101, { status: "Sent",    phone_item_id: 401, touch_number: 1 }),
+      makeQueueItem(9102, { status: "Sending", phone_item_id: 401, touch_number: 2 }),
+    ],
+    outbound_events: [],
+  };
+
+  const blocking_row = findPendingPriorTouch(history, 401, 3);
+  assert.ok(blocking_row, "must return the blocking touch-2 Sending row");
+  assert.equal(blocking_row.item_id, 9102);
+});
+
+test("Part 6 — findPendingPriorTouch returns null when prior touches are all Sent", () => {
+  // Touch-1 and touch-2 are Sent — safe to create touch-3
+  const history = {
+    queue_items: [
+      makeQueueItem(9103, { status: "Sent", phone_item_id: 401, touch_number: 1 }),
+      makeQueueItem(9104, { status: "Sent", phone_item_id: 401, touch_number: 2 }),
+    ],
+    outbound_events: [],
+  };
+
+  assert.equal(findPendingPriorTouch(history, 401, 3), null);
+});
+
+test("Part 6 — findPendingPriorTouch returns null when prior touches are Failed", () => {
+  const history = {
+    queue_items: [
+      makeQueueItem(9105, { status: "Failed", phone_item_id: 401, touch_number: 1 }),
+    ],
+    outbound_events: [],
+  };
+
+  assert.equal(findPendingPriorTouch(history, 401, 2), null);
+});
+
+test("Part 6 — findPendingPriorTouch ignores pending row for a DIFFERENT phone", () => {
+  const history = {
+    queue_items: [
+      makeQueueItem(9106, { status: "Queued", phone_item_id: 402, touch_number: 1 }),
+    ],
+    outbound_events: [],
+  };
+
+  // Phone 401 has no prior pending row — must not be blocked by phone 402's row
+  assert.equal(findPendingPriorTouch(history, 401, 2), null);
+});
+
+test("Part 6 — findPendingPriorTouch does not block same-touch (that is findPendingDuplicate's job)", () => {
+  const history = {
+    queue_items: [
+      makeQueueItem(9107, { status: "Queued", phone_item_id: 401, touch_number: 2 }),
+    ],
+    outbound_events: [],
+  };
+
+  // current_touch_number=2, there's a Queued touch-2 row, but that's a same-touch
+  // duplicate not a prior-touch block — findPendingPriorTouch only catches touch < 2
+  assert.equal(findPendingPriorTouch(history, 401, 2), null,
+    "same-touch row must not be caught by findPendingPriorTouch");
 });

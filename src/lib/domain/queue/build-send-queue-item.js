@@ -4,6 +4,7 @@ import APP_IDS from "@/lib/config/app-ids.js";
 import {
   createItem,
   getCategoryValue,
+  getFieldValues,
   getFirstAppReferenceId,
   getTextValue,
   updateItem,
@@ -77,16 +78,81 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
-// Flatten a rendered SMS for persistence in the Send Queue message-text field.
-// The field was changed from multiline to single-line text in Podio; passing a
-// string with embedded newlines causes only the first line to be stored.
-// This normalizer replaces all CRLF/CR/LF sequences with a single space,
-// collapses any resulting runs of whitespace, and trims.
-function normalizeForQueueText(value) {
+// Strips HTML tags and converts common block-level elements to spaces so that
+// rich-text template content is reduced to plain SMS text before persistence.
+// <br>, </p>, </div>, </li> are treated as line separators → space.
+// Named/numeric HTML entities are decoded to their literal characters.
+function stripHtml(value) {
   return String(value ?? "")
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, " ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+// Flatten a rendered SMS for persistence in the Send Queue message-text field.
+// 1. Strip any HTML markup the template renderer may have preserved.
+// 2. Replace all CRLF/CR/LF sequences with a single space.
+// 3. Collapse runs of whitespace and trim.
+export function normalizeForQueueText(value) {
+  return stripHtml(String(value ?? ""))
     .replace(/\r\n|\r|\n/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+// Accepted contact-window time-range format: "HH:MM AM - HH:MM PM TZ"
+// Mirrors the pattern in schema.js isValidSendQueueContactWindow.
+// Values matching this pattern are passed through to Podio's compat bypass
+// even when the local schema supplement has no matching option ID.
+const CONTACT_WINDOW_PATTERN =
+  /^(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s+(?:CT|ET|MT|PT|AT|HT|Local)$/i;
+
+// Maps raw MasterOwners "owner-type" category values (e.g. "LLC/CORP | ABSENTEE")
+// to the Send Queue "category" option labels (Corporate, Individual, etc.).
+function mapOwnerTypeToQueueCategory(raw) {
+  if (!raw) return null;
+  const upper = String(raw).toUpperCase();
+  if (upper.includes("LLC") || upper.includes("CORP")) return "Corporate";
+  if (upper.includes("TRUST") || upper.includes("ESTATE")) return "Trust / Estate";
+  if (upper.includes("BANK") || upper.includes("INSTITUTION") || upper.includes("LENDER")) return "Bank / Lender";
+  if (upper.includes("GOV")) return "Government";
+  if (upper.includes("INDIVIDUAL")) return "Individual";
+  return null;
+}
+
+// Builds a clean "Street, City, State ZIP" address from the structured sub-fields
+// of a Podio location field.  Podio location values expose the geocoded components
+// at the same level as .value, so we prefer those over the pre-formatted string
+// which can arrive in city-first order ("Tulsa 74127 OK 5139 W 11th St").
+function formatPropertyAddress(property_item) {
+  if (!property_item) return "";
+  const values = getFieldValues(property_item, "property-address");
+  const first = values[0];
+  if (!first) return "";
+
+  const street = first.street_address || first.value?.street_address || "";
+  const city = first.city || first.value?.city || "";
+  const state = first.state || first.value?.state || "";
+  const zip = first.postal_code || first.zip || first.value?.postal_code || first.value?.zip || "";
+
+  if (street && (city || state)) {
+    const region = [city, state, zip].filter(Boolean).join(" ");
+    return region ? `${street}, ${region}` : street;
+  }
+
+  // Fall back to whatever text value is stored
+  return (
+    first.formatted ||
+    first.value?.formatted ||
+    (typeof first.value === "string" ? first.value : "") ||
+    ""
+  );
 }
 
 function unique(list) {
@@ -266,9 +332,17 @@ function resolveContactWindowField(contact_window) {
     return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
   }
 
-  // No option ID found.  Omitting is safer than passing a raw string that Podio
-  // will reject.  Scheduling is already encoded in scheduled_for_local/utc, and
-  // the queue runner allows sending when contact-window is absent.
+  // Allow through values that match the canonical time-range format even when the
+  // local schema supplement has no matching option ID.  schema.js normalizePodioFieldMap
+  // has a compat bypass (shouldAllowRawCategoryCompatibility) that accepts these strings
+  // as raw text — Podio stores them and rounds-trips them back as the real option text.
+  if (CONTACT_WINDOW_PATTERN.test(raw)) {
+    return { field_value: raw, category_option_id: null, omitted: false, reason: null };
+  }
+
+  // No option ID found and value doesn't match the canonical format.  Omit to
+  // prevent a Podio 400 error.  The queue runner allows sending when contact-window
+  // is absent.
   return {
     field_value: undefined,
     category_option_id: null,
@@ -470,9 +544,13 @@ export async function buildSendQueueItem({
     getTextValue(master_owner_item, "owner-full-name", "") ||
     "";
 
+  // Build a properly-ordered "Street, City, State ZIP" address from the Podio
+  // location field's structured sub-components.  Falls back to the context
+  // summary (which also reads getTextValue so may have the ugly geocoded format)
+  // only when the location field has no structured data.
   const property_address =
+    formatPropertyAddress(property_item) ||
     context.summary?.property_address ||
-    getTextValue(property_item, "property-address", "") ||
     getTextValue(property_item, "title", "") ||
     "";
 
@@ -533,8 +611,18 @@ export async function buildSendQueueItem({
     });
   }
 
-  const property_type_field = resolveQueueCategoryField(QUEUE_FIELDS.property_type, property_type);
-  const category_field = resolveQueueCategoryField(QUEUE_FIELDS.category, secondary_category);
+  // Prefer the property item's own "property-type" category (Single Family,
+  // Multi-Family, etc.) over the caller-supplied value which may be sourced
+  // from the broader "property-class" field (Residential, Vacant, …).
+  const direct_property_type = getCategoryValue(property_item, "property-type", null);
+  const resolved_property_type = direct_property_type || property_type;
+  const property_type_field = resolveQueueCategoryField(QUEUE_FIELDS.property_type, resolved_property_type);
+
+  // Resolve owner entity category from the master owner item when the caller
+  // does not supply a secondary_category.
+  const owner_type_raw = getCategoryValue(master_owner_item, "owner-type", null);
+  const resolved_owner_category = secondary_category || mapOwnerTypeToQueueCategory(owner_type_raw);
+  const category_field = resolveQueueCategoryField(QUEUE_FIELDS.category, resolved_owner_category);
   const use_case_template_field = resolveQueueCategoryField(QUEUE_FIELDS.use_case_template, use_case_template);
 
   for (const [field_name, source_value, resolved] of [
@@ -709,5 +797,5 @@ export async function buildSendQueueItem({
   };
 }
 
-export { resolveContactWindowField, resolveQueueCategoryField, normalizeForQueueText };
+export { resolveContactWindowField, resolveQueueCategoryField };
 export default buildSendQueueItem;

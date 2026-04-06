@@ -73,12 +73,12 @@ test("ai conversation brain linked-message-events accepts message event app refs
   assert.deepEqual(fields["linked-message-events"], [30541681, 30541682]);
 });
 
-test("queue builder omits contact-window when the value has no matching option in the Send Queue schema", async () => {
-  // "12PM-2PM CT" is a valid seller contact window from Master Owners, but the
-  // Send Queue app schema only has one option ("9AM-8PM CT", id=1).  Writing
-  // the raw string to a category field causes Podio to return 400.
-  // The safe fix is to omit the field — the queue runner allows sending when
-  // contact-window is absent (allowed:true, reason:"no_contact_window").
+test("queue builder writes contact-window when value matches time-range format (compat bypass)", async () => {
+  // "12PM-2PM CT" is a valid seller contact window from Master Owners.  It has no
+  // matching option in the Send Queue schema (only "9AM-8PM CT", id=1 is an option),
+  // but isValidSendQueueContactWindow in schema.js recognises the time-range format
+  // and allows the raw string through via shouldAllowRawCategoryCompatibility.
+  // The field IS included in the payload — no 400 error and no unnecessary data loss.
   let created_fields = null;
 
   const result = await buildSendQueueItem({
@@ -128,14 +128,15 @@ test("queue builder omits contact-window when the value has no matching option i
       created_fields = fields;
       return { item_id: 123 };
     },
+    update_item: async () => {},
   });
 
   assert.equal(result.queue_item_id, 123, "queue item must be created successfully");
   assert.equal(
     "contact-window" in (created_fields || {}),
-    false,
-    "contact-window must be omitted from the payload to prevent a 400 error"
+    true,
+    "contact-window must be present in the payload via compat bypass"
   );
-  assert.equal(result.contact_window_written, false);
-  assert.equal(result.contact_window_omit_reason, "no_matching_category_option_in_schema");
+  assert.equal(result.contact_window_written, true);
+  assert.equal(result.contact_window_omit_reason, null);
 });

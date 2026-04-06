@@ -335,6 +335,7 @@ export function resolveQueueSchedule({
   timezone_label = "Central",
   contact_window = null,
   distribution_key = null,
+  distribute_when_inside_window = true,
 } = {}) {
   const base_date = new Date(now || Date.now());
   const safe_now = Number.isNaN(base_date.getTime()) ? new Date() : base_date;
@@ -355,6 +356,47 @@ export function resolveQueueSchedule({
   }
 
   if (shouldSendNow(local_now_parts.minutes_since_midnight, parsed_window)) {
+    // When a distribution_key is supplied and enough window remains, spread rows
+    // across the remaining contact window instead of collapsing all to "now".
+    // Without a key, < 5 min remaining, or distribute_when_inside_window=false,
+    // fall back to the exact current time.
+    if (distribute_when_inside_window && distribution_key && parsed_window.end >= parsed_window.start) {
+      const remaining_minutes =
+        parsed_window.end - local_now_parts.minutes_since_midnight;
+      if (remaining_minutes >= 5) {
+        const remaining_window = {
+          start: local_now_parts.minutes_since_midnight,
+          end: parsed_window.end,
+        };
+        const scheduled_second_of_day = pickDistributedWindowSecondOfDay(
+          remaining_window,
+          distribution_key
+        );
+        const dist_hour = Math.floor(scheduled_second_of_day / 3600);
+        const dist_minute = Math.floor((scheduled_second_of_day % 3600) / 60);
+        const dist_second = scheduled_second_of_day % 60;
+        const distributed_local_parts = {
+          ...local_now_parts,
+          hour: dist_hour,
+          minute: dist_minute,
+          second: dist_second,
+        };
+        const distributed_utc_date = zonedLocalDateTimeToUtcDate(
+          distributed_local_parts,
+          timeZone
+        );
+        return {
+          scheduled_for_local: formatPodioLocalDateTime(distributed_local_parts),
+          scheduled_for_utc: toPodioDateTimeString(distributed_utc_date),
+          timeZone,
+          timezone_label: clean(timezone_label) || "Central",
+          contact_window: clean(contact_window) || null,
+          reason: "inside_contact_window_distribute_within_remaining_window",
+          within_contact_window: true,
+        };
+      }
+    }
+
     return {
       scheduled_for_local: formatPodioLocalDateTime(local_now_parts),
       scheduled_for_utc: toPodioDateTimeString(safe_now),
@@ -435,6 +477,8 @@ export function resolveLatencyAwareQueueSchedule({
     timezone_label,
     contact_window,
     distribution_key,
+    // Latency already provides per-row variation; skip inside-window redistribution.
+    distribute_when_inside_window: false,
   });
 
   return {

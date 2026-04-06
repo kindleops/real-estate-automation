@@ -1490,6 +1490,24 @@ function findPendingDuplicate(history, phone_item_id, touch_number = null) {
   );
 }
 
+// Returns a pending (Queued/Sending) queue row for the same phone whose
+// touch-number is LOWER than current_touch_number.  A prior-touch row still in
+// the queue means the sequence hasn't been processed yet — creating touch N+1
+// while touch N is still pending results in out-of-order delivery.
+export function findPendingPriorTouch(history, phone_item_id, current_touch_number) {
+  if (!current_touch_number || current_touch_number <= 1) return null;
+  return (
+    history.queue_items.find((item) => {
+      const status = lower(getCategoryValue(item, "queue-status", null));
+      const candidate_phone_item_id = getFirstAppReferenceId(item, "phone-number", null);
+      if (!QUEUE_DUPLICATE_PENDING_STATUSES.has(status)) return false;
+      if (String(candidate_phone_item_id || "") !== String(phone_item_id || "")) return false;
+      const candidate_touch = Number(getNumberValue(item, "touch-number", 0) || 0);
+      return candidate_touch > 0 && candidate_touch < current_touch_number;
+    }) || null
+  );
+}
+
 function findRecentDuplicate(history, phone_item_id, cutoff_ts) {
   const recent_queue_item =
     history.queue_items.find((item) => {
@@ -2123,6 +2141,97 @@ async function evaluateOwner({
       duplicate_queue_item_id: pending_duplicate.item_id,
       duplicate_queue_status: getCategoryValue(pending_duplicate, "queue-status", null),
     };
+  }
+
+  // Block touch N+1 while touch N is still pending in the queue.  A lower-touch
+  // row in Queued/Sending status means the sequence hasn't been delivered yet.
+  // findPendingDuplicate only catches same-touch duplicates; this catches cross-touch
+  // advancement (touch 2 created while touch 1 is still Queued).
+  const pending_prior_touch = timedStage(
+    log,
+    "master_owner_feeder.pending_prior_touch_check",
+    {
+      evaluation_depth,
+      phone_item_id: selected_phone_record.phone_item_id,
+    },
+    () =>
+      Promise.resolve(
+        findPendingPriorTouch(history, selected_phone_record.phone_item_id, touch_number)
+      )
+  );
+  const resolved_pending_prior_touch = await pending_prior_touch;
+  if (resolved_pending_prior_touch) {
+    log.info("master_owner_feeder.pending_prior_touch_blocks_advancement", {
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      requested_touch_number: touch_number,
+      blocking_touch_number: Number(
+        getNumberValue(resolved_pending_prior_touch, "touch-number", 0) || 0
+      ),
+      blocking_queue_item_id: resolved_pending_prior_touch.item_id,
+      blocking_queue_status: getCategoryValue(
+        resolved_pending_prior_touch,
+        "queue-status",
+        null
+      ),
+    });
+    return {
+      ok: false,
+      skipped: true,
+      reason: "pending_prior_touch_blocks_advancement",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      blocking_queue_item_id: resolved_pending_prior_touch.item_id,
+      blocking_touch_number: Number(
+        getNumberValue(resolved_pending_prior_touch, "touch-number", 0) || 0
+      ),
+    };
+  }
+
+  // Universal same-day touch advancement guard.  A queue row or message event
+  // for this phone created within the last 24 hours means a touch was recently
+  // queued — do not advance to the next touch in the same calendar day.
+  // Applies regardless of is_first_touch status.
+  // Exempt: explicit_follow_up_due (user scheduled a deliberate same-day follow-up).
+  if (!explicit_follow_up_due) {
+    const same_day_cutoff_ts = now_ts - 24 * 60 * 60 * 1000;
+    const same_day_block = await timedStage(
+      log,
+      "master_owner_feeder.same_day_touch_guard",
+      {
+        evaluation_depth,
+        phone_item_id: selected_phone_record.phone_item_id,
+      },
+      () =>
+        Promise.resolve(
+          findRecentDuplicate(
+            history,
+            selected_phone_record.phone_item_id,
+            same_day_cutoff_ts
+          )
+        )
+    );
+    if (same_day_block) {
+      log.info("master_owner_feeder.same_day_touch_advancement_blocked", {
+        master_owner_id,
+        phone_item_id: selected_phone_record.phone_item_id,
+        touch_number,
+        is_first_touch,
+        duplicate_source: same_day_block.type,
+        duplicate_item_id: same_day_block.item?.item_id ?? null,
+        duplicate_timestamp: same_day_block.timestamp || null,
+      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: "same_day_touch_advancement_blocked",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        duplicate_source: same_day_block.type,
+        duplicate_item_id: same_day_block.item?.item_id ?? null,
+        duplicate_timestamp: same_day_block.timestamp || null,
+      };
+    }
   }
 
   // For first-touch leads, skip sent-history suppression for the same reason as above:
