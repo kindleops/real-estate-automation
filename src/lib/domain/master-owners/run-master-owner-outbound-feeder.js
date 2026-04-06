@@ -1967,6 +1967,7 @@ async function evaluateOwner({
     () => loadOwnerHistory(master_owner_id, { runtime, log })
   );
   const owner_touch_count = deriveOwnerTouchCount(history);
+  const touch_number = owner_touch_count + 1;
   const latest_contact_at = timedStage(
     log,
     "master_owner_feeder.latest_contact_resolution",
@@ -2081,7 +2082,6 @@ async function evaluateOwner({
     : 0;
   const priority_score = derivePriorityScore(owner_item, { overdue_bonus });
   const send_priority = deriveSendPriority(priority_score, owner_item);
-  const touch_number = owner_touch_count + 1;
 
   if (evaluation_depth !== "full") {
     return {
@@ -3746,6 +3746,7 @@ export {
   addressLookupVariants,
   buildSyntheticPropertyFromSellerId,
   findPendingDuplicate,
+  deriveOwnerTouchCount,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,
   FORBIDDEN_FIRST_TOUCH_LIFECYCLE_STAGES,
   FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,

@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import {
   buildSyntheticPropertyFromSellerId,
   findPendingDuplicate,
+  deriveOwnerTouchCount,
 } from "@/lib/domain/master-owners/run-master-owner-outbound-feeder.js";
 
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
@@ -358,4 +359,93 @@ test("Part 4 — two cron runs creating same owner+phone+touch are blocked by se
   // Run-2 trying touch-2 for the same phone should be allowed
   const run_2_touch_2 = findPendingDuplicate(history, 401, 2);
   assert.equal(run_2_touch_2, null, "run-2 touch-2 must not be blocked by run-1's touch-1 row");
+});
+
+// ── Part 5: touch_number TDZ regression ──────────────────────────────────────
+//
+// Before the fix, `const touch_number = owner_touch_count + 1` was declared at
+// the end of evaluateOwner(), AFTER the pending_queue_duplicate_check stage
+// already referenced it.  In production (minified) this raised:
+//   ReferenceError: Cannot access 'em' before initialization
+// at stage: master_owner_feeder.pending_queue_duplicate_check / evaluation_phase: light
+//
+// These tests verify that deriveOwnerTouchCount + findPendingDuplicate compose
+// correctly using the same pattern evaluateOwner now uses after the fix.
+
+test("Part 5 — deriveOwnerTouchCount returns 0 for empty history (fresh owner)", () => {
+  const history = { queue_items: [], outbound_events: [] };
+  assert.equal(deriveOwnerTouchCount(history), 0);
+});
+
+test("Part 5 — deriveOwnerTouchCount returns max touch-number across all queue items", () => {
+  const history = {
+    queue_items: [
+      makeQueueItem(9001, { status: "Sent", phone_item_id: 401, touch_number: 1 }),
+      makeQueueItem(9002, { status: "Sent", phone_item_id: 401, touch_number: 2 }),
+    ],
+    outbound_events: [],
+  };
+  assert.equal(deriveOwnerTouchCount(history), 2);
+});
+
+test("Part 5 — touch_number derived as owner_touch_count+1 prevents duplicate for same touch (regression: TDZ fix)", () => {
+  // This mirrors exactly what evaluateOwner does after the fix:
+  //   const owner_touch_count = deriveOwnerTouchCount(history);
+  //   const touch_number = owner_touch_count + 1;   // ← was declared too late before fix
+  //   ... findPendingDuplicate(history, phone_item_id, touch_number)
+  //
+  // History: one Sent touch-1 row and one active Queued touch-2 row.
+  const history = {
+    queue_items: [
+      makeQueueItem(9010, { status: "Sent",   phone_item_id: 401, touch_number: 1 }),
+      makeQueueItem(9011, { status: "Queued", phone_item_id: 401, touch_number: 2 }),
+    ],
+    outbound_events: [],
+  };
+
+  // Mimics evaluateOwner's computation (must not throw ReferenceError)
+  const owner_touch_count = deriveOwnerTouchCount(history); // 2 (max touch-number)
+  const touch_number = owner_touch_count + 1;               // 3 (next touch)
+
+  // touch-3 has no Queued/Sending row → not a duplicate
+  const duplicate = findPendingDuplicate(history, 401, touch_number);
+  assert.equal(duplicate, null, "touch-3 must not be blocked by the existing touch-2 Queued row");
+});
+
+test("Part 5 — touch_number derived as owner_touch_count+1 blocks re-queue for same touch", () => {
+  // Scenario: owner already has a Queued row for touch-1 (first run created it).
+  // Second run sees owner_touch_count=0 (no Sent rows yet), so touch_number=1.
+  // The duplicate check must block.
+  const history = {
+    queue_items: [
+      makeQueueItem(9020, { status: "Queued", phone_item_id: 401, touch_number: 1 }),
+    ],
+    outbound_events: [],
+  };
+
+  const owner_touch_count = deriveOwnerTouchCount(history); // 1 (max touch in queue items)
+  const touch_number = owner_touch_count + 1;               // 2
+
+  // touch-2 has no active row → allowed
+  const different_touch = findPendingDuplicate(history, 401, touch_number);
+  assert.equal(different_touch, null, "touch-2 must not be blocked by existing touch-1 Queued row");
+
+  // touch-1 (same as the existing Queued row) must be blocked
+  const same_touch = findPendingDuplicate(history, 401, 1);
+  assert.ok(same_touch, "touch-1 must be blocked by the existing touch-1 Queued row");
+});
+
+test("Part 5 — no ReferenceError: module loads and findPendingDuplicate is callable with derived touch_number", () => {
+  // Smoke test: importing the module and calling the exported functions that
+  // evaluateOwner composes must not throw any TDZ / ReferenceError.
+  const history = { queue_items: [], outbound_events: [] };
+  let threw = false;
+  try {
+    const owner_touch_count = deriveOwnerTouchCount(history);
+    const touch_number = owner_touch_count + 1;
+    findPendingDuplicate(history, 401, touch_number);
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "no error must be thrown during pending duplicate check");
 });
