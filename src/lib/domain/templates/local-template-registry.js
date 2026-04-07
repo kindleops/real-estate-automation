@@ -44,6 +44,41 @@ function createLocalTemplate({
 }
 
 export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
+  // ── Stage 1 — First-touch ownership check ────────────────────────────────────
+  // These are cold-outbound templates.  Avoid filler phrases ("Quick question"),
+  // avoid city/state/zip in the address (street only after fix to extractStreetAddress),
+  // and keep the tone human and brief so TextGrid content filters don't flag them.
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:v1",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V1",
+    category_secondary: "Outreach",
+    tone: "Warm",
+    paired_with_agent_type: "Warm Professional",
+    text: "Hey {{seller_first_name}} — {{agent_first_name}} here. Do you still own the place at {{property_address}}?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:v2",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V2",
+    category_secondary: "Outreach",
+    tone: "Neutral",
+    paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    text: "{{agent_first_name}} here — reaching out about {{property_address}}. Are you the owner there?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:v3",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V3",
+    category_secondary: "Outreach",
+    tone: "Warm",
+    paired_with_agent_type: "Warm Professional",
+    text: "Hi {{seller_first_name}}, this is {{agent_first_name}}. Do you own {{property_address}}?",
+  }),
+  // ── Stage 1 — Ownership Confirmation Follow-Up ────────────────────────────────
   createLocalTemplate({
     item_id: "local-template:follow_up:ownership:v1",
     use_case: "ownership_check_follow_up",

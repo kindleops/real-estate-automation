@@ -24,6 +24,27 @@ export function phoneField(value) {
   return { value: String(value ?? "") };
 }
 
+// Creates a Podio location field value with structured sub-fields.
+// Mirrors the geocoded shape returned by the Podio API so that
+// extractStreetAddress() and formatPropertyAddress() can reach the sub-fields
+// directly rather than falling back to the pre-formatted string.
+export function locationField({ street_address = "", city = "", state = "", postal_code = "", formatted = "" } = {}) {
+  return {
+    street_address,
+    city,
+    state,
+    postal_code,
+    formatted: formatted || [street_address, city, state, postal_code].filter(Boolean).join(", "),
+    value: {
+      street_address,
+      city,
+      state,
+      postal_code,
+      formatted: formatted || [street_address, city, state, postal_code].filter(Boolean).join(", "),
+    },
+  };
+}
+
 export function createPodioItem(item_id, fields = {}) {
   return {
     item_id: Number(item_id),

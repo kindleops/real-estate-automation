@@ -39,6 +39,20 @@ function normalizeWhitespace(value) {
     .trim();
 }
 
+// Fixes punctuation/spacing artifacts that survive placeholder substitution:
+//  - removes spaces immediately before sentence-ending punctuation ("Helen ." → "Helen.")
+//  - normalizes em-dash and en-dash spacing to exactly one space on each side
+//  - collapses any double spaces introduced by the above passes
+// Exported so it can be unit-tested independently.
+export function cleanupPunctuation(value) {
+  return String(value ?? "")
+    .replace(/\s+([.,!?:;])/g, "$1")
+    .replace(/\s*—\s*/g, " — ")
+    .replace(/\s*–\s*/g, " – ")
+    .replace(/  +/g, " ")
+    .trim();
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -315,6 +329,7 @@ export function renderTemplate({
   }
 
   rendered = normalizeWhitespace(rendered);
+  rendered = cleanupPunctuation(rendered);
 
   return {
     ok: validation.ok,
