@@ -1,6 +1,7 @@
 // ─── derive-context-summary.js ───────────────────────────────────────────
 import {
   getCategoryValue,
+  getFieldValues,
   getNumberValue,
   getTextValue,
   normalizeLanguage,
@@ -33,6 +34,21 @@ function titleCaseIfShouting(value = "") {
       });
     })
     .join("");
+}
+
+// Extracts just the street-address component from a Podio location field.
+// Podio location fields expose geocoded sub-fields (street_address, city, state,
+// postal_code) both directly on the value object and nested under value.value.
+// The pre-formatted string (first.value.formatted or first.formatted) arrives in
+// an unpredictable city-first order ("Jurupa Valley 92509 CA 7454 Mission Blvd"),
+// so we always prefer the structured street_address sub-field and never fall back
+// to formatted.  Callers that need the full address should use formatPropertyAddress
+// in build-send-queue-item.js instead.
+function extractStreetAddress(property_item) {
+  const values = getFieldValues(property_item, "property-address");
+  const first = values[0];
+  if (!first) return "";
+  return first.street_address || first.value?.street_address || "";
 }
 
 function firstNonNull(...values) {
@@ -71,7 +87,7 @@ export function deriveContextSummary({
     ) || "";
   const raw_property_address =
     firstNonNull(
-      getTextValue(property_item, "property-address", ""),
+      extractStreetAddress(property_item),
       getTextValue(property_item, "title", "")
     ) || "";
   const raw_property_city = getTextValue(property_item, "city", "") || "";
