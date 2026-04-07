@@ -1462,7 +1462,15 @@ function deriveOwnerTouchCount(history) {
     return Math.max(max, touch_number);
   }, 0);
 
-  return Math.max(max_queue_touch, history.outbound_events.length);
+  // Exclude failed events — junk/truncation sends that the carrier rejected should
+  // not inflate the touch sequence number.  Only count events that were actually
+  // delivered or at minimum accepted (Sent/Delivered/Pending).
+  const valid_event_count = history.outbound_events.filter((item) => {
+    const delivery_status = lower(getCategoryValue(item, "status-3", null));
+    return delivery_status !== "failed";
+  }).length;
+
+  return Math.max(max_queue_touch, valid_event_count);
 }
 
 // Checks for an active (Queued/Sending) duplicate for the given phone.
@@ -1533,6 +1541,11 @@ function findRecentDuplicate(history, phone_item_id, cutoff_ts) {
 
   const recent_event =
     history.outbound_events.find((item) => {
+      // Skip failed events — a provider rejection or content-filter block is not
+      // real outreach and must not count as a recent touch.
+      const delivery_status = lower(getCategoryValue(item, "status-3", null));
+      if (delivery_status === "failed") return false;
+
       const candidate_phone_item_id = getFirstAppReferenceId(item, "phone-number", null);
       const candidate_ts = toTimestamp(getDateValue(item, "timestamp", null));
 
@@ -3945,6 +3958,7 @@ export {
   addressLookupVariants,
   buildSyntheticPropertyFromSellerId,
   findPendingDuplicate,
+  findRecentDuplicate,
   deriveOwnerTouchCount,
   selectBestProperty,
   FORBIDDEN_FIRST_TOUCH_USE_CASES,

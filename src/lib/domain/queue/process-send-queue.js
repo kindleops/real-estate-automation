@@ -1246,6 +1246,18 @@ export async function processSendQueueItem(queue_item_id) {
         failed_reason: "Network Error",
         retry_count: (queue_validation.retry_count ?? 0) + 1,
       });
+    } else if (queue_validation.reason === "junk_message_body") {
+      // One-word / too-short body — truncation artifact from multiline template stored
+      // in a single-line Podio field.  Block permanently; do NOT advance owner state.
+      warn("queue.process_blocked_junk_message_body", {
+        queue_item_id,
+        word_count: queue_validation.word_count,
+        message_body: queue_validation.message_body,
+      });
+      await failQueueItem(queue_item_id, {
+        queue_status: "Blocked",
+        failed_reason: "Content Filter",
+      });
     } else if (queue_validation.reason === "max_retries_exceeded") {
       await failQueueItem(queue_item_id, {
         failed_reason: "Network Error",

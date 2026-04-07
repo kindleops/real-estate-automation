@@ -66,6 +66,24 @@ export function validateSendQueueItem(queue_item = null) {
     };
   }
 
+  // Reject one-word / too-short bodies.  These are truncation artifacts caused by
+  // multiline template text being stored in a single-line Podio field — Podio keeps
+  // only the first line, collapsing "Hi\nDear {owner}…" to "Hi".  A legitimate
+  // outbound SMS must contain at least 3 whitespace-separated words.  Anything
+  // shorter is never intentional outreach and would be caught by carrier content
+  // filters anyway.
+  const normalized_body = clean(message_text);
+  const word_count = normalized_body.split(/\s+/).filter(Boolean).length;
+  if (word_count < 3) {
+    return {
+      ok: false,
+      reason: "junk_message_body",
+      queue_status,
+      word_count,
+      message_body: normalized_body,
+    };
+  }
+
   if (retry_count >= max_retries) {
     return {
       ok: false,
