@@ -49,9 +49,12 @@ export function normalizeTextgridDeliveryPayload(
     message_id: clean(
       pickValue(body, lookup, [
         "message_id",
+        "message_sid",
         "messageId",
         "id",
         "sms_id",
+        "sms_sid",
+        "sms_message_sid",
         "smsid",
         "smsmessagesid",
         "SmsMessageSid",
@@ -64,6 +67,7 @@ export function normalizeTextgridDeliveryPayload(
       pickValue(body, lookup, [
         "status",
         "message_status",
+        "sms_status",
         "messageStatus",
         "delivery_status",
         "smsstatus",
@@ -133,6 +137,7 @@ export function normalizeTextgridDeliveryPayload(
     account_id: clean(
       pickValue(body, lookup, [
         "account_id",
+        "account_sid",
         "accountId",
         "AccountSid",
       ])
@@ -140,8 +145,12 @@ export function normalizeTextgridDeliveryPayload(
     conversation_id: clean(
       pickValue(body, lookup, ["conversation_id", "conversationId"])
     ),
-    api_version: clean(pickValue(body, lookup, ["api_version", "ApiVersion"])),
-    segments: clean(pickValue(body, lookup, ["segments", "NumSegments"])),
+    api_version: clean(
+      pickValue(body, lookup, ["api_version", "apiVersion", "ApiVersion"])
+    ),
+    segments: clean(
+      pickValue(body, lookup, ["segments", "num_segments", "NumSegments"])
+    ),
 
     header_signature: clean(
       headers.get("x-textgrid-signature") ||

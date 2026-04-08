@@ -165,6 +165,54 @@ test("runFeederWithRollout skips safely when Podio cooldown is active", async ()
   assert.equal(with_run_lock_called, false);
 });
 
+test("runFeederWithRollout skips live feeding when Podio backpressure is active", async () => {
+  const { execute_calls, deps } = makeDeps();
+  let with_run_lock_called = false;
+
+  const result = await runFeederWithRollout(
+    {
+      source_view_name: "SMS / TIER #1 / ALL",
+    },
+    {
+      ...deps,
+      resolveMutationDryRunImpl: () => ({
+        effective_dry_run: false,
+        reason: "live_mode",
+      }),
+      buildPodioBackpressureSkipResultImpl: async () => ({
+        ok: true,
+        skipped: true,
+        reason: "podio_rate_limit_low_remaining",
+        podio_backpressure: {
+          active: true,
+          min_remaining: 150,
+          observation: {
+            path: "/item/app/30541680/filter/",
+            operation: "filter_items",
+            rate_limit_remaining: 42,
+            rate_limit_limit: 1000,
+            observed_at: "2026-04-08T19:15:25.000Z",
+          },
+        },
+        scanned_count: 0,
+        eligible_owner_count: 0,
+        queued_count: 0,
+        skip_reason_counts: [],
+      }),
+      withRunLockImpl: async () => {
+        with_run_lock_called = true;
+        throw new Error("withRunLockImpl should not run during Podio backpressure");
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "podio_rate_limit_low_remaining");
+  assert.equal(execute_calls.length, 0);
+  assert.equal(with_run_lock_called, false);
+});
+
 test("runFeederWithRollout tops up the queue buffer when future inventory is low", async () => {
   const { execute_calls, deps } = makeDeps();
   let with_run_lock_called = false;

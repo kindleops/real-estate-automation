@@ -30,6 +30,28 @@ export async function parseTextgridDeliveryRequestBody(request) {
   return { raw_text: text };
 }
 
+function parseLooseTextBody(raw_body = "") {
+  const trimmed = clean(raw_body);
+  if (!trimmed) return {};
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Fall through to URLSearchParams parsing.
+  }
+
+  const params = new URLSearchParams(trimmed);
+  const entries = Object.fromEntries(params.entries());
+  if (Object.keys(entries).length > 0) {
+    return entries;
+  }
+
+  return { raw_text: raw_body };
+}
+
 export async function handleTextgridDeliveryRequest(request, deps = {}) {
   const {
     logger = defaultLogger,
@@ -39,7 +61,13 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
 
   try {
     const raw_body = await request.clone().text().catch(() => "");
-    const body = await parseTextgridDeliveryRequestBody(request);
+    let body = await parseTextgridDeliveryRequestBody(request);
+    if (!Object.keys(body || {}).length || body?.raw_text) {
+      const reparsed = parseLooseTextBody(raw_body);
+      if (Object.keys(reparsed || {}).length) {
+        body = reparsed;
+      }
+    }
     const payload = normalizeTextgridDeliveryPayload(body, request.headers);
     const verification = verifyTextgridWebhookSignatureImpl({
       raw_body,
@@ -49,6 +77,8 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
     if (!payload.message_id && !payload.status) {
       logger.warn("textgrid_delivery.invalid_payload", {
         payload,
+        raw_body_preview: clean(raw_body).slice(0, 500) || null,
+        parsed_keys: Object.keys(body || {}),
       });
 
       return {

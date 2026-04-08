@@ -38,6 +38,9 @@ const FILTER_RESULT_CACHE_MAX_TTL_MS = 30_000;
 const PODIO_COOLDOWN_STATE_FILE =
   process.env.PODIO_COOLDOWN_STATE_FILE ||
   "/tmp/real-estate-automation-podio-rate-limit-cooldown.json";
+const PODIO_RATE_LIMIT_STATUS_FILE =
+  process.env.PODIO_RATE_LIMIT_STATUS_FILE ||
+  "/tmp/real-estate-automation-podio-rate-limit-status.json";
 
 const _filter_result_cache =
   globalThis.__rea_podio_filter_result_cache__ || new Map();
@@ -52,6 +55,17 @@ const _podio_cooldown_runtime = globalThis.__rea_podio_cooldown_runtime__ || {
 };
 if (!globalThis.__rea_podio_cooldown_runtime__) {
   globalThis.__rea_podio_cooldown_runtime__ = _podio_cooldown_runtime;
+}
+
+const _podio_rate_limit_status_runtime =
+  globalThis.__rea_podio_rate_limit_status_runtime__ || {
+    loaded: false,
+    state: null,
+    read_promise: null,
+  };
+if (!globalThis.__rea_podio_rate_limit_status_runtime__) {
+  globalThis.__rea_podio_rate_limit_status_runtime__ =
+    _podio_rate_limit_status_runtime;
 }
 
 const REQUIRED_ENV = {
@@ -141,21 +155,25 @@ let _access_token = null;
 let _expires_at = 0;
 let _refresh_promise = null;
 const _item_app_id_cache = new Map();
-let _latest_rate_limit_status = {
-  observed: false,
-  observed_at: null,
-  method: null,
-  path: null,
-  operation: null,
-  status: null,
-  duration_ms: null,
-  attempt: null,
-  rate_limit_limit: null,
-  rate_limit_remaining: null,
-  retry_after_seconds: null,
-  low_remaining_threshold: null,
-};
+let _latest_rate_limit_status = buildEmptyRateLimitStatus();
 let _last_low_rate_limit_warning_threshold = null;
+
+function buildEmptyRateLimitStatus() {
+  return {
+    observed: false,
+    observed_at: null,
+    method: null,
+    path: null,
+    operation: null,
+    status: null,
+    duration_ms: null,
+    attempt: null,
+    rate_limit_limit: null,
+    rate_limit_remaining: null,
+    retry_after_seconds: null,
+    low_remaining_threshold: null,
+  };
+}
 
 function _isTokenExpired() {
   return !_access_token || Date.now() >= _expires_at - TOKEN_REFRESH_BUFFER_MS;
@@ -326,25 +344,204 @@ function resolveLowRateLimitThreshold(remaining = null) {
 }
 
 export function resetPodioRateLimitObservability() {
-  _latest_rate_limit_status = {
-    observed: false,
-    observed_at: null,
-    method: null,
-    path: null,
-    operation: null,
-    status: null,
-    duration_ms: null,
-    attempt: null,
-    rate_limit_limit: null,
-    rate_limit_remaining: null,
-    retry_after_seconds: null,
-    low_remaining_threshold: null,
-  };
+  _latest_rate_limit_status = buildEmptyRateLimitStatus();
+  _podio_rate_limit_status_runtime.state = _latest_rate_limit_status;
+  _podio_rate_limit_status_runtime.loaded = true;
   _last_low_rate_limit_warning_threshold = null;
 }
 
 export function getLatestPodioRateLimitStatus() {
   return { ..._latest_rate_limit_status };
+}
+
+function normalizeRateLimitStatus(value = null) {
+  if (!value || typeof value !== "object") {
+    return buildEmptyRateLimitStatus();
+  }
+
+  return {
+    ...buildEmptyRateLimitStatus(),
+    ...value,
+    observed: Boolean(value?.observed),
+    observed_at: clean(value?.observed_at) || null,
+    method: clean(value?.method).toUpperCase() || null,
+    path: clean(value?.path) || null,
+    operation: clean(value?.operation) || null,
+    status: toHeaderNumber(value?.status),
+    duration_ms: toHeaderNumber(value?.duration_ms),
+    attempt: toHeaderNumber(value?.attempt),
+    rate_limit_limit: toHeaderNumber(value?.rate_limit_limit),
+    rate_limit_remaining: toHeaderNumber(value?.rate_limit_remaining),
+    retry_after_seconds: normalizePositiveInteger(value?.retry_after_seconds, null),
+    low_remaining_threshold: toHeaderNumber(value?.low_remaining_threshold),
+  };
+}
+
+async function persistLatestRateLimitStatus(observation) {
+  const file_path = PODIO_RATE_LIMIT_STATUS_FILE;
+  const directory = path.dirname(file_path);
+  await fs.mkdir(directory, { recursive: true }).catch(() => {});
+  await fs.writeFile(
+    file_path,
+    JSON.stringify(normalizeRateLimitStatus(observation), null, 2),
+    "utf8"
+  );
+}
+
+async function loadLatestRateLimitStatus(force_reload = false) {
+  if (_podio_rate_limit_status_runtime.loaded && !force_reload) {
+    return normalizeRateLimitStatus(_podio_rate_limit_status_runtime.state);
+  }
+
+  if (_podio_rate_limit_status_runtime.read_promise && !force_reload) {
+    return _podio_rate_limit_status_runtime.read_promise;
+  }
+
+  const read_promise = fs
+    .readFile(PODIO_RATE_LIMIT_STATUS_FILE, "utf8")
+    .then((raw) => {
+      try {
+        return normalizeRateLimitStatus(JSON.parse(raw));
+      } catch {
+        return buildEmptyRateLimitStatus();
+      }
+    })
+    .catch((error) => {
+      if (error?.code !== "ENOENT") {
+        logger.warn("podio.rate_limit_status_read_failed", {
+          message: error?.message || null,
+          file_path: PODIO_RATE_LIMIT_STATUS_FILE,
+        });
+      }
+      return buildEmptyRateLimitStatus();
+    })
+    .finally(() => {
+      _podio_rate_limit_status_runtime.read_promise = null;
+    });
+
+  _podio_rate_limit_status_runtime.read_promise = read_promise;
+  const state = await read_promise;
+  _podio_rate_limit_status_runtime.state = state;
+  _podio_rate_limit_status_runtime.loaded = true;
+  return state;
+}
+
+function observationIsFresh(observation, max_age_ms = 5 * 60_000) {
+  const observed_at_ts = toTimestamp(observation?.observed_at);
+  if (!observed_at_ts) return false;
+  return Date.now() - observed_at_ts <= Math.max(Number(max_age_ms) || 0, 1);
+}
+
+export async function getPodioRateLimitPressureState({
+  min_remaining = 100,
+  max_age_ms = 5 * 60_000,
+  force_reload = false,
+} = {}) {
+  const cooldown = await getPodioRateLimitCooldown({ force_reload });
+  if (cooldown.active) {
+    return {
+      active: true,
+      reason: "podio_rate_limit_cooldown_active",
+      observation: null,
+      cooldown,
+      min_remaining,
+      max_age_ms,
+    };
+  }
+
+  const observation = force_reload
+    ? await loadLatestRateLimitStatus(true)
+    : normalizeRateLimitStatus(
+        _latest_rate_limit_status?.observed
+          ? _latest_rate_limit_status
+          : await loadLatestRateLimitStatus(false)
+      );
+
+  if (!observation.observed || !observationIsFresh(observation, max_age_ms)) {
+    return {
+      active: false,
+      reason: null,
+      observation,
+      cooldown,
+      min_remaining,
+      max_age_ms,
+    };
+  }
+
+  if (normalizePositiveInteger(observation.retry_after_seconds, null)) {
+    return {
+      active: true,
+      reason: "podio_rate_limit_retry_after_observed",
+      observation,
+      cooldown,
+      min_remaining,
+      max_age_ms,
+    };
+  }
+
+  if (
+    Number.isFinite(Number(observation.rate_limit_remaining)) &&
+    Number(observation.rate_limit_remaining) <= Math.max(Number(min_remaining) || 0, 0)
+  ) {
+    return {
+      active: true,
+      reason: "podio_rate_limit_low_remaining",
+      observation,
+      cooldown,
+      min_remaining,
+      max_age_ms,
+    };
+  }
+
+  return {
+    active: false,
+    reason: null,
+    observation,
+    cooldown,
+    min_remaining,
+    max_age_ms,
+  };
+}
+
+export async function buildPodioBackpressureSkipResult(
+  base = {},
+  {
+    min_remaining = 100,
+    max_age_ms = 5 * 60_000,
+    force_reload = false,
+  } = {}
+) {
+  const pressure = await getPodioRateLimitPressureState({
+    min_remaining,
+    max_age_ms,
+    force_reload,
+  });
+
+  if (!pressure.active) return null;
+
+  if (pressure.reason === "podio_rate_limit_cooldown_active") {
+    return buildPodioCooldownSkipResult(base);
+  }
+
+  return {
+    ok: true,
+    skipped: true,
+    reason: pressure.reason,
+    retry_after_seconds:
+      pressure.observation?.retry_after_seconds ??
+      pressure.cooldown?.retry_after_seconds_remaining ??
+      pressure.cooldown?.retry_after_seconds ??
+      null,
+    retry_after_at: pressure.cooldown?.cooldown_until || null,
+    podio_backpressure: {
+      active: true,
+      reason: pressure.reason,
+      min_remaining,
+      max_age_ms,
+      observation: pressure.observation,
+    },
+    ...base,
+  };
 }
 
 function cleanRetryMessage(value) {
@@ -852,6 +1049,20 @@ export function recordPodioRateLimitObservation({
 
   if (observation.observed) {
     _latest_rate_limit_status = observation;
+    _podio_rate_limit_status_runtime.state = observation;
+    _podio_rate_limit_status_runtime.loaded = true;
+
+    if (
+      observation.retry_after_seconds !== null ||
+      observation.low_remaining_threshold !== null
+    ) {
+      void persistLatestRateLimitStatus(observation).catch((error) => {
+        logger.warn("podio.rate_limit_status_write_failed", {
+          message: error?.message || null,
+          file_path: PODIO_RATE_LIMIT_STATUS_FILE,
+        });
+      });
+    }
   }
 
   if (
@@ -1446,10 +1657,12 @@ export default {
   PodioError,
   invalidateToken,
   getLatestPodioRateLimitStatus,
+  getPodioRateLimitPressureState,
   getPodioRetryAfterSeconds,
   isPodioRateLimitError,
   isRetryablePodioRequestError,
   podioRequest,
+  buildPodioBackpressureSkipResult,
   recordPodioRateLimitObservation,
   resetPodioRateLimitObservability,
   getItem,

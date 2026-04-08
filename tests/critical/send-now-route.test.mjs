@@ -107,7 +107,7 @@ test("send-now GET keeps missing touch_number null and accepts rendered_message_
   assert.equal(queued_payload.rendered_message_text, "Manual reply");
 });
 
-test("send-now route logs real error detail and returns a safe message", async () => {
+test("send-now route returns a structured queue-build failure instead of a blind 500", async () => {
   const { entries, logger } = makeLogger();
 
   const response = await handleSendNowRequestData(
@@ -130,16 +130,49 @@ test("send-now route logs real error detail and returns a safe message", async (
     }
   );
 
-  assert.equal(response.status, 500);
+  assert.equal(response.status, 400);
   const payload = response.payload;
   assert.equal(payload.ok, false);
-  assert.equal(payload.error, "outbound_send_now_failed");
-  assert.equal(payload.message, "queue_override_failed");
+  assert.equal(payload.result.queued.stage, "queue_build");
+  assert.equal(payload.result.queued.reason, "queue_build_failed");
+  assert.equal(payload.result.queued.message, "queue_override_failed");
 
-  const error_entry = entries.find((entry) => entry.event === "outbound_send_now.failed");
-  assert.ok(error_entry, "expected error log entry");
-  assert.equal(error_entry.meta.phone, "12087034955");
-  assert.equal(error_entry.meta.message_override_present, true);
-  assert.equal(error_entry.meta.error.message, "queue_override_failed");
-  assert.match(error_entry.meta.error.stack || "", /queue_override_failed/);
+  const completed_entry = entries.find((entry) => entry.event === "outbound_send_now.completed");
+  assert.ok(completed_entry, "expected completion log entry");
+  assert.equal(completed_entry.meta.phone, "12087034955");
+  assert.equal(completed_entry.meta.message_override_present, true);
+  assert.equal(completed_entry.meta.queued_stage, "queue_build");
+  assert.equal(completed_entry.meta.queued_reason, "queue_build_failed");
+});
+
+test("send-now route returns a structured queue-processing failure when immediate send crashes", async () => {
+  const response = await handleSendNowRequestData(
+    new Request("http://localhost/api/internal/outbound/send-now", {
+      method: "POST",
+      body: JSON.stringify({
+        phone: "12087034955",
+        message_text: "Manual reply",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    }),
+    "POST",
+    {
+      logger: makeLogger().logger,
+      queueOutboundMessageImpl: async () => ({
+        ok: true,
+        queue_item_id: 7003,
+      }),
+      processSendQueueImpl: async () => {
+        throw new Error("send_stage_failed");
+      },
+    }
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(response.payload.ok, false);
+  assert.equal(response.payload.result.processed.stage, "queue_processing");
+  assert.equal(response.payload.result.processed.reason, "queue_processing_failed");
+  assert.equal(response.payload.result.processed.message, "send_stage_failed");
 });

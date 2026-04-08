@@ -1,6 +1,7 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 
 import {
+  buildPodioBackpressureSkipResult,
   buildPodioCooldownSkipResult,
   fetchAllItems,
   getCategoryValue,
@@ -266,6 +267,8 @@ export async function runQueueReconcileRunner({
     deps.recoverQueueItemFromEvidence || recoverQueueItemFromEvidence;
   const build_cooldown_skip_result =
     deps.buildPodioCooldownSkipResult || buildPodioCooldownSkipResult;
+  const build_backpressure_skip_result =
+    deps.buildPodioBackpressureSkipResult || buildPodioBackpressureSkipResult;
 
   const cooldown_skip = await build_cooldown_skip_result({
     now,
@@ -305,6 +308,56 @@ export async function runQueueReconcileRunner({
     });
 
     return cooldown_skip;
+  }
+
+  const backpressure_skip = await build_backpressure_skip_result(
+    {
+      now,
+      stale_after_minutes,
+      scanned_count: 0,
+      processed_count: 0,
+      recovered_delivered_count: 0,
+      recovered_failed_count: 0,
+      recovered_sent_count: 0,
+      manual_review_count: 0,
+      skipped_count: 0,
+      results: [],
+      master_owner_id: scoped_master_owner_id,
+      provider_verification_available: Boolean(
+        provider_capabilities?.message_status_lookup?.supported
+      ),
+      provider_verification_reason:
+        provider_capabilities?.message_status_lookup?.reason ||
+        "provider_verification_unavailable",
+    },
+    {
+      min_remaining: 100,
+      max_age_ms: 10 * 60_000,
+    }
+  );
+
+  if (backpressure_skip?.podio_backpressure?.active) {
+    warn("queue.reconcile_skipped_podio_backpressure", {
+      now,
+      stale_after_minutes,
+      limit,
+      master_owner_id: scoped_master_owner_id,
+      reason: backpressure_skip.reason,
+      min_remaining:
+        backpressure_skip.podio_backpressure?.min_remaining ?? null,
+      rate_limit_remaining:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_remaining ??
+        null,
+      rate_limit_limit:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_limit ??
+        null,
+      podio_path:
+        backpressure_skip.podio_backpressure?.observation?.path ?? null,
+      podio_operation:
+        backpressure_skip.podio_backpressure?.observation?.operation ?? null,
+    });
+
+    return backpressure_skip;
   }
 
   return with_run_lock({

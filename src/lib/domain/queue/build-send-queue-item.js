@@ -831,6 +831,8 @@ export async function buildSendQueueItem({
       template_reference.selected_template_variant_group ?? null,
     selected_template_language: template_reference.selected_template_language ?? null,
     selected_template_tone: template_reference.selected_template_tone ?? null,
+    selected_template_selection_diagnostics:
+      template_reference.selected_template_selection_diagnostics ?? null,
     selected_template_resolution_source:
       template_reference.selected_template_resolution_source ?? null,
     selected_template_fallback_reason:

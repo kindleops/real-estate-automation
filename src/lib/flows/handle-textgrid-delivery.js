@@ -401,7 +401,7 @@ async function resolveBrainForRefs({
 }
 
 async function updatePhoneComplianceFromDelivery(event_item, failure_bucket) {
-  if (failure_bucket !== "DNC") return null;
+  if (!["DNC", "Hard Bounce"].includes(failure_bucket)) return null;
 
   const phone_item_id = runtimeDeps.getFirstAppReferenceId(
     event_item,
@@ -418,7 +418,14 @@ async function updatePhoneComplianceFromDelivery(event_item, failure_bucket) {
   };
 
   await runtimeDeps.updatePhoneNumberItem(phone_item_id, payload);
-  return { phone_item_id, payload };
+  return {
+    phone_item_id,
+    payload,
+    suppression_reason:
+      failure_bucket === "Hard Bounce"
+        ? "carrier_destination_unreachable"
+        : "carrier_opt_out",
+  };
 }
 
 function deriveFailureBucket(extracted, normalized_state) {

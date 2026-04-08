@@ -111,3 +111,47 @@ test("retry runner skips safely when Podio cooldown is active", async () => {
   assert.equal(result.retry_after_seconds, 3600);
   assert.equal(with_run_lock_called, false);
 });
+
+test("retry runner skips safely when Podio backpressure is active", async () => {
+  let with_run_lock_called = false;
+
+  const result = await runRetryRunner(
+    {
+      limit: 10,
+      master_owner_id: 201,
+    },
+    {
+      buildPodioBackpressureSkipResult: async () => ({
+        ok: true,
+        skipped: true,
+        reason: "podio_rate_limit_low_remaining",
+        podio_backpressure: {
+          active: true,
+          min_remaining: 100,
+          observation: {
+            path: "/item/app/30541680/filter/",
+            operation: "filter_items",
+            rate_limit_remaining: 37,
+            rate_limit_limit: 1000,
+          },
+        },
+        processed_count: 0,
+        retried_count: 0,
+        scheduled_count: 0,
+        terminal_count: 0,
+        skipped_count: 0,
+        scanned_count: 0,
+        results: [],
+      }),
+      withRunLock: async () => {
+        with_run_lock_called = true;
+        throw new Error("withRunLock should not run during Podio backpressure");
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "podio_rate_limit_low_remaining");
+  assert.equal(with_run_lock_called, false);
+});

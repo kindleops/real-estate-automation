@@ -84,6 +84,7 @@ function clean(value) {
 }
 
 const TEMPLATE_BATCH_CACHE = new Map();
+const TEMPLATE_BATCH_CACHE_TTL_MS = 2 * 60_000;
 
 function normalizeCategoryText(value) {
   return clean(value)
@@ -606,15 +607,25 @@ export async function fetchTemplatesCached(
   {
     fetcher = fetchTemplates,
     cache = TEMPLATE_BATCH_CACHE,
+    cache_ttl_ms = TEMPLATE_BATCH_CACHE_TTL_MS,
   } = {}
 ) {
   const cache_key = stableTemplateBatchCacheKey(filter_set);
-  if (cache.has(cache_key)) {
-    return cache.get(cache_key);
+  const cached = cache.get(cache_key);
+
+  if (
+    cached &&
+    Number.isFinite(Number(cached.expires_at)) &&
+    Number(cached.expires_at) > Date.now()
+  ) {
+    return cached.value;
   }
 
   const batch = await fetcher(filter_set);
-  cache.set(cache_key, batch);
+  cache.set(cache_key, {
+    value: batch,
+    expires_at: Date.now() + Math.max(Number(cache_ttl_ms) || 0, 0),
+  });
   return batch;
 }
 

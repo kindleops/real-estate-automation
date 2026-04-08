@@ -45,11 +45,12 @@ test("normalizeTextgridDeliveryPayload maps Twilio-style sent payload fields", (
 
 test("normalizeTextgridDeliveryPayload accepts lowercase and underscored provider keys", () => {
   const normalized = normalizeTextgridDeliveryPayload({
-    smssid: "SM-lower-1",
+    sms_sid: "SM-lower-1",
     message_status: "delivered",
     from_number: "+12085550111",
     to_number: "+12085550222",
-    account_id: "AC-lower",
+    account_sid: "AC-lower",
+    num_segments: "2",
   });
 
   assert.equal(normalized.message_id, "SM-lower-1");
@@ -57,6 +58,7 @@ test("normalizeTextgridDeliveryPayload accepts lowercase and underscored provide
   assert.equal(normalized.from, "+12085550111");
   assert.equal(normalized.to, "+12085550222");
   assert.equal(normalized.account_id, "AC-lower");
+  assert.equal(normalized.segments, "2");
 });
 
 test("handleTextgridDeliveryRequest accepts form-encoded TextGrid delivered callbacks and returns 200", async () => {
@@ -146,4 +148,46 @@ test("handleTextgridDeliveryRequest accepts form-encoded TextGrid sent callbacks
   assert.equal(handled_payload.status, "sent");
   assert.equal(handled_payload.from, "+12085550111");
   assert.equal(handled_payload.to, "+12085550222");
+});
+
+test("handleTextgridDeliveryRequest reparses raw provider payloads even when content-type is text/plain", async () => {
+  const { entries, logger } = makeLogger();
+  let handled_payload = null;
+
+  const response = await handleTextgridDeliveryRequest(
+    new Request("http://localhost/api/webhooks/textgrid/delivery", {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+      },
+      body:
+        "SmsSid=SM-raw-1&SmsStatus=sent&From=%2B12085550111&To=%2B12085550222&ApiVersion=2010-04-01",
+    }),
+    {
+      logger,
+      verifyTextgridWebhookSignatureImpl: () => ({
+        ok: true,
+        verified: false,
+        required: false,
+        reason: "webhook_secret_not_configured",
+      }),
+      handleTextgridDeliveryImpl: async (payload) => {
+        handled_payload = payload;
+        return {
+          ok: true,
+          normalized_state: "Sent",
+        };
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.ok, true);
+  assert.equal(handled_payload.message_id, "SM-raw-1");
+  assert.equal(handled_payload.status, "sent");
+  assert.equal(handled_payload.api_version, "2010-04-01");
+  assert.equal(
+    entries.some((entry) => entry.event === "textgrid_delivery.invalid_payload"),
+    false
+  );
 });

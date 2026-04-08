@@ -640,6 +640,74 @@ test("delivery webhook normalizes raw TextGrid delivered callbacks and confirms 
   assert.equal(queueUpdates[0].payload["queue-status"], "Sent");
 });
 
+test("delivery webhook suppresses future outreach on hard-bounce destination failures", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const phoneUpdates = [];
+
+  const outboundEvent = createPodioItem(823, {
+    "trigger-name": textField("queue-send:123"),
+    "message-id": textField("provider-failed-1"),
+    "ai-output": textField(
+      JSON.stringify({
+        queue_item_id: 123,
+        client_reference_id: "queue-123",
+        provider_message_id: "provider-failed-1",
+      })
+    ),
+    "master-owner": appRefField(201),
+    "linked-seller": appRefField(301),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  const queueItem = createPodioItem(123, {
+    "master-owner": appRefField(201),
+    "prospects": appRefField(301),
+    "properties": appRefField(601),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  __setTextgridDeliveryTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    info: () => {},
+    warn: () => {},
+    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
+    fetchAllItems: async () => [],
+    updateItem: async () => {},
+    logDeliveryEvent: async () => {},
+    updateMessageEventStatus: async () => {},
+    findLatestBrainByProspectId: async () => null,
+    findLatestBrainByMasterOwnerId: async () => null,
+    updatePhoneNumberItem: async (item_id, payload) => {
+      phoneUpdates.push({ item_id, payload });
+    },
+    updateBrainAfterDelivery: async () => null,
+    mapTextgridFailureBucket: () => "Hard Bounce",
+  });
+
+  const result = await handleTextgridDeliveryWebhook({
+    MessageSid: "provider-failed-1",
+    MessageStatus: "undelivered",
+    ErrorCode: "30003",
+    ErrorMessage: "Destination unreachable",
+    From: "+15550000002",
+    To: "+15550000001",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.normalized_state, "Failed");
+  assert.equal(phoneUpdates.length, 1);
+  assert.equal(phoneUpdates[0].item_id, 401);
+  assert.equal(phoneUpdates[0].payload["do-not-call"], "TRUE");
+  assert.equal(phoneUpdates[0].payload["dnc-source"], "Carrier Flag");
+  assert.ok(phoneUpdates[0].payload["opt-out-date"]?.start);
+});
+
 test("DocuSign webhook ignores replay after first contract mutation", async () => {
   const ledger = createInMemoryIdempotencyLedger();
   let contractUpdateCount = 0;

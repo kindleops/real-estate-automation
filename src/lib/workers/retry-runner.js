@@ -3,6 +3,7 @@ import { retrySendQueue } from "@/lib/domain/queue/retry-send-queue.js";
 import { recordSystemAlert, resolveSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
 import {
+  buildPodioBackpressureSkipResult,
   buildPodioCooldownSkipResult,
   isPodioRateLimitError,
 } from "@/lib/providers/podio.js";
@@ -21,6 +22,8 @@ export async function runRetryRunner({
   const retry_send_queue = deps.retrySendQueue || retrySendQueue;
   const build_cooldown_skip_result =
     deps.buildPodioCooldownSkipResult || buildPodioCooldownSkipResult;
+  const build_backpressure_skip_result =
+    deps.buildPodioBackpressureSkipResult || buildPodioBackpressureSkipResult;
 
   const cooldown_skip = await build_cooldown_skip_result({
     processed_count: 0,
@@ -49,6 +52,45 @@ export async function runRetryRunner({
     });
 
     return cooldown_skip;
+  }
+
+  const backpressure_skip = await build_backpressure_skip_result(
+    {
+      processed_count: 0,
+      retried_count: 0,
+      scheduled_count: 0,
+      terminal_count: 0,
+      skipped_count: 0,
+      scanned_count: 0,
+      results: [],
+      master_owner_id: scoped_master_owner_id,
+    },
+    {
+      min_remaining: 100,
+      max_age_ms: 10 * 60_000,
+    }
+  );
+
+  if (backpressure_skip?.podio_backpressure?.active) {
+    warn("queue.retry_runner_skipped_podio_backpressure", {
+      limit,
+      master_owner_id: scoped_master_owner_id,
+      reason: backpressure_skip.reason,
+      min_remaining:
+        backpressure_skip.podio_backpressure?.min_remaining ?? null,
+      rate_limit_remaining:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_remaining ??
+        null,
+      rate_limit_limit:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_limit ??
+        null,
+      podio_path:
+        backpressure_skip.podio_backpressure?.observation?.path ?? null,
+      podio_operation:
+        backpressure_skip.podio_backpressure?.observation?.operation ?? null,
+    });
+
+    return backpressure_skip;
   }
 
   return with_run_lock({

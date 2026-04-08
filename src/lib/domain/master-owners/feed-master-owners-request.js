@@ -1,6 +1,7 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 import { child } from "@/lib/logging/logger.js";
 import {
+  buildPodioBackpressureSkipResult,
   buildPodioCooldownSkipResult,
   filterAppItems,
   getDateValue,
@@ -330,6 +331,7 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
     resolveSystemAlertImpl = defaultResolveSystemAlert,
     inspectQueueBufferImpl = defaultInspectQueueBuffer,
     buildPodioCooldownSkipResultImpl = buildPodioCooldownSkipResult,
+    buildPodioBackpressureSkipResultImpl = buildPodioBackpressureSkipResult,
     logger: route_logger = logger,
   } = deps;
   const rollout = getRolloutControlsImpl();
@@ -439,6 +441,47 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
     });
 
     return cooldown_skip;
+  }
+
+  const backpressure_skip = await buildPodioBackpressureSkipResultImpl(
+    {
+      dry_run: effective_dry_run,
+      scanned_count: 0,
+      raw_items_pulled: 0,
+      eligible_owner_count: 0,
+      queued_count: 0,
+      skipped_count: 0,
+      skip_reason_counts: [],
+      template_resolution_diagnostics: null,
+      results: [],
+    },
+    {
+      min_remaining: 150,
+      max_age_ms: 10 * 60_000,
+    }
+  );
+
+  if (backpressure_skip?.podio_backpressure?.active) {
+    route_logger.warn("master_owner_feeder.skipped_podio_backpressure", {
+      ...scope_log_meta,
+      reason: backpressure_skip.reason,
+      min_remaining:
+        backpressure_skip.podio_backpressure?.min_remaining ?? null,
+      rate_limit_remaining:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_remaining ??
+        null,
+      rate_limit_limit:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_limit ??
+        null,
+      podio_path:
+        backpressure_skip.podio_backpressure?.observation?.path ?? null,
+      podio_operation:
+        backpressure_skip.podio_backpressure?.observation?.operation ?? null,
+      observed_at:
+        backpressure_skip.podio_backpressure?.observation?.observed_at ?? null,
+    });
+
+    return backpressure_skip;
   }
 
   let queue_inventory = {

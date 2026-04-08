@@ -708,7 +708,11 @@ export async function queueOutboundMessage({
     selected_template_source: selected_template?.source || null,
     selected_template_resolution_source: selected_template?.template_resolution_source || null,
     selected_template_fallback_reason: selected_template?.template_fallback_reason || null,
-    is_local_fallback: selected_template?.source === "local_fallback" || Boolean(selected_template?.template_fallback_reason),
+    selected_template_selection_diagnostics:
+      selected_template?.template_selection_diagnostics || null,
+    is_local_fallback:
+      selected_template?.source === "local_registry" ||
+      Boolean(selected_template?.template_fallback_reason),
     resolved_use_case,
     resolved_variant_group,
     resolved_language,
@@ -765,9 +769,15 @@ export async function queueOutboundMessage({
     template_fallback_reason:
       selected_template?.template_fallback_reason || null,
     template_title: selected_template?.title || null,
+    template_selection_diagnostics:
+      selected_template?.template_selection_diagnostics || null,
     template_relation_id: queue_result?.template_relation_id ?? null,
     template_app_field_written: queue_result?.template_app_field_written ?? false,
     template_attached: queue_result?.template_attached ?? false,
+    template_attachment_strategy:
+      queue_result?.template_attachment_strategy ?? null,
+    template_attachment_reason:
+      queue_result?.template_attachment_reason ?? null,
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     use_case: resolved_use_case,
     stage: route?.stage || null,
@@ -790,9 +800,15 @@ export async function queueOutboundMessage({
     selected_template_fallback_reason:
       selected_template?.template_fallback_reason || null,
     selected_template_title: selected_template?.title || null,
+    selected_template_selection_diagnostics:
+      selected_template?.template_selection_diagnostics || null,
     template_relation_id: queue_result?.template_relation_id ?? null,
     template_app_field_written: queue_result?.template_app_field_written ?? false,
     template_attached: queue_result?.template_attached ?? false,
+    template_attachment_strategy:
+      queue_result?.template_attachment_strategy ?? null,
+    template_attachment_reason:
+      queue_result?.template_attachment_reason ?? null,
     message_override_used: Boolean(message_override),
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     rendered_message_text: final_message_text,

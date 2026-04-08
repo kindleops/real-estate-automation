@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   activatePodioRateLimitCooldown,
+  buildPodioBackpressureSkipResult,
   clearPodioRateLimitCooldown,
   getPodioRetryAfterSeconds,
+  getPodioRateLimitPressureState,
   getPodioRateLimitCooldown,
   getLatestPodioRateLimitStatus,
   isPodioRateLimitError,
@@ -196,6 +198,80 @@ test("template batch cache reuses identical filter fetches", async () => {
   assert.equal(first, second);
 
   clearTemplateBatchCache();
+});
+
+test("template batch cache expires so Podio template changes can replace stale runtime matches", async () => {
+  clearTemplateBatchCache();
+
+  let calls = 0;
+  const fetcher = async () => {
+    calls += 1;
+    return [{ item_id: calls }];
+  };
+
+  const first = await fetchTemplatesCached(
+    {
+      language: "English",
+      "use-case": "ownership_check",
+    },
+    { fetcher, cache_ttl_ms: 5 }
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const second = await fetchTemplatesCached(
+    {
+      "use-case": "ownership_check",
+      language: "English",
+    },
+    { fetcher, cache_ttl_ms: 5 }
+  );
+
+  assert.equal(calls, 2);
+  assert.notEqual(first, second);
+
+  clearTemplateBatchCache();
+});
+
+test("Podio backpressure helper activates for low remaining budget without requiring a hard cooldown", async () => {
+  resetPodioRateLimitObservability();
+  await clearPodioRateLimitCooldown({ suppress_log: true });
+
+  recordPodioRateLimitObservation({
+    method: "post",
+    path: "/item/app/30541680/filter/",
+    status: 200,
+    duration_ms: 180,
+    attempt: 1,
+    headers: {
+      "x-rate-limit-limit": "1000",
+      "x-rate-limit-remaining": "42",
+    },
+  });
+
+  const pressure = await getPodioRateLimitPressureState({
+    min_remaining: 50,
+    max_age_ms: 60_000,
+  });
+  const skip = await buildPodioBackpressureSkipResult(
+    {
+      scanned_count: 0,
+    },
+    {
+      min_remaining: 50,
+      max_age_ms: 60_000,
+    }
+  );
+
+  assert.equal(pressure.active, true);
+  assert.equal(pressure.reason, "podio_rate_limit_low_remaining");
+  assert.equal(pressure.observation?.rate_limit_remaining, 42);
+  assert.equal(skip?.ok, true);
+  assert.equal(skip?.skipped, true);
+  assert.equal(skip?.reason, "podio_rate_limit_low_remaining");
+  assert.equal(skip?.podio_backpressure?.observation?.path, "/item/app/30541680/filter/");
+
+  resetPodioRateLimitObservability();
 });
 
 test("template loader falls back to generic same-use-case templates when category matching fails", async () => {

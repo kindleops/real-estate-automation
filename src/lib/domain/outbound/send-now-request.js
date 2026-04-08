@@ -60,13 +60,27 @@ export async function buildAndSendNow(
     queueOutboundMessageImpl = queueOutboundMessage,
     processSendQueueImpl = processSendQueue,
   } = deps;
-  const queued = await queueOutboundMessageImpl({
-    phone,
-    use_case,
-    language,
-    touch_number,
-    rendered_message_text,
-  });
+  let queued;
+
+  try {
+    queued = await queueOutboundMessageImpl({
+      phone,
+      use_case,
+      language,
+      touch_number,
+      rendered_message_text,
+    });
+  } catch (error) {
+    return {
+      queued: {
+        ok: false,
+        stage: "queue_build",
+        reason: "queue_build_failed",
+        message: error?.message || "queue_build_failed",
+      },
+      processed: null,
+    };
+  }
 
   const queue_item_id =
     queued?.queue_item_id ||
@@ -92,9 +106,22 @@ export async function buildAndSendNow(
     };
   }
 
-  const processed = await processSendQueueImpl({
-    queue_item_id,
-  });
+  let processed;
+
+  try {
+    processed = await processSendQueueImpl({
+      queue_item_id,
+    });
+  } catch (error) {
+    processed = {
+      ok: false,
+      sent: false,
+      stage: "queue_processing",
+      reason: "queue_processing_failed",
+      message: error?.message || "queue_processing_failed",
+      queue_item_id,
+    };
+  }
 
   return {
     queued,
@@ -151,6 +178,19 @@ export async function handleSendNowRequestData(request, method = "GET", deps = {
     const result = await buildAndSendNow(normalized_input, {
       queueOutboundMessageImpl,
       processSendQueueImpl,
+    });
+
+    logger?.info?.("outbound_send_now.completed", {
+      ...request_meta,
+      ok: result?.queued?.ok === true && result?.processed?.ok === true,
+      queued_stage: result?.queued?.stage || null,
+      queued_reason: result?.queued?.reason || null,
+      processed_stage: result?.processed?.stage || null,
+      processed_reason: result?.processed?.reason || null,
+      queue_item_id:
+        result?.queued?.queue_item_id ||
+        result?.processed?.queue_item_id ||
+        null,
     });
 
     return {

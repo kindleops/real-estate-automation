@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import {
+  buildPodioBackpressureSkipResult,
   buildPodioCooldownSkipResult,
   isPodioRateLimitError,
   serializePodioError,
@@ -106,6 +107,50 @@ async function runAutopilotWithRollout({
     });
 
     return cooldown_skip;
+  }
+
+  const backpressure_skip = await buildPodioBackpressureSkipResult(
+    {
+      dry_run: effective_dry_run,
+      contract_item_id: effective_contract_item_id,
+      scan_limit: effective_scan_limit,
+      rollout: {
+        requested_dry_run: Boolean(dry_run),
+        effective_dry_run,
+        rollout_reason: dry_run_resolution.reason,
+        requested_scan_limit: scan_limit,
+        effective_scan_limit,
+        requested_contract_item_id: contract_item_id,
+        effective_contract_item_id,
+      },
+    },
+    {
+      min_remaining: 100,
+      max_age_ms: 10 * 60_000,
+    }
+  );
+
+  if (backpressure_skip?.podio_backpressure?.active) {
+    logger.warn("autopilot_run.skipped_podio_backpressure", {
+      scan_limit: effective_scan_limit,
+      dry_run: effective_dry_run,
+      contract_item_id: effective_contract_item_id,
+      reason: backpressure_skip.reason,
+      min_remaining:
+        backpressure_skip.podio_backpressure?.min_remaining ?? null,
+      rate_limit_remaining:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_remaining ??
+        null,
+      rate_limit_limit:
+        backpressure_skip.podio_backpressure?.observation?.rate_limit_limit ??
+        null,
+      podio_path:
+        backpressure_skip.podio_backpressure?.observation?.path ?? null,
+      podio_operation:
+        backpressure_skip.podio_backpressure?.observation?.operation ?? null,
+    });
+
+    return backpressure_skip;
   }
 
   const execute = async () =>

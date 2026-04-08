@@ -159,3 +159,49 @@ test("queue reconcile skips safely when Podio cooldown is active", async () => {
   assert.equal(result.retry_after_seconds, 3600);
   assert.equal(with_run_lock_called, false);
 });
+
+test("queue reconcile skips safely when Podio backpressure is active", async () => {
+  let with_run_lock_called = false;
+
+  const result = await runQueueReconcileRunner(
+    {
+      limit: 10,
+      stale_after_minutes: 20,
+      master_owner_id: 201,
+    },
+    {
+      buildPodioBackpressureSkipResult: async () => ({
+        ok: true,
+        skipped: true,
+        reason: "podio_rate_limit_low_remaining",
+        podio_backpressure: {
+          active: true,
+          min_remaining: 100,
+          observation: {
+            path: "/item/app/30541680/filter/",
+            operation: "filter_items",
+            rate_limit_remaining: 45,
+            rate_limit_limit: 1000,
+          },
+        },
+        scanned_count: 0,
+        processed_count: 0,
+        recovered_delivered_count: 0,
+        recovered_failed_count: 0,
+        recovered_sent_count: 0,
+        manual_review_count: 0,
+        skipped_count: 0,
+        results: [],
+      }),
+      withRunLock: async () => {
+        with_run_lock_called = true;
+        throw new Error("withRunLock should not run during Podio backpressure");
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "podio_rate_limit_low_remaining");
+  assert.equal(with_run_lock_called, false);
+});

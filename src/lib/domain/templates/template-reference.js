@@ -102,6 +102,8 @@ export function getTemplateSelectionDetails({
     selected_template_variant_group: clean(template_item?.variant_group) || null,
     selected_template_language: clean(template_item?.language) || null,
     selected_template_tone: clean(template_item?.tone) || null,
+    selected_template_selection_diagnostics:
+      template_item?.template_selection_diagnostics || null,
     selected_template_resolution_source:
       clean(template_item?.template_resolution_source) ||
       (selected_template_source === "podio"
