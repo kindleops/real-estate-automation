@@ -37,6 +37,7 @@ export async function logInboundMessageEvent({
   message_body = "",
   provider_message_id = null,
   raw_carrier_status = "received",
+  received_at = null,
   processed_by = "Inbound Webhook",
   source_app = "TextGrid",
   trigger_name = "textgrid-inbound",
@@ -47,7 +48,7 @@ export async function logInboundMessageEvent({
   const fields = {
     [EVENT_FIELDS.message_id]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Inbound",
-    [EVENT_FIELDS.timestamp]: { start: nowIso() },
+    [EVENT_FIELDS.timestamp]: { start: received_at || nowIso() },
     [EVENT_FIELDS.message]: normalized_message,
     [EVENT_FIELDS.character_count]: normalized_message.length,
     [EVENT_FIELDS.delivery_status]: "Received",

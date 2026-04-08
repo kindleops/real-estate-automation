@@ -76,9 +76,9 @@ function deriveSignals({
     normalized_property_type.includes("apartment") ||
     normalized_property_type.includes("5+") ||
     normalized_property_type.includes("commercial multifamily") ||
-    normalized_unit_count >= 2 ||
-    hasTag(tags, ["multifamily", "multi-family", "duplex", "triplex", "fourplex", "apartments"]) ||
-    includesAny(normalized_notes, ["duplex", "triplex", "fourplex", "units", "doors", "apartments"]);
+    normalized_unit_count >= 5 ||
+    hasTag(tags, ["multifamily", "multi-family", "apartments", "5+ units"]) ||
+    includesAny(normalized_notes, ["5 unit", "5+ unit", "apartment building", "apartments"]);
 
   const is_distressed =
     hasTag(tags, [

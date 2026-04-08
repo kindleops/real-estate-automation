@@ -4,6 +4,7 @@ import { maybeHandleBuyerTextgridInbound } from "@/lib/domain/buyers/handle-buye
 import { child } from "@/lib/logging/logger.js";
 import { handleTextgridInbound } from "@/lib/flows/handle-textgrid-inbound.js";
 import { verifyTextgridWebhookSignature } from "@/lib/providers/textgrid.js";
+import { normalizeTextgridInboundPayload } from "@/lib/webhooks/textgrid-inbound-normalize.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,63 +36,7 @@ async function parseRequestBody(request) {
   return { raw_text: text };
 }
 
-function normalizeInboundPayload(body = {}, headers) {
-  return {
-    provider: "textgrid",
-    raw: body,
-
-    message_id: clean(
-      body?.message_id ||
-      body?.messageId ||
-      body?.id ||
-      body?.sms_id
-    ),
-
-    from: clean(
-      body?.from ||
-      body?.from_number ||
-      body?.fromNumber ||
-      body?.sender ||
-      body?.phone
-    ),
-
-    to: clean(
-      body?.to ||
-      body?.to_number ||
-      body?.toNumber ||
-      body?.recipient
-    ),
-
-    message: clean(
-      body?.message ||
-      body?.body ||
-      body?.text ||
-      body?.content
-    ),
-
-    direction: clean(body?.direction || "inbound"),
-    received_at: clean(
-      body?.received_at ||
-      body?.timestamp ||
-      body?.created_at
-    ),
-    conversation_id: clean(body?.conversation_id || body?.conversationId),
-    account_id: clean(body?.account_id || body?.accountId),
-    status: clean(body?.status || "received"),
-
-    header_signature: clean(
-      headers.get("x-textgrid-signature") ||
-      headers.get("x-signature") ||
-      ""
-    ),
-    header_event: clean(
-      headers.get("x-textgrid-event") ||
-      headers.get("x-event-type") ||
-      "inbound"
-    ),
-    http_received_at: new Date().toISOString(),
-  };
-}
+export const __normalizeInboundPayloadForTest = normalizeTextgridInboundPayload;
 
 export async function GET() {
   return NextResponse.json({
@@ -105,7 +50,7 @@ export async function POST(request) {
   try {
     const raw_body = await request.clone().text().catch(() => "");
     const body = await parseRequestBody(request);
-    const payload = normalizeInboundPayload(body, request.headers);
+    const payload = normalizeTextgridInboundPayload(body, request.headers);
     const verification = verifyTextgridWebhookSignature({
       raw_body,
       signature: payload.header_signature,

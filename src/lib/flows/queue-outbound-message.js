@@ -5,6 +5,7 @@ import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
+import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import {
   resolveQueueSchedule,
   resolveSchedulingContactWindow,
@@ -451,6 +452,7 @@ export async function queueOutboundMessage({
     null;
 
   let final_message_text = clean(rendered_message_text);
+  let rendered_placeholders = [];
 
   if (!final_message_text) {
     const template_text = selected_template?.text || "";
@@ -498,6 +500,9 @@ export async function queueOutboundMessage({
     }
 
     final_message_text = clean(render_result?.rendered_text || "");
+    rendered_placeholders = Array.isArray(render_result?.used_placeholders)
+      ? render_result.used_placeholders
+      : [];
   }
 
   if (!final_message_text) {
@@ -604,7 +609,9 @@ export async function queueOutboundMessage({
     // matching option in the Send Queue schema (e.g. stale supplement).
     property_type: selected_template?.category_primary ?? resolved_category ?? null,
     secondary_category: resolved_secondary_category,
-    use_case_template: selected_template?.use_case ?? null,
+    use_case_template:
+      normalizeSellerFlowUseCase(selected_template?.use_case || resolved_use_case) || null,
+    personalization_tags_used: rendered_placeholders,
   });
 
   info("outbound.queue_message_completed", {
