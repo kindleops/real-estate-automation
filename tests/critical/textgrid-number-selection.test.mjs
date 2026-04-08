@@ -9,10 +9,17 @@ function createCandidateRecord({
   normalized_phone,
   market_name,
   status = "_ Active",
-  priority = 0,
+  priority = 5,
   daily_limit = 100,
   daily_sent = 0,
+  hourly_limit = 50,
+  hourly_sent = 0,
+  hard_pause = "No",
+  risk_spike_flag = "No",
+  allowed_send_window_start_local = "08:00",
+  allowed_send_window_end_local = "20:00",
   area_code = "",
+  last_used_at = "2026-04-08T00:00:00.000Z",
 }) {
   return {
     item_id,
@@ -23,129 +30,162 @@ function createCandidateRecord({
     priority,
     daily_limit,
     daily_sent,
+    hourly_limit,
+    hourly_sent,
+    hard_pause,
+    risk_spike_flag,
+    allowed_send_window_start_local,
+    allowed_send_window_end_local,
     area_code,
+    last_used_at,
   };
 }
 
-test("market sending profile maps seeded launch markets into a sending zone", () => {
-  const result = resolveMarketSendingProfile("Fayetteville, NC");
+test("market sending profile normalizes aliases before routing", () => {
+  const result = resolveMarketSendingProfile("St. Paul, MN");
 
   assert.equal(result.ok, true);
-  assert.equal(result.sending_zone, "Charlotte, NC");
-  assert.deepEqual(result.allowed_phone_markets, ["Charlotte, NC"]);
+  assert.equal(result.normalized_market, "Minneapolis, MN");
+  assert.equal(result.primary_cluster, "minneapolis_cluster");
 });
 
-test("market sending profile excludes unmapped markets from launch routing", () => {
-  const result = resolveMarketSendingProfile("Boise, ID");
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "market_unmapped_excluded");
-  assert.deepEqual(result.allowed_phone_markets, []);
-});
-
-test("TextGrid number selection uses sending-zone market mapping instead of direct market equality", async () => {
+test("TextGrid number selection uses exact market match first", async () => {
   const selected = await chooseTextgridNumber({
     context: {
-      ids: {
-        phone_item_id: 9001,
-      },
-      summary: {
-        market_name: "Fayetteville, NC",
-        market_area_code: "910",
-        language_preference: "English",
-      },
+      ids: { phone_item_id: 9001 },
+      summary: { market_name: "Dallas, TX", market_area_code: "469" },
     },
-    rotation_key: "seller-zone-test",
     candidate_records: [
       createCandidateRecord({
         item_id: 11,
-        normalized_phone: "+17045550111",
-        market_name: "Charlotte, NC",
-        priority: 7,
-        area_code: "704",
+        normalized_phone: "+14693131600",
+        market_name: "Dallas, TX",
+        priority: 8,
+        area_code: "469",
       }),
       createCandidateRecord({
         item_id: 12,
-        normalized_phone: "+12145550112",
-        market_name: "Dallas, TX",
-        priority: 10,
-        area_code: "214",
+        normalized_phone: "+12818458577",
+        market_name: "Houston, TX",
       }),
     ],
   });
 
   assert.equal(selected.item_id, 11);
-  assert.equal(selected.selection_reason, "primary_allowed_phone_market_match");
-  assert.equal(selected.selection_diagnostics.raw_seller_market, "Fayetteville, NC");
-  assert.equal(selected.selection_diagnostics.resolved_sending_zone, "Charlotte, NC");
-  assert.deepEqual(selected.selection_diagnostics.allowed_phone_markets, ["Charlotte, NC"]);
-  assert.equal(selected.selection_diagnostics.selected_phone_market, "Charlotte, NC");
+  assert.equal(selected.selection_reason, "exact_market_match");
 });
 
-test("TextGrid number selection prefers the best eligible number inside the allowed phone market", async () => {
+test("TextGrid number selection uses alias match when exact market has no number", async () => {
   const selected = await chooseTextgridNumber({
     context: {
-      ids: {
-        phone_item_id: 9002,
-      },
-      summary: {
-        market_name: "Austin, TX",
-        market_area_code: "512",
-        language_preference: "English",
-      },
+      ids: { phone_item_id: 9002 },
+      summary: { market_name: "Fort Worth, TX", market_area_code: "817" },
     },
-    rotation_key: "seller-weighted-test",
     candidate_records: [
       createCandidateRecord({
         item_id: 21,
-        normalized_phone: "+12145550121",
+        normalized_phone: "+14693131600",
         market_name: "Dallas, TX",
-        priority: 1,
-        daily_limit: 100,
-        daily_sent: 95,
-        area_code: "214",
-      }),
-      createCandidateRecord({
-        item_id: 22,
-        normalized_phone: "+14695550122",
-        market_name: "Dallas, TX",
-        priority: 10,
-        daily_limit: 100,
-        daily_sent: 4,
-        area_code: "469",
       }),
     ],
   });
 
-  assert.equal(selected.item_id, 22);
-  assert.equal(selected.selection_diagnostics.resolved_sending_zone, "Dallas, TX");
-  assert.equal(selected.selection_diagnostics.selected_phone_market, "Dallas, TX");
+  assert.equal(selected.item_id, 21);
+  assert.equal(selected.selection_reason, "alias_market_match");
 });
 
-test("TextGrid number selection returns diagnostics when seller market is unmapped", async () => {
+test("TextGrid number selection uses regional fallback cluster when needed", async () => {
   const selected = await chooseTextgridNumber({
     context: {
-      ids: {
-        phone_item_id: 9003,
-      },
-      summary: {
-        market_name: "Boise, ID",
-        language_preference: "English",
-      },
+      ids: { phone_item_id: 9003 },
+      summary: { market_name: "Orlando, FL", market_area_code: "407" },
     },
-    rotation_key: "seller-unmapped-test",
     candidate_records: [
       createCandidateRecord({
         item_id: 31,
-        normalized_phone: "+17045550131",
-        market_name: "Charlotte, NC",
+        normalized_phone: "+19048774448",
+        market_name: "Jacksonville, FL",
+      }),
+      createCandidateRecord({
+        item_id: 32,
+        normalized_phone: "+17866052999",
+        market_name: "Miami, FL",
+      }),
+    ],
+  });
+
+  assert.equal(selected.item_id, 31);
+  assert.equal(selected.selection_reason, "regional_cluster_fallback");
+});
+
+test("TextGrid number selection excludes hard-paused numbers", async () => {
+  const selected = await chooseTextgridNumber({
+    context: {
+      ids: { phone_item_id: 9004 },
+      summary: { market_name: "Houston, TX" },
+    },
+    candidate_records: [
+      createCandidateRecord({
+        item_id: 41,
+        normalized_phone: "+12818458577",
+        market_name: "Houston, TX",
+        hard_pause: "Yes",
+      }),
+      createCandidateRecord({
+        item_id: 42,
+        normalized_phone: "+14693131600",
+        market_name: "Dallas, TX",
+      }),
+    ],
+  });
+
+  assert.equal(selected.item_id, 42);
+  assert.equal(selected.selection_reason, "regional_cluster_fallback");
+});
+
+test("TextGrid number selection excludes numbers outside local send windows", async () => {
+  const selected = await chooseTextgridNumber({
+    context: {
+      ids: { phone_item_id: 9005 },
+      summary: { market_name: "Los Angeles, CA" },
+    },
+    candidate_records: [
+      createCandidateRecord({
+        item_id: 51,
+        normalized_phone: "+13234104544",
+        market_name: "Los Angeles, CA",
+        allowed_send_window_start_local: "23:30",
+        allowed_send_window_end_local: "23:40",
+      }),
+      createCandidateRecord({
+        item_id: 52,
+        normalized_phone: "+13235589881",
+        market_name: "Los Angeles, CA",
+        allowed_send_window_start_local: "00:00",
+        allowed_send_window_end_local: "23:59",
+      }),
+    ],
+  });
+
+  assert.equal(selected.item_id, 52);
+  assert.equal(selected.selection_reason, "exact_market_match");
+});
+
+test("TextGrid number selection safely returns routing_unmapped when unresolved", async () => {
+  const selected = await chooseTextgridNumber({
+    context: {
+      ids: { phone_item_id: 9006 },
+      summary: { market_name: "Unmapped" },
+    },
+    candidate_records: [
+      createCandidateRecord({
+        item_id: 61,
+        normalized_phone: "+14693131600",
+        market_name: "Dallas, TX",
       }),
     ],
   });
 
   assert.equal(selected.item_id, null);
-  assert.equal(selected.selection_reason, "market_unmapped_excluded");
-  assert.equal(selected.selection_diagnostics.raw_seller_market, "Boise, ID");
-  assert.equal(selected.selection_diagnostics.resolved_sending_zone, null);
-  assert.deepEqual(selected.selection_diagnostics.allowed_phone_markets, []);
+  assert.equal(selected.selection_reason, "routing_unmapped");
 });

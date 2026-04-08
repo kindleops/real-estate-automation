@@ -37,6 +37,8 @@ export function getRolloutControls() {
     ),
     feeder_view_only_id: clean(ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID) || null,
     feeder_view_only_name: clean(ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME) || null,
+    feeder_default_view_id: clean(ENV.FEEDER_SOURCE_VIEW_DEFAULT_ID) || null,
+    feeder_default_view_name: clean(ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME) || null,
     single_master_owner_id:
       normalizePositiveInteger(ENV.ROLLOUT_SINGLE_MASTER_OWNER_ID, null) || null,
     single_contract_id:
@@ -128,11 +130,26 @@ export function resolveFeederViewScope({
   const enforced_view_name = controls.feeder_view_only_name;
 
   if (!enforced_view_id && !enforced_view_name) {
+    const normalized_requested_id = clean(requested_view_id) || null;
+    const normalized_requested_name = clean(requested_view_name) || null;
+    const default_view_id = controls.feeder_default_view_id;
+    const default_view_name = controls.feeder_default_view_name;
+
+    if (!normalized_requested_id && !normalized_requested_name && (default_view_id || default_view_name)) {
+      return {
+        ok: true,
+        enforced: false,
+        source_view_id: default_view_id || null,
+        source_view_name: default_view_name || null,
+        reason: "default_feeder_view_applied",
+      };
+    }
+
     return {
       ok: true,
       enforced: false,
-      source_view_id: clean(requested_view_id) || null,
-      source_view_name: clean(requested_view_name) || null,
+      source_view_id: normalized_requested_id,
+      source_view_name: normalized_requested_name,
       reason: "no_view_scope_configured",
     };
   }
