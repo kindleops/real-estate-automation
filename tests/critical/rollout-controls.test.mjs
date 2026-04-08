@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import ENV from "@/lib/config/env.js";
 import {
+  DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME,
   capBuyerBlastRecipients,
   capQueueBatch,
   resolveFeederViewScope,
@@ -32,7 +33,49 @@ test("scoped ids reject requests outside configured safe scope", () => {
   assert.equal(result.effective_id, 123);
 });
 
-test("feeder view scope honors the configured rollout view in dry-run and live runs", () => {
+test("feeder view scope allows the Tier 1 ALL feeder view", () => {
+  const result = resolveFeederViewScope({
+    requested_view_name: DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.enforced, true);
+  assert.equal(result.safe_scope_passed, true);
+  assert.equal(result.reason, "feeder_view_safe_scope_applied");
+  assert.equal(result.source_view_id, null);
+  assert.equal(result.source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
+});
+
+test("feeder view scope allows Tier 1 file feeder views", () => {
+  const file_one = resolveFeederViewScope({
+    requested_view_name: "SMS / TIER #1 / FILE #1",
+  });
+  const file_nine = resolveFeederViewScope({
+    requested_view_name: "SMS / TIER #1 / FILE #9",
+  });
+
+  assert.equal(file_one.ok, true);
+  assert.equal(file_one.safe_scope_passed, true);
+  assert.equal(file_one.source_view_name, "SMS / TIER #1 / FILE #1");
+
+  assert.equal(file_nine.ok, true);
+  assert.equal(file_nine.safe_scope_passed, true);
+  assert.equal(file_nine.source_view_name, "SMS / TIER #1 / FILE #9");
+});
+
+test("feeder view scope blocks unknown feeder views", () => {
+  const result = resolveFeederViewScope({
+    requested_view_name: "SMS / TIER #2 / ALL",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.safe_scope_passed, false);
+  assert.equal(result.reason, "feeder_view_outside_safe_scope");
+  assert.equal(result.source_view_id, null);
+  assert.equal(result.source_view_name, null);
+});
+
+test("configured rollout feeder views remain allowed when explicitly requested", () => {
   const original = {
     ROLLOUT_FEEDER_VIEW_ONLY_ID: ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID,
     ROLLOUT_FEEDER_VIEW_ONLY_NAME: ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME,
@@ -44,20 +87,14 @@ test("feeder view scope honors the configured rollout view in dry-run and live r
     ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = "123";
     ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = "Launch Sellers";
 
-    const dry_run_result = resolveFeederViewScope();
-    const live_result = resolveFeederViewScope();
+    const result = resolveFeederViewScope({
+      requested_view_name: "Launch Sellers",
+    });
 
-    assert.equal(dry_run_result.ok, true);
-    assert.equal(dry_run_result.enforced, true);
-    assert.equal(dry_run_result.reason, "feeder_view_safe_scope_applied");
-    assert.equal(dry_run_result.source_view_id, "123");
-    assert.equal(dry_run_result.source_view_name, "Launch Sellers");
-
-    assert.equal(live_result.ok, true);
-    assert.equal(live_result.enforced, true);
-    assert.equal(live_result.reason, "feeder_view_safe_scope_applied");
-    assert.equal(live_result.source_view_id, "123");
-    assert.equal(live_result.source_view_name, "Launch Sellers");
+    assert.equal(result.ok, true);
+    assert.equal(result.safe_scope_passed, true);
+    assert.equal(result.source_view_id, "123");
+    assert.equal(result.source_view_name, "Launch Sellers");
   } finally {
     ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = original.ROLLOUT_FEEDER_VIEW_ONLY_ID;
     ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = original.ROLLOUT_FEEDER_VIEW_ONLY_NAME;

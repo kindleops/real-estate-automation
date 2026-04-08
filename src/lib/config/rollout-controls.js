@@ -1,7 +1,18 @@
 import ENV from "@/lib/config/env.js";
 
+export const DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME = "SMS / TIER #1 / ALL";
+
+const FEEDER_SOURCE_VIEW_SAFE_NAME_PATTERNS = Object.freeze([
+  /^SMS \/ TIER #1 \/ ALL$/i,
+  /^SMS \/ TIER #1 \/ FILE #\d+$/i,
+]);
+
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function lower(value) {
+  return clean(value).toLowerCase();
 }
 
 function normalizeMode(value = "") {
@@ -156,28 +167,55 @@ export function resolveFeederViewScope({
 
   const normalized_requested_id = clean(requested_view_id) || null;
   const normalized_requested_name = clean(requested_view_name) || null;
+  const enforced_view_id = clean(controls.feeder_view_only_id) || null;
+  const enforced_view_name = clean(controls.feeder_view_only_name) || null;
+  const resolved_view_name =
+    normalized_requested_name || DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME;
+  const matches_safe_pattern = FEEDER_SOURCE_VIEW_SAFE_NAME_PATTERNS.some((pattern) =>
+    pattern.test(resolved_view_name)
+  );
+  const matches_configured_safe_name =
+    Boolean(enforced_view_name) &&
+    lower(resolved_view_name) === lower(enforced_view_name);
 
-  if (enforced_view_id && normalized_requested_id && normalized_requested_id !== enforced_view_id) {
+  if (normalized_requested_id && !normalized_requested_name) {
+    if (enforced_view_id && normalized_requested_id === enforced_view_id) {
+      return {
+        ok: true,
+        enforced: true,
+        safe_scope_passed: true,
+        source_view_id: enforced_view_id,
+        source_view_name: enforced_view_name || null,
+        requested_view_id: normalized_requested_id,
+        requested_view_name: null,
+        defaulted: false,
+        reason: "feeder_view_safe_scope_applied",
+      };
+    }
+
     return {
       ok: false,
       enforced: true,
-      source_view_id: enforced_view_id,
-      source_view_name: enforced_view_name,
+      safe_scope_passed: false,
+      source_view_id: null,
+      source_view_name: null,
+      requested_view_id: normalized_requested_id,
+      requested_view_name: null,
+      defaulted: false,
       reason: "feeder_view_outside_safe_scope",
     };
   }
 
-  if (
-    !enforced_view_id &&
-    enforced_view_name &&
-    normalized_requested_name &&
-    normalized_requested_name.toLowerCase() !== enforced_view_name.toLowerCase()
-  ) {
+  if (!matches_safe_pattern && !matches_configured_safe_name) {
     return {
       ok: false,
       enforced: true,
-      source_view_id: enforced_view_id,
-      source_view_name: enforced_view_name,
+      safe_scope_passed: false,
+      source_view_id: null,
+      source_view_name: null,
+      requested_view_id: normalized_requested_id,
+      requested_view_name: normalized_requested_name,
+      defaulted: false,
       reason: "feeder_view_outside_safe_scope",
     };
   }
@@ -185,9 +223,16 @@ export function resolveFeederViewScope({
   return {
     ok: true,
     enforced: true,
-    source_view_id: enforced_view_id || normalized_requested_id,
-    source_view_name: enforced_view_name || normalized_requested_name,
-    reason: "feeder_view_safe_scope_applied",
+    safe_scope_passed: true,
+    source_view_id: matches_configured_safe_name ? enforced_view_id : null,
+    source_view_name: resolved_view_name,
+    requested_view_id: normalized_requested_id,
+    requested_view_name: normalized_requested_name,
+    defaulted: !normalized_requested_id && !normalized_requested_name,
+    reason:
+      !normalized_requested_id && !normalized_requested_name
+        ? "feeder_view_default_applied"
+        : "feeder_view_safe_scope_applied",
   };
 }
 
@@ -226,6 +271,7 @@ export function capBuyerBlastRecipients(max_buyers, fallback = 5) {
 }
 
 export default {
+  DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME,
   getRolloutControls,
   isLiveRolloutMode,
   resolveMutationDryRun,
