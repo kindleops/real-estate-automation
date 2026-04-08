@@ -323,6 +323,24 @@ test("template loader prefers active Podio templates over local fallbacks", asyn
   assert.equal(selected?.source, "podio");
 });
 
+test("template loader falls back to local templates when Podio template fetch fails", async () => {
+  const selected = await loadTemplate({
+    category: "Residential",
+    use_case: "ownership_check",
+    tone: "Warm",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    context: buildTemplateContext(),
+    remote_fetcher: async () => {
+      throw new Error("podio_templates_unavailable");
+    },
+  });
+
+  assert.equal(selected?.source, "local_registry");
+  assert.match(selected?.item_id || "", /^local-template:/);
+});
+
 test("template loader falls back to agent-free Stage 1 local templates when agent metadata is missing", async () => {
   const selected = await loadTemplate({
     category: "Residential",

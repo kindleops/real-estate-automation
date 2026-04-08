@@ -243,20 +243,32 @@ export async function queueOutboundMessage({
   // Hard overrides
   template_id = null,
   template_item = null,
+  message_text = null,
   rendered_message_text = null,
   template_render_overrides = {},
   textgrid_number_item_id = null,
-}) {
+} = {}, deps = {}) {
+  const {
+    loadContextImpl = loadContext,
+    classifyImpl = classify,
+    resolveRouteImpl = resolveRoute,
+    loadTemplateImpl = loadTemplate,
+    renderTemplateImpl = renderTemplate,
+    buildSendQueueItemImpl = buildSendQueueItem,
+    chooseTextgridNumberImpl = chooseTextgridNumber,
+    findQueueItemsImpl = findQueueItems,
+  } = deps;
   const started_at = nowIso();
   const resolved_inbound_from = clean(inbound_from) || clean(phone);
   const normalized_inbound_from = normalizeUsPhone10(resolved_inbound_from);
+  const message_override = clean(rendered_message_text) || clean(message_text);
 
   info("outbound.queue_message_started", {
     inbound_from: resolved_inbound_from,
     create_brain_if_missing,
     has_seed_message: Boolean(clean(seed_message)),
     has_template_override: Boolean(template_id || template_item),
-    has_message_override: Boolean(clean(rendered_message_text)),
+    has_message_override: Boolean(message_override),
     has_textgrid_number_override: Boolean(textgrid_number_item_id),
   });
 
@@ -278,7 +290,7 @@ export async function queueOutboundMessage({
     };
   }
 
-  const context = await loadContext({
+  const context = await loadContextImpl({
     inbound_from: normalized_inbound_from,
     create_brain_if_missing,
   });
@@ -304,7 +316,7 @@ export async function queueOutboundMessage({
   let classification;
 
   if (clean(seed_message)) {
-    classification = await classify(clean(seed_message), brain_item);
+    classification = await classifyImpl(clean(seed_message), brain_item);
   } else {
     classification = {
       message: "",
@@ -322,7 +334,7 @@ export async function queueOutboundMessage({
     };
   }
 
-  const route = resolveRoute({
+  const route = resolveRouteImpl({
     classification,
     brain_item,
     phone_item,
@@ -427,8 +439,8 @@ export async function queueOutboundMessage({
 
   let selected_template = template_item || null;
 
-  if (!selected_template && !template_id) {
-    selected_template = await loadTemplate({
+  if (!selected_template && !template_id && !message_override) {
+    selected_template = await loadTemplateImpl({
       category: resolved_category,
       secondary_category: resolved_template_lookup_secondary_category,
       use_case: resolved_template_lookup_use_case,
@@ -447,7 +459,7 @@ export async function queueOutboundMessage({
     });
   }
 
-  if (!selected_template && !clean(rendered_message_text)) {
+  if (!selected_template && !message_override) {
     warn("outbound.queue_message_template_not_found", {
       inbound_from: resolved_inbound_from,
       phone_item_id: context?.ids?.phone_item_id || null,
@@ -479,10 +491,12 @@ export async function queueOutboundMessage({
   let final_message_text = "";
   let rendered_placeholders = [];
 
-  if (selected_template) {
+  if (message_override) {
+    final_message_text = message_override;
+  } else if (selected_template) {
     const template_text = selected_template?.text || "";
 
-    const render_result = renderTemplate({
+    const render_result = renderTemplateImpl({
       template_text,
       context,
       overrides: {
@@ -529,7 +543,7 @@ export async function queueOutboundMessage({
       ? render_result.used_placeholders
       : [];
   } else {
-    final_message_text = clean(rendered_message_text);
+    final_message_text = message_override;
   }
 
   if (!final_message_text) {
@@ -554,7 +568,7 @@ export async function queueOutboundMessage({
   let resolved_textgrid_number_item_id = textgrid_number_item_id || null;
 
   if (!resolved_textgrid_number_item_id) {
-    const chosen_number = await chooseTextgridNumber({
+    const chosen_number = await chooseTextgridNumberImpl({
       context,
       classification,
       route,
@@ -604,7 +618,7 @@ export async function queueOutboundMessage({
           distribution_key: resolved_rotation_key,
       });
 
-  const queue_history = await findQueueItems({
+  const queue_history = await findQueueItemsImpl({
     filters: {
       "phone-number": Number(context?.ids?.phone_item_id || 0) || undefined,
     },
@@ -640,7 +654,7 @@ export async function queueOutboundMessage({
     };
   }
 
-  const queue_result = await buildSendQueueItem({
+  const queue_result = await buildSendQueueItemImpl({
     context,
     rendered_message_text: final_message_text,
     template_id: selected_template_id,
@@ -682,12 +696,17 @@ export async function queueOutboundMessage({
     queue_item_id: queue_result?.queue_item_id || null,
     phone_item_id: context?.ids?.phone_item_id || null,
     template_id: selected_template_id,
+    template_source: selected_template?.source || null,
+    template_title: selected_template?.title || null,
+    template_relation_id: queue_result?.template_relation_id ?? null,
+    template_app_field_written: queue_result?.template_app_field_written ?? false,
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     use_case: resolved_use_case,
     stage: route?.stage || null,
     lifecycle_stage: resolved_lifecycle_stage,
     template_lookup_use_case: resolved_template_lookup_use_case,
     template_lookup_secondary_category: resolved_template_lookup_secondary_category,
+    message_override_used: Boolean(message_override),
   });
 
   return {
@@ -697,6 +716,11 @@ export async function queueOutboundMessage({
     queue_item_id: queue_result?.queue_item_id || null,
     template_id: selected_template_id,
     template_item: selected_template,
+    selected_template_source: selected_template?.source || null,
+    selected_template_title: selected_template?.title || null,
+    template_relation_id: queue_result?.template_relation_id ?? null,
+    template_app_field_written: queue_result?.template_app_field_written ?? false,
+    message_override_used: Boolean(message_override),
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     rendered_message_text: final_message_text,
     context,

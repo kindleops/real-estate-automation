@@ -45,6 +45,7 @@ import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { normalizeForQueueText } from "@/lib/domain/queue/build-send-queue-item.js";
+import { resolveTemplateFieldReference } from "@/lib/domain/templates/template-reference.js";
 import {
   deriveCanonicalSellerFlowFromTemplate,
   inferCanonicalUseCaseFromOutboundText,
@@ -352,6 +353,11 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
       deferred: false,
       message_text: existing_message_text,
       template_id: existing_template_id,
+      template_relation_id: existing_template_id,
+      selected_template_id: existing_template_id,
+      selected_template_source: null,
+      selected_template_title: null,
+      template_app_field_written: Boolean(existing_template_id),
       queue_item,
     };
   }
@@ -567,37 +573,73 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     };
   }
 
+  const template_reference = resolveTemplateFieldReference({
+    host_app_id: APP_IDS.send_queue,
+    host_field_external_id: QUEUE_FIELDS.template,
+    template_id: selected_template.item_id,
+    template_item: selected_template,
+  });
   const queue_resolution_payload = {
-    [QUEUE_FIELDS.template]: [selected_template.item_id],
     [QUEUE_FIELDS.message_text]: rendered_message_text,
     [QUEUE_FIELDS.character_count]: rendered_message_text.length,
     ...(render_result.used_placeholders?.length
       ? { [QUEUE_FIELDS.personalization_tags_used]: render_result.used_placeholders }
       : {}),
+    ...(template_reference.field_value
+      ? { [QUEUE_FIELDS.template]: template_reference.field_value }
+      : {}),
   };
+  let template_attach_rejected = false;
 
-  try {
-    await updateItem(queue_item_id, queue_resolution_payload);
-  } catch (error) {
-    logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write", error);
-    if (!shouldRetryQueueUpdateWithoutTemplate(error)) {
-      throw error;
-    }
-
-    delete queue_resolution_payload[QUEUE_FIELDS.template];
+  if (template_reference.field_value) {
     try {
       await updateItem(queue_item_id, queue_resolution_payload);
-    } catch (retryError) {
-      logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write_retry", retryError);
-      throw retryError;
+    } catch (error) {
+      logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write", error);
+      if (!shouldRetryQueueUpdateWithoutTemplate(error)) {
+        throw error;
+      }
+
+      delete queue_resolution_payload[QUEUE_FIELDS.template];
+      template_attach_rejected = true;
+
+      try {
+        await updateItem(queue_item_id, queue_resolution_payload);
+      } catch (retryError) {
+        logRevisionLimitPhase(
+          queue_item_id,
+          "resolve_deferred_message",
+          "template_write_retry",
+          retryError
+        );
+        throw retryError;
+      }
     }
+  } else {
+    await updateItem(queue_item_id, queue_resolution_payload);
   }
 
   const refreshed_queue_item = await getItem(queue_item_id);
+  const template_relation_id =
+    getFirstAppReferenceId(refreshed_queue_item, QUEUE_FIELDS.template, null) || null;
+  const template_app_field_written =
+    Boolean(template_reference.field_value) &&
+    !template_attach_rejected &&
+    String(template_relation_id || "") === String(template_reference.attached_template_id || "");
 
   info("queue.message_resolution_completed", {
     queue_item_id,
     template_id: selected_template.item_id,
+    template_source: selected_template.source || null,
+    template_title: selected_template.title || null,
+    template_relation_id,
+    template_app_field_written,
+    template_attachment_strategy: template_attach_rejected
+      ? "podio_rejected_template_reference"
+      : template_reference.attachment_strategy,
+    template_attachment_reason: template_attach_rejected
+      ? "template_attach_rejected_by_podio"
+      : template_reference.attachment_reason,
     duration_ms: Date.now() - started_at,
     character_count: rendered_message_text.length,
   });
@@ -606,6 +648,11 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     ok: true,
     deferred: true,
     template_id: selected_template.item_id,
+    template_relation_id,
+    selected_template_id: selected_template.item_id,
+    selected_template_source: selected_template.source || null,
+    selected_template_title: selected_template.title || null,
+    template_app_field_written,
     template_item: selected_template.raw || null,
     canonical_flow: deriveCanonicalSellerFlowFromTemplate(selected_template),
     message_text: rendered_message_text,
@@ -1276,9 +1323,16 @@ export async function processSendQueueItem(queue_item_id) {
   const retry_count = queue_validation.retry_count;
   const max_retries = queue_validation.max_retries;
 
-  const template_id =
-    message_resolution.template_id ||
+  const template_relation_id =
+    message_resolution.template_relation_id ||
     getFirstAppReferenceId(queue_item, QUEUE_FIELDS.template, null);
+  const selected_template_id =
+    message_resolution.selected_template_id ||
+    message_resolution.template_id ||
+    template_relation_id ||
+    null;
+  const selected_template_source = message_resolution.selected_template_source || null;
+  const selected_template_title = message_resolution.selected_template_title || null;
   const master_owner_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.master_owner, null);
   const prospect_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null);
   const property_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.properties, null);
@@ -1287,7 +1341,7 @@ export async function processSendQueueItem(queue_item_id) {
   const canonical_flow =
     message_resolution.canonical_flow ||
     (await resolveCanonicalSellerFlowForQueue({
-      template_id,
+      template_id: template_relation_id,
       template_item: message_resolution.template_item || null,
       message_body,
     }));
@@ -1377,7 +1431,10 @@ export async function processSendQueueItem(queue_item_id) {
     phone_item_id,
     outbound_number_item_id,
     property_id: resolved_property_id,
-    template_id,
+    template_id: template_relation_id,
+    selected_template_id,
+    selected_template_source,
+    selected_template_title,
     normalized_to: clean(to_number) || null,
     normalized_from: clean(from_number) || null,
     send_endpoint: getTextgridSendEndpoint(),
@@ -1413,7 +1470,7 @@ export async function processSendQueueItem(queue_item_id) {
         market_id: resolved_market_id,
         phone_item_id,
         outbound_number_item_id,
-        template_id,
+        template_id: template_relation_id,
         message_body,
         message_variant,
         latency_ms: 0,
@@ -1529,7 +1586,7 @@ export async function processSendQueueItem(queue_item_id) {
         market_id: resolved_market_id,
         phone_item_id,
         outbound_number_item_id,
-        template_id,
+        template_id: template_relation_id,
         message_body,
         message_variant,
         latency_ms,
@@ -1574,7 +1631,7 @@ export async function processSendQueueItem(queue_item_id) {
     property_id: resolved_property_id,
     market_id: resolved_market_id,
     outbound_number_item_id,
-    template_id,
+    template_id: template_relation_id,
     message_body,
     message_variant,
     latency_ms,
@@ -1592,6 +1649,10 @@ export async function processSendQueueItem(queue_item_id) {
     queue_item_id,
     phone_item_id,
     outbound_number_item_id,
+    template_id: template_relation_id,
+    selected_template_id,
+    selected_template_source,
+    selected_template_title,
     provider_message_id: send_result.message_id,
     brain_id,
     optimistic_claim: claim.optimistic,
@@ -1600,6 +1661,10 @@ export async function processSendQueueItem(queue_item_id) {
 
   return {
     ...bookkeeping_result,
+    template_relation_id,
+    selected_template_id,
+    selected_template_source,
+    selected_template_title,
   };
 }
 

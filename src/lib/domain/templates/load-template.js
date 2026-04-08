@@ -633,7 +633,10 @@ async function fetchRemoteTemplatesSafely(remote_fetcher, filter_set) {
     if (isTemplateFilterValidationError(error)) {
       return [];
     }
-    throw error;
+    // Keep outbound systems queueable even when Podio template reads fail.
+    // Local templates are the safety net, so remote fetch failures degrade to
+    // an empty remote batch instead of hard-failing selection.
+    return [];
   }
 }
 

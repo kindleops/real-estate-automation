@@ -27,7 +27,7 @@ function createActivePhoneItem(item_id = 401) {
   });
 }
 
-test("send queue row persists property, template, phone, and master owner relations", async () => {
+test("send queue row persists property, template, phone, and master owner relations for Podio templates", async () => {
   let created_fields = null;
 
   const result = await buildSendQueueItem({
@@ -60,9 +60,12 @@ test("send queue row persists property, template, phone, and master owner relati
     },
     queue_id: "relation-test",
     rendered_message_text: "Hi there",
-    template_id: 901,
+    template_id: 9901,
     template_item: {
-      item_id: 901,
+      item_id: 9901,
+      template_id: 901,
+      source: "podio",
+      title: "Ownership Check V1",
       raw: {
         app: {
           app_id: APP_IDS.templates,
@@ -85,6 +88,68 @@ test("send queue row persists property, template, phone, and master owner relati
   assert.deepEqual(created_fields.prospects, [301]);
   assert.deepEqual(created_fields.properties, [601]);
   assert.deepEqual(created_fields.template, [901]);
+  assert.equal(result.selected_template_id, 9901);
+  assert.equal(result.selected_template_source, "podio");
+  assert.equal(result.selected_template_title, "Ownership Check V1");
+  assert.equal(result.template_relation_id, 901);
+  assert.equal(result.template_app_field_written, true);
+  assert.equal(result.template_attachment_strategy, "template_id_bridge");
+});
+
+test("send queue row still queues successfully when local template fallback is selected", async () => {
+  let created_fields = null;
+
+  const result = await buildSendQueueItem({
+    context: {
+      found: true,
+      items: {
+        phone_item: createActivePhoneItem(),
+        brain_item: null,
+        master_owner_item: createPodioItem(201),
+        property_item: null,
+        agent_item: null,
+        market_item: null,
+      },
+      ids: {
+        phone_item_id: 401,
+        master_owner_id: 201,
+        prospect_id: 301,
+        property_id: null,
+        market_id: null,
+        assigned_agent_id: null,
+      },
+      recent: {
+        touch_count: 0,
+      },
+      summary: {
+        total_messages_sent: 0,
+      },
+    },
+    queue_id: "local-template-test",
+    rendered_message_text: "Hi there",
+    template_id: "local-template:ownership_check:no-agent:v1",
+    template_item: {
+      item_id: "local-template:ownership_check:no-agent:v1",
+      source: "local_registry",
+      title: null,
+    },
+    textgrid_number_item_id: 501,
+    scheduled_for_local: "2026-04-04 12:43:17",
+    scheduled_for_utc: "2026-04-04 17:43:17",
+    create_item: async (_app_id, fields) => {
+      created_fields = fields;
+      return { item_id: 124 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal("template" in (created_fields || {}), false);
+  assert.equal(result.selected_template_id, "local-template:ownership_check:no-agent:v1");
+  assert.equal(result.selected_template_source, "local_registry");
+  assert.equal(result.template_relation_id, null);
+  assert.equal(result.template_app_field_written, false);
+  assert.equal(result.template_attachment_reason, "local_template_not_attachable");
 });
 
 test("outbound send event payload preserves phone, property, template, and conversation relations", () => {

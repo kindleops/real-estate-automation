@@ -14,6 +14,7 @@ function createLocalTemplate({
 }) {
   return {
     item_id,
+    title: null,
     raw: null,
     template_id: null,
     use_case,

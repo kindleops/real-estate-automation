@@ -21,8 +21,10 @@ export function normalizeTemplateItem(item) {
 
   return {
     item_id: item?.item_id || null,
+    app_id: item?.app?.app_id || item?.app_id || APP_ID,
     raw: item,
     template_id: getNumberValue(item, "template-id", null),
+    title: getTextValue(item, "title", "") || cleanTemplateTitle(item),
     use_case: getCategoryValue(item, "use-case", null),
     variant_group: getCategoryValue(item, "stage", null),
     tone: getCategoryValue(item, "tone", null),
@@ -48,6 +50,10 @@ export function normalizeTemplateItem(item) {
     last_used:
       fields.find((f) => f?.external_id === "last-used")?.values?.[0]?.start || null,
   };
+}
+
+function cleanTemplateTitle(item = null) {
+  return String(item?.title ?? "").trim();
 }
 
 export async function getTemplateItem(item_id) {

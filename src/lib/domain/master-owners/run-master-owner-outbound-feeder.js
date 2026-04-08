@@ -457,8 +457,42 @@ function inspectStageOneTemplateFallback({
 
 function summarizeTemplateResolutionDiagnostics(results = []) {
   const template_failures = results.filter((result) => result?.reason === "template_not_found");
+  const selected_template_sources = new Map();
+  const selected_templates = new Map();
   const failure_reasons = new Map();
   const missing_placeholder_counts = new Map();
+
+  for (const result of results) {
+    const template_source = clean(
+      result?.plan?.template_source || result?.queue_result?.selected_template_source
+    );
+    const template_id = clean(
+      result?.plan?.template_id || result?.queue_result?.selected_template_id
+    );
+    const template_title = clean(
+      result?.plan?.template_title || result?.queue_result?.selected_template_title
+    );
+
+    if (template_source) {
+      selected_template_sources.set(
+        template_source,
+        (selected_template_sources.get(template_source) || 0) + 1
+      );
+    }
+
+    if (template_id) {
+      const key = `${template_source || "unknown"}::${template_id}`;
+      const current = selected_templates.get(key) || {
+        template_id,
+        template_source: template_source || null,
+        template_title: template_title || null,
+        count: 0,
+      };
+      current.count += 1;
+      if (!current.template_title && template_title) current.template_title = template_title;
+      selected_templates.set(key, current);
+    }
+  }
 
   for (const failure of template_failures) {
     const failure_reason =
@@ -478,6 +512,12 @@ function summarizeTemplateResolutionDiagnostics(results = []) {
 
   return {
     template_not_found_count: template_failures.length,
+    selected_template_source_counts: [...selected_template_sources.entries()]
+      .map(([source, count]) => ({ source, count }))
+      .sort((left, right) => right.count - left.count),
+    selected_templates: [...selected_templates.values()]
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 10),
     failure_reason_counts: [...failure_reasons.entries()]
       .map(([reason, count]) => ({ reason, count }))
       .sort((left, right) => right.count - left.count),
@@ -3050,6 +3090,7 @@ async function evaluateOwner({
     outbound_number_source: outbound_number.source,
     outbound_number_diagnostics: outbound_number.diagnostics || null,
     template_id: selected_template.item_id,
+    template_source: selected_template.source || null,
     template_title: selected_template.title || null,
     rendered_message_text,
     rendered_character_count: rendered_message_text.length,

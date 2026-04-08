@@ -13,6 +13,7 @@ import {
 
 import { getCategoryOptionId, getAttachedFieldSchema } from "@/lib/podio/schema.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
+import { resolveTemplateFieldReference } from "@/lib/domain/templates/template-reference.js";
 import { warn } from "@/lib/logging/logger.js";
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -59,12 +60,6 @@ const QUEUE_FIELDS = {
   category: "category",
   use_case_template: "use-case-template",
 };
-
-// Current known mismatch:
-// Send Queue.template may still point to an older Podio template app,
-// while the live loader uses APP_IDS.templates = 30647181.
-// We do NOT hard-fail queue creation if template linking is incompatible.
-const LEGACY_QUEUE_TEMPLATE_APP_ID = 29488989;
 
 function nowIso() {
   return new Date().toISOString();
@@ -398,34 +393,6 @@ function normalizeDateField(value) {
   return null;
 }
 
-function maybeTemplateFieldValue(template_id, template_item = null) {
-  if (!template_id) return undefined;
-
-  const template_app_id =
-    template_item?.app?.app_id ||
-    template_item?.raw?.app?.app_id ||
-    template_item?.app_id ||
-    template_item?.appId ||
-    (template_item?.item_id ? APP_IDS.templates : null) ||
-    null;
-
-  if (!template_item) {
-    // Allow raw id passthrough if caller is intentionally using a queue-compatible template id
-    return asArrayAppRef(template_id);
-  }
-
-  if (template_app_id === LEGACY_QUEUE_TEMPLATE_APP_ID) {
-    return asArrayAppRef(template_id);
-  }
-
-  if (template_app_id === APP_IDS.templates) {
-    return asArrayAppRef(template_id);
-  }
-
-  // live Templates app mismatch — skip linking instead of failing queue creation
-  return undefined;
-}
-
 function shouldRetryQueueCreateWithoutTemplate(error) {
   if (!(error instanceof PodioError)) return false;
 
@@ -644,7 +611,13 @@ export async function buildSendQueueItem({
     }
   }
 
-  const template_field_value = maybeTemplateFieldValue(template_id, template_item);
+  const template_reference = resolveTemplateFieldReference({
+    host_app_id: APP_IDS.send_queue,
+    host_field_external_id: QUEUE_FIELDS.template,
+    template_id,
+    template_item,
+  });
+  const template_field_value = template_reference.field_value;
   const missing_relation_warnings = [];
 
   if (!master_owner_id && (master_owner_item?.item_id || context.ids?.master_owner_id)) {
@@ -653,7 +626,7 @@ export async function buildSendQueueItem({
   if (!property_id && (property_item?.item_id || brain_item?.item_id || master_owner_id)) {
     missing_relation_warnings.push("property_relation_unresolved");
   }
-  if (template_id && !template_field_value) {
+  if (template_reference.selected_template_id && !template_field_value) {
     missing_relation_warnings.push("template_relation_unresolved");
   }
 
@@ -663,14 +636,13 @@ export async function buildSendQueueItem({
       master_owner_id,
       property_id,
       market_id,
-      template_id: toItemId(template_id),
-      template_item_id: toItemId(template_item?.item_id),
-      template_app_id:
-        template_item?.app?.app_id ||
-        template_item?.raw?.app?.app_id ||
-        template_item?.app_id ||
-        template_item?.appId ||
-        null,
+      selected_template_id: template_reference.selected_template_id ?? null,
+      selected_template_item_id: template_reference.selected_template_item_id ?? null,
+      selected_template_source: template_reference.selected_template_source ?? null,
+      selected_template_app_id: template_reference.selected_template_app_id ?? null,
+      attempted_template_relation_id: template_reference.attached_template_id ?? null,
+      template_attachment_strategy: template_reference.attachment_strategy ?? null,
+      template_attachment_reason: template_reference.attachment_reason ?? null,
       warnings: missing_relation_warnings,
     });
   }
@@ -732,6 +704,7 @@ export async function buildSendQueueItem({
 
   let created = null;
   let template_attach_warning = null;
+  let template_attach_rejected = false;
 
   try {
     created = await create_item(APP_IDS.send_queue, fields);
@@ -744,6 +717,7 @@ export async function buildSendQueueItem({
     delete retry_fields[QUEUE_FIELDS.template];
 
     created = await create_item(APP_IDS.send_queue, retry_fields);
+    template_attach_rejected = true;
     template_attach_warning =
       "Template relation was skipped because Send Queue.template rejected the selected template reference.";
   }
@@ -757,6 +731,12 @@ export async function buildSendQueueItem({
     });
   }
 
+  const template_app_field_written =
+    Boolean(template_field_value) && !template_attach_rejected;
+  const template_relation_id = template_app_field_written
+    ? template_reference.attached_template_id
+    : null;
+
   return {
     ok: true,
     queue_item_id: created?.item_id || null,
@@ -765,7 +745,20 @@ export async function buildSendQueueItem({
     phone_item_id,
     textgrid_number_item_id,
     template_id,
-    template_attached: Boolean(template_field_value) && !template_attach_warning,
+    selected_template_id: template_reference.selected_template_id ?? null,
+    selected_template_source: template_reference.selected_template_source ?? null,
+    selected_template_title: template_reference.selected_template_title ?? null,
+    template_relation_id,
+    attempted_template_relation_id: template_reference.attached_template_id ?? null,
+    template_app_field_written,
+    template_attachment_strategy: template_attach_rejected
+      ? "podio_rejected_template_reference"
+      : template_reference.attachment_strategy ?? null,
+    template_attachment_reason: template_attach_rejected
+      ? "template_attach_rejected_by_podio"
+      : template_reference.attachment_reason ?? null,
+    template_target_app_ids: template_reference.target_app_ids || [],
+    template_attached: template_app_field_written,
     message_text: message_text || null,
     deferred_message_resolution: Boolean(defer_message_resolution && !message_text),
     normalized_target,
@@ -785,9 +778,11 @@ export async function buildSendQueueItem({
         ? ["Message text will be resolved during queue processing."]
         : []),
       ...(template_attach_warning ? [template_attach_warning] : []),
-      ...(!template_field_value && template_id
+      ...(!template_field_value && template_reference.selected_template_id
         ? [
-            "Template relation was skipped because Send Queue.template may still reference an older Podio template app.",
+            `Template relation skipped: ${
+              template_reference.attachment_reason || "template_relation_unresolved"
+            }.`,
           ]
         : []),
       ...(contact_window_field.omitted && contact_window_field.reason !== "empty"
