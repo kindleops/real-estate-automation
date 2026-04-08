@@ -36,6 +36,8 @@ test("feeder view scope honors the configured rollout view in dry-run and live r
   const original = {
     ROLLOUT_FEEDER_VIEW_ONLY_ID: ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID,
     ROLLOUT_FEEDER_VIEW_ONLY_NAME: ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME,
+    FEEDER_SOURCE_VIEW_DEFAULT_ID: ENV.FEEDER_SOURCE_VIEW_DEFAULT_ID,
+    FEEDER_SOURCE_VIEW_DEFAULT_NAME: ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME,
   };
 
   try {
@@ -59,6 +61,38 @@ test("feeder view scope honors the configured rollout view in dry-run and live r
   } finally {
     ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = original.ROLLOUT_FEEDER_VIEW_ONLY_ID;
     ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = original.ROLLOUT_FEEDER_VIEW_ONLY_NAME;
+    ENV.FEEDER_SOURCE_VIEW_DEFAULT_ID = original.FEEDER_SOURCE_VIEW_DEFAULT_ID;
+    ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME = original.FEEDER_SOURCE_VIEW_DEFAULT_NAME;
+  }
+});
+
+test("feeder view scope applies the default ALL view unless an explicit override is provided", () => {
+  const original = {
+    ROLLOUT_FEEDER_VIEW_ONLY_ID: ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID,
+    ROLLOUT_FEEDER_VIEW_ONLY_NAME: ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME,
+    FEEDER_SOURCE_VIEW_DEFAULT_NAME: ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME,
+  };
+
+  try {
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = "";
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = "";
+    ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME = "SMS / TIER #1 / ALL";
+
+    const default_result = resolveFeederViewScope();
+    const override_result = resolveFeederViewScope({
+      requested_view_name: "SMS / TIER #1 / FILE #1",
+    });
+
+    assert.equal(default_result.ok, true);
+    assert.equal(default_result.source_view_name, "SMS / TIER #1 / ALL");
+    assert.equal(default_result.reason, "default_feeder_view_applied");
+    assert.equal(override_result.ok, true);
+    assert.equal(override_result.source_view_name, "SMS / TIER #1 / FILE #1");
+    assert.equal(override_result.reason, "no_view_scope_configured");
+  } finally {
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID = original.ROLLOUT_FEEDER_VIEW_ONLY_ID;
+    ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME = original.ROLLOUT_FEEDER_VIEW_ONLY_NAME;
+    ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME = original.FEEDER_SOURCE_VIEW_DEFAULT_NAME;
   }
 });
 
