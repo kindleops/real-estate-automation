@@ -171,6 +171,18 @@ test("Part 1 — single-line message-text is written unchanged (no regression)",
   assert.equal(captured_fields?.["character-count"], single.length);
 });
 
+test("Part 1 — explicit personalization tags are persisted exactly when provided", async () => {
+  const { captured_fields } = await buildAndCapture({
+    rendered_message_text: "Hi there",
+    personalization_tags_used: ["{{seller_first_name}}", "{{property_city}}"],
+  });
+
+  assert.deepEqual(captured_fields?.["personalization-tags-used"], [
+    "{{seller_first_name}}",
+    "{{property_city}}",
+  ]);
+});
+
 // ── Part 2: property-address ──────────────────────────────────────────────────
 
 test("Part 2 — property-address written when real property_id and address available", async () => {

@@ -7,6 +7,8 @@ import { handleTextgridDeliveryWebhook } from "@/lib/flows/handle-textgrid-deliv
 import { handleDocusignWebhook } from "@/lib/domain/contracts/handle-docusign-webhook.js";
 import { handleTitleResponseWebhook } from "@/lib/domain/title/handle-title-response-webhook.js";
 import { handleClosingResponseWebhook } from "@/lib/domain/closings/handle-closing-response-webhook.js";
+import { processSendQueueItem } from "@/lib/domain/queue/process-send-queue.js";
+import { queueOutboundMessage } from "@/lib/flows/queue-outbound-message.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,12 +17,26 @@ const logger = child({
   module: "api.internal.verification.replay",
 });
 
+async function replayQueueSend(payload = {}) {
+  const queue_item_id = Number(payload?.queue_item_id || payload?.id || 0);
+  if (!Number.isFinite(queue_item_id) || queue_item_id <= 0) {
+    return {
+      ok: false,
+      reason: "missing_queue_item_id",
+    };
+  }
+
+  return processSendQueueItem(queue_item_id);
+}
+
 const FLOW_HANDLERS = {
   textgrid_inbound: handleTextgridInboundWebhook,
   textgrid_delivery: handleTextgridDeliveryWebhook,
   docusign: handleDocusignWebhook,
   title: handleTitleResponseWebhook,
   closings: handleClosingResponseWebhook,
+  queue_send: replayQueueSend,
+  queue_build: queueOutboundMessage,
 };
 
 function clean(value) {

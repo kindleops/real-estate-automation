@@ -311,10 +311,6 @@ function normalizePropertyType(value = "") {
       "apartments",
       "5+ unit",
       "commercial multifamily",
-      "duplex",
-      "triplex",
-      "quadplex",
-      "fourplex",
     ])
   ) {
     return "Multifamily";
@@ -341,7 +337,7 @@ function isMultifamilyLike({ context = null, signals = {} } = {}) {
 
   return (
     property_type === "Multifamily" ||
-    (Number.isFinite(Number(unit_count)) && Number(unit_count) >= 2)
+    (Number.isFinite(Number(unit_count)) && Number(unit_count) >= 5)
   );
 }
 

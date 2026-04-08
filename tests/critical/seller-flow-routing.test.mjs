@@ -150,6 +150,20 @@ test("seller flow keeps multifamily leads in underwriting instead of jumping str
   assert.match(plan.reasoning_summary, /underwriting/i);
 });
 
+test("seller flow keeps 1-4 unit properties in the property lane", () => {
+  const plan = route({
+    previous_use_case: SELLER_FLOW_STAGES.ASKING_PRICE,
+    previous_stage: SELLER_FLOW_STAGES.ASKING_PRICE,
+    property_type: "Single Family",
+    unit_count: 4,
+    max_cash_offer: 155000,
+    message: "I'd need 170000.",
+  });
+
+  assert.equal(plan.selected_use_case, SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE);
+  assert.equal(plan.next_expected_stage, SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE);
+});
+
 test("seller flow routes negotiation branches to the canonical stage-6 handlers", () => {
   const justify_price = route({
     previous_use_case: SELLER_FLOW_STAGES.OFFER_REVEAL_CASH,

@@ -466,6 +466,7 @@ export async function buildSendQueueItem({
   property_type = null,
   secondary_category = null,
   use_case_template = null,
+  personalization_tags_used: explicit_personalization_tags_used = null,
   create_item = createItem,
   update_item = updateItem,
 }) {
@@ -565,13 +566,15 @@ export async function buildSendQueueItem({
     getTextValue(market_item, "title", "") ||
     "";
 
-  const personalization_tags_used = derivePersonalizationTagsUsed({
-    message_text,
-    owner_name,
-    property_address,
-    agent_name,
-    market_name,
-  });
+  const personalization_tags_used = Array.isArray(explicit_personalization_tags_used)
+    ? unique(explicit_personalization_tags_used.map((tag) => clean(tag)).filter(Boolean))
+    : derivePersonalizationTagsUsed({
+        message_text,
+        owner_name,
+        property_address,
+        agent_name,
+        market_name,
+      });
 
   const next_touch_number =
     touch_number ??

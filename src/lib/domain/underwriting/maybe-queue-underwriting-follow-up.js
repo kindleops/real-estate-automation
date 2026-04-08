@@ -98,12 +98,10 @@ function isMultifamily({ property_type = "", unit_count = null, route = null } =
       "multi family",
       "apartment",
       "apartments",
-      "duplex",
-      "triplex",
-      "quadplex",
-      "fourplex",
+      "5+ unit",
+      "commercial multifamily",
     ]) ||
-    (unit_count !== null && unit_count >= 2) ||
+    (unit_count !== null && unit_count >= 5) ||
     route?.is_multifamily_like === true
   );
 }

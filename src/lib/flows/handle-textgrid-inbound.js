@@ -71,6 +71,9 @@ function extractWebhookPayload(payload = {}) {
     payload.id ||
     payload.message_id ||
     payload.messageId ||
+    payload.SmsMessageSid ||
+    payload.SmsSid ||
+    payload.MessageSid ||
     null;
 
   const from =
@@ -78,12 +81,14 @@ function extractWebhookPayload(payload = {}) {
     payload.sender ||
     payload.msisdn ||
     payload.contact?.phone ||
+    payload.From ||
     null;
 
   const to =
     payload.to ||
     payload.recipient ||
     payload.phone_number ||
+    payload.To ||
     null;
 
   const body =
@@ -91,13 +96,22 @@ function extractWebhookPayload(payload = {}) {
     payload.message ||
     payload.text ||
     payload.content ||
+    payload.Body ||
     "";
 
   const status =
     payload.status ||
+    payload.SmsStatus ||
     payload.event_type ||
     payload.event ||
     "received";
+
+  const received_at =
+    payload.received_at ||
+    payload.http_received_at ||
+    payload.timestamp ||
+    payload.created_at ||
+    null;
 
   return {
     raw: payload,
@@ -106,6 +120,7 @@ function extractWebhookPayload(payload = {}) {
     to,
     body: String(body || "").trim(),
     status,
+    received_at,
   };
 }
 
@@ -266,6 +281,7 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       message_body,
       provider_message_id: extracted.message_id,
       raw_carrier_status: extracted.status || "received",
+      received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
       processed_by: "Inbound Webhook",
       source_app: "TextGrid",
       trigger_name: "textgrid-inbound",
