@@ -11,7 +11,13 @@ import {
   resolveSchedulingContactWindow,
 } from "@/lib/domain/queue/queue-schedule.js";
 import { chooseTextgridNumber } from "@/lib/domain/routing/choose-textgrid-number.js";
-import { normalizeUsPhone10 } from "@/lib/providers/podio.js";
+import {
+  getCategoryValue,
+  getFirstAppReferenceId,
+  getNumberValue,
+  normalizeUsPhone10,
+} from "@/lib/providers/podio.js";
+import { findQueueItems } from "@/lib/podio/queries/find-queue-items.js";
 import { info, warn } from "@/lib/logging/logger.js";
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -174,6 +180,25 @@ function deriveNextTouchNumber({
     0;
 
   return Math.max(1, Number(historical_touch_count || 0) + 1);
+}
+
+const PENDING_QUEUE_STATUSES = new Set(["queued", "sending"]);
+
+export function findPendingQueueDuplicateItem(queue_items = [], phone_item_id, touch_number) {
+  if (!phone_item_id) return null;
+
+  return (
+    queue_items.find((item) => {
+      const status = clean(getCategoryValue(item, "queue-status", "")).toLowerCase();
+      if (!PENDING_QUEUE_STATUSES.has(status)) return false;
+
+      const candidate_phone_id = getFirstAppReferenceId(item, "phone-number", null);
+      if (String(candidate_phone_id || "") !== String(phone_item_id || "")) return false;
+
+      const candidate_touch = Number(getNumberValue(item, "touch-number", 0) || 0);
+      return candidate_touch === Number(touch_number || 0);
+    }) || null
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -402,7 +427,7 @@ export async function queueOutboundMessage({
 
   let selected_template = template_item || null;
 
-  if (!selected_template && !clean(rendered_message_text)) {
+  if (!selected_template && !template_id) {
     selected_template = await loadTemplate({
       category: resolved_category,
       secondary_category: resolved_template_lookup_secondary_category,
@@ -451,10 +476,10 @@ export async function queueOutboundMessage({
     selected_template?.item_id ||
     null;
 
-  let final_message_text = clean(rendered_message_text);
+  let final_message_text = "";
   let rendered_placeholders = [];
 
-  if (!final_message_text) {
+  if (selected_template) {
     const template_text = selected_template?.text || "";
 
     const render_result = renderTemplate({
@@ -503,6 +528,8 @@ export async function queueOutboundMessage({
     rendered_placeholders = Array.isArray(render_result?.used_placeholders)
       ? render_result.used_placeholders
       : [];
+  } else {
+    final_message_text = clean(rendered_message_text);
   }
 
   if (!final_message_text) {
@@ -575,7 +602,43 @@ export async function queueOutboundMessage({
           timezone_label: resolved_timezone,
           contact_window: resolved_contact_window,
           distribution_key: resolved_rotation_key,
-        });
+      });
+
+  const queue_history = await findQueueItems({
+    filters: {
+      "phone-number": Number(context?.ids?.phone_item_id || 0) || undefined,
+    },
+    limit: 25,
+  });
+
+  const duplicate_queue_item = findPendingQueueDuplicateItem(
+    queue_history,
+    context?.ids?.phone_item_id || null,
+    resolved_touch_number
+  );
+
+  if (duplicate_queue_item) {
+    warn("outbound.queue_message_duplicate_suppressed", {
+      inbound_from: resolved_inbound_from,
+      phone_item_id: context?.ids?.phone_item_id || null,
+      duplicate_queue_item_id: duplicate_queue_item?.item_id || null,
+      duplicate_touch_number: resolved_touch_number,
+      duplicate_queue_status: getCategoryValue(duplicate_queue_item, "queue-status", null),
+    });
+
+    return {
+      ok: false,
+      stage: "duplicate_guard",
+      reason: "duplicate_pending_queue_item",
+      inbound_from: normalized_inbound_from,
+      duplicate_queue_item_id: duplicate_queue_item?.item_id || null,
+      duplicate_touch_number: resolved_touch_number,
+      duplicate_queue_status: getCategoryValue(duplicate_queue_item, "queue-status", null),
+      context,
+      classification,
+      route,
+    };
+  }
 
   const queue_result = await buildSendQueueItem({
     context,
