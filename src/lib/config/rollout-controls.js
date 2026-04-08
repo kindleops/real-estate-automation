@@ -48,8 +48,6 @@ export function getRolloutControls() {
     ),
     feeder_view_only_id: clean(ENV.ROLLOUT_FEEDER_VIEW_ONLY_ID) || null,
     feeder_view_only_name: clean(ENV.ROLLOUT_FEEDER_VIEW_ONLY_NAME) || null,
-    feeder_default_view_id: clean(ENV.FEEDER_SOURCE_VIEW_DEFAULT_ID) || null,
-    feeder_default_view_name: clean(ENV.FEEDER_SOURCE_VIEW_DEFAULT_NAME) || null,
     single_master_owner_id:
       normalizePositiveInteger(ENV.ROLLOUT_SINGLE_MASTER_OWNER_ID, null) || null,
     single_contract_id:
@@ -137,40 +135,27 @@ export function resolveFeederViewScope({
   requested_view_name = null,
 } = {}) {
   const controls = getRolloutControls();
-  const enforced_view_id = controls.feeder_view_only_id;
-  const enforced_view_name = controls.feeder_view_only_name;
-
-  if (!enforced_view_id && !enforced_view_name) {
-    const normalized_requested_id = clean(requested_view_id) || null;
-    const normalized_requested_name = clean(requested_view_name) || null;
-    const default_view_id = controls.feeder_default_view_id;
-    const default_view_name = controls.feeder_default_view_name;
-
-    if (!normalized_requested_id && !normalized_requested_name && (default_view_id || default_view_name)) {
-      return {
-        ok: true,
-        enforced: false,
-        source_view_id: default_view_id || null,
-        source_view_name: default_view_name || null,
-        reason: "default_feeder_view_applied",
-      };
-    }
-
-    return {
-      ok: true,
-      enforced: false,
-      source_view_id: normalized_requested_id,
-      source_view_name: normalized_requested_name,
-      reason: "no_view_scope_configured",
-    };
-  }
-
   const normalized_requested_id = clean(requested_view_id) || null;
   const normalized_requested_name = clean(requested_view_name) || null;
   const enforced_view_id = clean(controls.feeder_view_only_id) || null;
   const enforced_view_name = clean(controls.feeder_view_only_name) || null;
-  const resolved_view_name =
-    normalized_requested_name || DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME;
+  const enforced = Boolean(enforced_view_id || enforced_view_name);
+
+  if (!normalized_requested_id && !normalized_requested_name) {
+    return {
+      ok: true,
+      enforced,
+      safe_scope_passed: true,
+      source_view_id: null,
+      source_view_name: DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME,
+      requested_view_id: null,
+      requested_view_name: null,
+      defaulted: true,
+      reason: "feeder_view_default_applied",
+    };
+  }
+
+  const resolved_view_name = normalized_requested_name || null;
   const matches_safe_pattern = FEEDER_SOURCE_VIEW_SAFE_NAME_PATTERNS.some((pattern) =>
     pattern.test(resolved_view_name)
   );
@@ -182,7 +167,7 @@ export function resolveFeederViewScope({
     if (enforced_view_id && normalized_requested_id === enforced_view_id) {
       return {
         ok: true,
-        enforced: true,
+        enforced,
         safe_scope_passed: true,
         source_view_id: enforced_view_id,
         source_view_name: enforced_view_name || null,
@@ -195,7 +180,7 @@ export function resolveFeederViewScope({
 
     return {
       ok: false,
-      enforced: true,
+      enforced,
       safe_scope_passed: false,
       source_view_id: null,
       source_view_name: null,
@@ -209,7 +194,7 @@ export function resolveFeederViewScope({
   if (!matches_safe_pattern && !matches_configured_safe_name) {
     return {
       ok: false,
-      enforced: true,
+      enforced,
       safe_scope_passed: false,
       source_view_id: null,
       source_view_name: null,
@@ -222,17 +207,14 @@ export function resolveFeederViewScope({
 
   return {
     ok: true,
-    enforced: true,
+    enforced,
     safe_scope_passed: true,
     source_view_id: matches_configured_safe_name ? enforced_view_id : null,
     source_view_name: resolved_view_name,
     requested_view_id: normalized_requested_id,
     requested_view_name: normalized_requested_name,
-    defaulted: !normalized_requested_id && !normalized_requested_name,
-    reason:
-      !normalized_requested_id && !normalized_requested_name
-        ? "feeder_view_default_applied"
-        : "feeder_view_safe_scope_applied",
+    defaulted: false,
+    reason: "feeder_view_safe_scope_applied",
   };
 }
 

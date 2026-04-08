@@ -75,6 +75,14 @@ test("runFeederWithRollout defaults cron feeder source to Tier 1 ALL", async () 
   assert.equal(scope.safe_scope_passed, true);
   assert.equal(scope.safe_scope_reason, "feeder_view_default_applied");
   assert.equal(scope.defaulted, true);
+
+  const completed = entries.find(
+    (entry) => entry.event === "master_owner_feeder.completed"
+  )?.meta;
+  assert.ok(completed, "completion log must be emitted");
+  assert.equal(completed.effective_source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
+  assert.equal(completed.resolved_source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
+  assert.equal(completed.scanned_count, 0);
 });
 
 test("runFeederWithRollout normalizes zero limit and scan_limit to defaults", async () => {

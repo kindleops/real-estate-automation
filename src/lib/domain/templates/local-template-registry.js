@@ -78,6 +78,26 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     paired_with_agent_type: "Warm Professional",
     text: "Hi {{seller_first_name}}, this is {{agent_first_name}}. Do you own {{property_address}}?",
   }),
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:no-agent:v1",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V1",
+    category_secondary: "Outreach",
+    tone: "Warm",
+    paired_with_agent_type: "Warm Professional",
+    text: "Hi {{seller_first_name}}, checking on {{property_address}}. Do you still own it?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:no-agent:v2",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V2",
+    category_secondary: "Outreach",
+    tone: "Neutral",
+    paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    text: "Reaching out about {{property_address}}. Are you the owner there?",
+  }),
   // ── Stage 1 — Ownership Confirmation Follow-Up ────────────────────────────────
   createLocalTemplate({
     item_id: "local-template:follow_up:ownership:v1",

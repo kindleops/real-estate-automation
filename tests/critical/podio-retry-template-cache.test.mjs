@@ -15,7 +15,16 @@ import {
   loadTemplate,
   loadTemplateCandidates,
 } from "@/lib/domain/templates/load-template.js";
+import { renderTemplate } from "@/lib/domain/templates/render-template.js";
+import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
+import {
+  appRefField,
+  categoryField,
+  createPodioItem,
+  locationField,
+  textField,
+} from "../helpers/test-helpers.js";
 
 function buildTemplateContext(overrides = {}) {
   return {
@@ -312,6 +321,139 @@ test("template loader prefers active Podio templates over local fallbacks", asyn
 
   assert.equal(selected?.item_id, 9101);
   assert.equal(selected?.source, "podio");
+});
+
+test("template loader falls back to agent-free Stage 1 local templates when agent metadata is missing", async () => {
+  const selected = await loadTemplate({
+    category: "Residential",
+    use_case: "ownership_check",
+    tone: "Warm",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    context: buildTemplateContext({
+      agent_first_name: "",
+    }),
+    remote_fetcher: async () => [],
+  });
+
+  assert.equal(selected?.item_id, "local-template:ownership_check:no-agent:v1");
+  assert.match(selected?.text || "", /property_address/);
+});
+
+test("template loader resolves Stage 1 fallback even when property category metadata is missing", async () => {
+  const selected = await loadTemplate({
+    category: null,
+    secondary_category: null,
+    use_case: "ownership_check",
+    tone: "Warm",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    context: buildTemplateContext({
+      agent_first_name: "",
+    }),
+    remote_fetcher: async () => [],
+  });
+
+  assert.equal(selected?.item_id, "local-template:ownership_check:no-agent:v1");
+});
+
+test("agent-free Stage 1 fallback renders and builds a queue item when property metadata is missing", async () => {
+  const context = {
+    found: true,
+    summary: {
+      seller_first_name: "Sam",
+      agent_first_name: "",
+      property_address: "123 Main Street",
+      property_city: "Tulsa",
+      contact_window: "8AM-9PM Local",
+      market_timezone: "Central",
+      total_messages_sent: 0,
+    },
+    recent: {
+      touch_count: 0,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: 601,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    items: {
+      phone_item: createPodioItem(401, {
+        "phone-activity-status": categoryField("Active for 12 months or longer"),
+        "phone-hidden": textField("9185550000"),
+        "canonical-e164": textField("+19185550000"),
+        "linked-master-owner": appRefField(201),
+        "linked-contact": appRefField(301),
+        "primary-property": appRefField(601),
+      }),
+      master_owner_item: createPodioItem(201, {
+        "owner-full-name": textField("Sam Seller"),
+        "owner-type": categoryField("INDIVIDUAL | ABSENTEE"),
+      }),
+      property_item: createPodioItem(601, {
+        "property-address": locationField({
+          street_address: "123 Main Street",
+          city: "Tulsa",
+          state: "OK",
+          postal_code: "74103",
+        }),
+      }),
+      brain_item: null,
+      agent_item: null,
+      market_item: null,
+    },
+  };
+
+  const selected = await loadTemplate({
+    category: null,
+    secondary_category: null,
+    use_case: "ownership_check",
+    tone: "Warm",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    context,
+    remote_fetcher: async () => [],
+  });
+
+  assert.equal(selected?.item_id, "local-template:ownership_check:no-agent:v1");
+
+  const rendered = renderTemplate({
+    template_text: selected?.text,
+    context,
+    use_case: selected?.use_case,
+    variant_group: selected?.variant_group,
+  });
+
+  assert.equal(rendered.ok, true);
+  assert.match(rendered.rendered_text, /123 Main Street/);
+
+  let created_fields = null;
+  const queued = await buildSendQueueItem({
+    context,
+    rendered_message_text: rendered.rendered_text,
+    template_id: selected?.item_id,
+    template_item: selected,
+    textgrid_number_item_id: 701,
+    scheduled_for_local: "2026-04-08 09:00:00",
+    contact_window: "8AM-9PM Local",
+    create_item: async (_app_id, fields) => {
+      created_fields = fields;
+      return { item_id: 9001 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(queued.ok, true);
+  assert.equal(queued.queue_item_id, 9001);
+  assert.match(queued.message_text || "", /Do you still own it\?/);
+  assert.deepEqual(created_fields?.properties, [601]);
+  assert.equal(queued.property_address_written, true);
 });
 
 test("template loader rejects templates when required placeholder data is missing", async () => {

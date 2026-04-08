@@ -239,6 +239,21 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
       })
     );
 
+    route_logger.info("master_owner_feeder.completed", {
+      effective_source_view_name:
+        resolved_result?.rollout?.effective_source_view_name ?? null,
+      resolved_source_view_name:
+        resolved_result?.rollout?.resolved_source_view_name ?? null,
+      resolved_source_view_id:
+        resolved_result?.rollout?.resolved_source_view_id ?? null,
+      scanned_count: resolved_result?.scanned_count ?? 0,
+      eligible_owner_count: resolved_result?.eligible_owner_count ?? 0,
+      queued_count: resolved_result?.queued_count ?? 0,
+      skip_reason_counts: resolved_result?.skip_reason_counts ?? [],
+      template_resolution_diagnostics:
+        resolved_result?.template_resolution_diagnostics ?? null,
+    });
+
     return resolved_result;
   };
 

@@ -15,7 +15,11 @@ import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
-import { renderTemplate } from "@/lib/domain/templates/render-template.js";
+import { LOCAL_TEMPLATE_CANDIDATES } from "@/lib/domain/templates/local-template-registry.js";
+import {
+  evaluateTemplatePlaceholders,
+  renderTemplate,
+} from "@/lib/domain/templates/render-template.js";
 import { validateActivePhone } from "@/lib/domain/compliance/validate-active-phone.js";
 import {
   deriveOutreachSuppressionSignals,
@@ -320,6 +324,168 @@ function countReasons(results = []) {
   return [...counts.entries()]
     .map(([reason, count]) => ({ reason, count }))
     .sort((left, right) => right.count - left.count);
+}
+
+function countPlaceholderMentions(placeholders = []) {
+  const counts = new Map();
+
+  for (const placeholder of placeholders) {
+    const key = clean(placeholder);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([placeholder, count]) => ({ placeholder, count }))
+    .sort((left, right) => right.count - left.count);
+}
+
+function buildTemplateSelectionInputs({
+  effective_follow_up_plan = null,
+  primary_category = "Residential",
+  secondary_category = null,
+  is_first_touch = false,
+  route = null,
+  language = "English",
+  sequence_position = null,
+  context = null,
+  rotation_key = null,
+} = {}) {
+  return {
+    category: effective_follow_up_plan?.category || primary_category,
+    secondary_category: effective_follow_up_plan?.secondary_category ?? secondary_category,
+    // First-touch always clamped to Stage 1 ownership regardless of route output.
+    use_case: is_first_touch
+      ? "ownership_check"
+      : (effective_follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check"),
+    variant_group: is_first_touch
+      ? "Stage 1 — Ownership Confirmation"
+      : (effective_follow_up_plan?.variant_group || route?.variant_group || "Stage 1 — Ownership Confirmation"),
+    tone: is_first_touch
+      ? "Warm"
+      : (effective_follow_up_plan?.tone || route?.tone || "Warm"),
+    gender_variant: "Neutral",
+    language,
+    sequence_position: is_first_touch ? "1st Touch" : sequence_position,
+    paired_with_agent_type: is_first_touch
+      ? "Warm Professional"
+      : (effective_follow_up_plan?.paired_with_agent_type ||
+          route?.template_filters?.paired_with_agent_type ||
+          route?.persona ||
+          "Warm Professional"),
+    recently_used_template_ids: context?.recent?.recently_used_template_ids || [],
+    rotation_key,
+    fallback_agent_type:
+      effective_follow_up_plan?.fallback_agent_type ||
+      route?.template_filters?.fallback_agent_type ||
+      "Warm Professional",
+    context,
+    allowed_variant_groups: is_first_touch ? FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS : undefined,
+  };
+}
+
+function summarizeTemplateSelectionInputs({
+  template_selection_inputs = {},
+  property_item = null,
+  context = null,
+  is_first_touch = false,
+} = {}) {
+  return {
+    category: template_selection_inputs.category || null,
+    secondary_category: template_selection_inputs.secondary_category || null,
+    use_case: template_selection_inputs.use_case || null,
+    variant_group: template_selection_inputs.variant_group || null,
+    tone: template_selection_inputs.tone || null,
+    language: template_selection_inputs.language || null,
+    sequence_position: template_selection_inputs.sequence_position || null,
+    paired_with_agent_type: template_selection_inputs.paired_with_agent_type || null,
+    fallback_agent_type: template_selection_inputs.fallback_agent_type || null,
+    property_item_id: property_item?.item_id ?? null,
+    property_synthetic: Boolean(property_item?.synthetic),
+    property_class: getCategoryValue(property_item, "property-class", null),
+    property_type: getCategoryValue(property_item, "property-type", null),
+    property_address: clean(context?.summary?.property_address) || null,
+    property_city: clean(context?.summary?.property_city) || null,
+    seller_first_name: clean(context?.summary?.seller_first_name) || null,
+    agent_first_name: clean(context?.summary?.agent_first_name) || null,
+    recently_used_template_count:
+      template_selection_inputs.recently_used_template_ids?.length || 0,
+    is_first_touch,
+  };
+}
+
+function inspectStageOneTemplateFallback({
+  context = null,
+  template_selection_inputs = {},
+} = {}) {
+  const fallback_candidates = LOCAL_TEMPLATE_CANDIDATES.filter(
+    (template) =>
+      template?.use_case === "ownership_check" &&
+      FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(template?.variant_group || "")
+  );
+  const missing_required_placeholders = [];
+  const invalid_placeholders = [];
+  let renderable_candidate_count = 0;
+
+  for (const template of fallback_candidates) {
+    const evaluation = evaluateTemplatePlaceholders({
+      template_text: template?.text || "",
+      use_case: template_selection_inputs.use_case || "ownership_check",
+      variant_group:
+        template_selection_inputs.variant_group || "Stage 1 — Ownership Confirmation",
+      context: template_selection_inputs.context || context || {},
+    });
+
+    if (evaluation.ok) {
+      renderable_candidate_count += 1;
+      continue;
+    }
+
+    missing_required_placeholders.push(...evaluation.missing_required_placeholders);
+    invalid_placeholders.push(...evaluation.invalid_placeholders);
+  }
+
+  return {
+    fallback_candidate_count: fallback_candidates.length,
+    renderable_candidate_count,
+    missing_required_placeholder_counts: countPlaceholderMentions(
+      missing_required_placeholders
+    ).slice(0, 10),
+    invalid_placeholder_counts: countPlaceholderMentions(invalid_placeholders).slice(0, 10),
+  };
+}
+
+function summarizeTemplateResolutionDiagnostics(results = []) {
+  const template_failures = results.filter((result) => result?.reason === "template_not_found");
+  const failure_reasons = new Map();
+  const missing_placeholder_counts = new Map();
+
+  for (const failure of template_failures) {
+    const failure_reason =
+      clean(failure?.template_resolution_diagnostics?.failure_reason) || "unknown";
+    failure_reasons.set(failure_reason, (failure_reasons.get(failure_reason) || 0) + 1);
+
+    for (const entry of failure?.template_resolution_diagnostics?.missing_required_placeholder_counts ||
+      []) {
+      const placeholder = clean(entry?.placeholder);
+      if (!placeholder) continue;
+      missing_placeholder_counts.set(
+        placeholder,
+        (missing_placeholder_counts.get(placeholder) || 0) + Number(entry?.count || 0)
+      );
+    }
+  }
+
+  return {
+    template_not_found_count: template_failures.length,
+    failure_reason_counts: [...failure_reasons.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((left, right) => right.count - left.count),
+    missing_required_placeholder_counts: [...missing_placeholder_counts.entries()]
+      .map(([placeholder, count]) => ({ placeholder, count }))
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 10),
+  };
 }
 
 function summarizeMasterOwner(owner_item) {
@@ -2680,51 +2846,65 @@ async function evaluateOwner({
     };
   }
 
+  const template_selection_inputs = buildTemplateSelectionInputs({
+    effective_follow_up_plan,
+    primary_category,
+    secondary_category,
+    is_first_touch,
+    route,
+    language,
+    sequence_position,
+    context,
+    rotation_key,
+  });
+  const template_resolution_inputs = summarizeTemplateSelectionInputs({
+    template_selection_inputs,
+    property_item,
+    context,
+    is_first_touch,
+  });
+
+  log.info("master_owner_feeder.template_resolution_inputs", {
+    evaluation_depth,
+    ...template_resolution_inputs,
+  });
+
   const selected_template = await timedStage(
     log,
     "master_owner_feeder.template_selection",
     {
       evaluation_depth,
+      ...template_resolution_inputs,
     },
-    () =>
-      loadTemplate({
-        category: effective_follow_up_plan?.category || primary_category,
-        secondary_category: effective_follow_up_plan?.secondary_category ?? secondary_category,
-        // First-touch always clamped to Stage 1 ownership regardless of route output.
-        use_case: is_first_touch
-          ? "ownership_check"
-          : (effective_follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check"),
-        variant_group: is_first_touch
-          ? "Stage 1 — Ownership Confirmation"
-          : (effective_follow_up_plan?.variant_group || route?.variant_group || "Stage 1 — Ownership Confirmation"),
-        tone: is_first_touch
-          ? "Warm"
-          : (effective_follow_up_plan?.tone || route?.tone || "Warm"),
-        gender_variant: "Neutral",
-        language,
-        sequence_position: is_first_touch ? "1st Touch" : sequence_position,
-        paired_with_agent_type: is_first_touch
-          ? "Warm Professional"
-          : (effective_follow_up_plan?.paired_with_agent_type ||
-              route?.template_filters?.paired_with_agent_type ||
-              route?.persona ||
-              "Warm Professional"),
-        recently_used_template_ids: context?.recent?.recently_used_template_ids || [],
-        rotation_key,
-        fallback_agent_type:
-          effective_follow_up_plan?.fallback_agent_type ||
-          route?.template_filters?.fallback_agent_type ||
-          "Warm Professional",
-        context,
-        // For first-touch cold outreach, constrain the scoring pool to Stage-1
-        // ownership-check variant groups only.  This prevents follow-up, Stage 4+,
-        // and other later-stage templates from being selected even if they happen
-        // to share the same use_case and score higher due to send stats.
-        allowed_variant_groups: is_first_touch ? FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS : undefined,
-      })
+    () => loadTemplate(template_selection_inputs)
   );
 
   if (!selected_template?.item_id) {
+    const stage_one_fallback = is_first_touch
+      ? inspectStageOneTemplateFallback({
+          context,
+          template_selection_inputs,
+        })
+      : null;
+    const template_resolution_diagnostics = {
+      ...template_resolution_inputs,
+      failure_reason: is_first_touch
+        ? stage_one_fallback?.renderable_candidate_count
+          ? "stage1_templates_available_but_not_selected"
+          : "stage1_fallback_templates_not_renderable"
+        : "no_template_candidates_matched_filters",
+      fallback_candidate_count: stage_one_fallback?.fallback_candidate_count ?? 0,
+      renderable_candidate_count: stage_one_fallback?.renderable_candidate_count ?? 0,
+      missing_required_placeholder_counts:
+        stage_one_fallback?.missing_required_placeholder_counts ?? [],
+      invalid_placeholder_counts: stage_one_fallback?.invalid_placeholder_counts ?? [],
+    };
+
+    log.warn("master_owner_feeder.template_resolution_failed", {
+      evaluation_depth,
+      ...template_resolution_diagnostics,
+    });
+
     return {
       ok: false,
       skipped: true,
@@ -2734,18 +2914,22 @@ async function evaluateOwner({
       property: summarizeProperty(property_item, owner_item),
       outbound_number_source: outbound_number.source,
       outbound_number_diagnostics: outbound_number.diagnostics || null,
+      template_resolution_diagnostics,
     };
   }
 
   // Part 3 — Log the selected template so template rotation can be monitored.
   log.info("master_owner_feeder.template_rotation_selected", {
     master_owner_id,
+    evaluation_depth,
+    ...template_resolution_inputs,
     template_id: selected_template.item_id,
     use_case: selected_template.use_case || null,
     variant_group: selected_template.variant_group || null,
     rotation_key,
     recently_used_count: context?.recent?.recently_used_template_ids?.length || 0,
     brain_item_id: owner_brain_item_id ?? null,
+    template_source: selected_template.source || null,
   });
 
   // ── FINAL FIRST-TOUCH TEMPLATE GUARD ──────────────────────────────────────
@@ -3854,6 +4038,8 @@ export async function runMasterOwnerOutboundFeeder({
     const queued_results = final_results.filter((result) => result?.ok && !result?.skipped);
     const skipped_results = final_results.filter((result) => result?.skipped);
     const skip_reason_counts = countReasons(skipped_results);
+    const template_resolution_diagnostics =
+      summarizeTemplateResolutionDiagnostics(final_results);
     const eligible_owner_count = actionable.length;
     const queued_owner_ids = queued_results
       .map((result) => result?.plan?.master_owner_id ?? result?.owner?.item_id ?? null)
@@ -3883,6 +4069,7 @@ export async function runMasterOwnerOutboundFeeder({
       },
       skipped_count: skipped_results.length,
       skip_reason_counts,
+      template_resolution_diagnostics,
       limit: effective_limit,
       scan_limit: effective_scan_limit,
       page_size,
@@ -3899,7 +4086,10 @@ export async function runMasterOwnerOutboundFeeder({
       eligible_owner_count: summary.eligible_owner_count,
       queued_count: summary.queued_count,
       skipped_count: summary.skipped_count,
-      top_skip_reasons: skip_reason_counts.slice(0, 10),
+      skip_reason_counts,
+      template_resolution_diagnostics,
+      effective_source_view_name: summary.source?.requested_view_name || summary.source?.view_name || null,
+      resolved_source_view_name: summary.source?.view_name || null,
       page_size,
     });
 
