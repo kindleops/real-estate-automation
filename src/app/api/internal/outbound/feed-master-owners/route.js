@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { child } from "@/lib/logging/logger.js";
-import { getPodioRetryAfterSeconds, isPodioRateLimitError } from "@/lib/providers/podio.js";
+import {
+  buildPodioCooldownSkipResult,
+  isPodioRateLimitError,
+  serializePodioError,
+} from "@/lib/providers/podio.js";
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import {
   normalizeFeederRequest,
@@ -27,26 +31,7 @@ function asNumber(value, fallback = null) {
 }
 
 function statusForResult(result) {
-  if (result?.reason === "master_owner_feeder_rate_limited") return 429;
   return result?.ok === false ? 400 : 200;
-}
-
-function buildRateLimitResponse(error) {
-  const retry_after_seconds = getPodioRetryAfterSeconds(error, null);
-  const retry_after_at =
-    Number.isFinite(retry_after_seconds) && retry_after_seconds > 0
-      ? new Date(Date.now() + retry_after_seconds * 1000).toISOString()
-      : null;
-
-  return NextResponse.json(
-    {
-      ok: false,
-      error: "master_owner_feeder_rate_limited",
-      retry_after_seconds,
-      retry_after_at,
-    },
-    { status: 429 }
-  );
 }
 
 export async function GET(request) {
@@ -82,6 +67,16 @@ export async function GET(request) {
 
     const result = await runFeederWithRollout(options, { logger });
 
+    logger.info("master_owner_feeder.route_completed", {
+      method: "GET",
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || null,
+      queued_count: result?.queued_count ?? 0,
+      scanned_count: result?.scanned_count ?? 0,
+      retry_after_seconds: result?.retry_after_seconds ?? null,
+    });
+
     return NextResponse.json(
       {
         ok: result?.ok !== false,
@@ -91,16 +86,40 @@ export async function GET(request) {
       { status: statusForResult(result) }
     );
   } catch (error) {
-    logger.error("master_owner_feeder.failed", { error });
+    const diagnostics = serializePodioError(error);
+
+    logger.error("master_owner_feeder.failed", {
+      method: "GET",
+      error: diagnostics,
+    });
 
     if (isPodioRateLimitError(error)) {
-      return buildRateLimitResponse(error);
+      const result = await buildPodioCooldownSkipResult({
+        scanned_count: 0,
+        raw_items_pulled: 0,
+        eligible_owner_count: 0,
+        queued_count: 0,
+        skipped_count: 0,
+        skip_reason_counts: [],
+        template_resolution_diagnostics: null,
+        results: [],
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          route: "internal/outbound/feed-master-owners",
+          result,
+        },
+        { status: 200 }
+      );
     }
 
     return NextResponse.json(
       {
         ok: false,
         error: "master_owner_feeder_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );
@@ -131,6 +150,16 @@ export async function POST(request) {
 
     const result = await runFeederWithRollout(options, { logger });
 
+    logger.info("master_owner_feeder.route_completed", {
+      method: "POST",
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || null,
+      queued_count: result?.queued_count ?? 0,
+      scanned_count: result?.scanned_count ?? 0,
+      retry_after_seconds: result?.retry_after_seconds ?? null,
+    });
+
     return NextResponse.json(
       {
         ok: result?.ok !== false,
@@ -140,16 +169,40 @@ export async function POST(request) {
       { status: statusForResult(result) }
     );
   } catch (error) {
-    logger.error("master_owner_feeder.failed", { error });
+    const diagnostics = serializePodioError(error);
+
+    logger.error("master_owner_feeder.failed", {
+      method: "POST",
+      error: diagnostics,
+    });
 
     if (isPodioRateLimitError(error)) {
-      return buildRateLimitResponse(error);
+      const result = await buildPodioCooldownSkipResult({
+        scanned_count: 0,
+        raw_items_pulled: 0,
+        eligible_owner_count: 0,
+        queued_count: 0,
+        skipped_count: 0,
+        skip_reason_counts: [],
+        template_resolution_diagnostics: null,
+        results: [],
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          route: "internal/outbound/feed-master-owners",
+          result,
+        },
+        { status: 200 }
+      );
     }
 
     return NextResponse.json(
       {
         ok: false,
         error: "master_owner_feeder_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );

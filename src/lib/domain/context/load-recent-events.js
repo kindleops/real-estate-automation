@@ -2,7 +2,7 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 
 import {
-  fetchAllItems,
+  filterAppItems,
   getCategoryValue,
   getDateValue,
   getFirstAppReferenceId,
@@ -12,6 +12,7 @@ import {
 import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
 
 const DEFAULT_LIMIT = 10;
+const MESSAGE_EVENT_CACHE_TTL_MS = 15_000;
 
 function toTimestamp(value) {
   if (!value) return 0;
@@ -75,40 +76,31 @@ export async function loadRecentEvents({
   master_owner_id = null,
   prospect_id = null,
   limit = DEFAULT_LIMIT,
-} = {}) {
-  const batches = [];
+} = {}, deps = {}) {
+  const {
+    filterAppItemsImpl = filterAppItems,
+  } = deps;
+  const queries = [];
 
   if (phone_item_id) {
-    batches.push(
-      fetchAllItems(
-        APP_IDS.message_events,
-        { "phone-number": phone_item_id },
-        { page_size: Math.max(limit, 25) }
-      )
-    );
+    queries.push({
+      filters: { "phone-number": phone_item_id },
+    });
   }
 
   if (master_owner_id) {
-    batches.push(
-      fetchAllItems(
-        APP_IDS.message_events,
-        { "master-owner": master_owner_id },
-        { page_size: Math.max(limit, 25) }
-      )
-    );
+    queries.push({
+      filters: { "master-owner": master_owner_id },
+    });
   }
 
   if (prospect_id) {
-    batches.push(
-      fetchAllItems(
-        APP_IDS.message_events,
-        { "linked-seller": prospect_id },
-        { page_size: Math.max(limit, 25) }
-      )
-    );
+    queries.push({
+      filters: { "linked-seller": prospect_id },
+    });
   }
 
-  if (!batches.length) {
+  if (!queries.length) {
     return {
       ok: true,
       count: 0,
@@ -116,16 +108,36 @@ export async function loadRecentEvents({
     };
   }
 
-  const results = await Promise.all(batches);
-  const all_items = results.flat().filter(Boolean);
-
   const seen = new Set();
-  const deduped = all_items.filter((item) => {
-    const key = item?.item_id;
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const deduped = [];
+  const page_size = Math.max(Number(limit) || DEFAULT_LIMIT, DEFAULT_LIMIT);
+
+  for (const query of queries) {
+    const response = await filterAppItemsImpl(
+      APP_IDS.message_events,
+      query.filters,
+      {
+        limit: page_size,
+        offset: 0,
+        sort_by: "timestamp",
+        sort_desc: true,
+        cache_ttl_ms: MESSAGE_EVENT_CACHE_TTL_MS,
+      }
+    );
+
+    const items = Array.isArray(response?.items) ? response.items : [];
+
+    for (const item of items) {
+      const key = item?.item_id;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(item);
+    }
+
+    if (deduped.length >= limit) {
+      break;
+    }
+  }
 
   const events = sortByTimestampDesc(deduped)
     .slice(0, limit)

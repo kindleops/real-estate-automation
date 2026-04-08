@@ -7,6 +7,7 @@ import {
   getDateValue,
   getFirstAppReferenceId,
   getNumberValue,
+  isPodioRateLimitError,
   updateItem,
 } from "@/lib/providers/podio.js";
 
@@ -301,6 +302,10 @@ export async function retrySendQueue({
         scheduled_retry_at: decision.scheduled_retry_at || null,
       });
     } catch (err) {
+      if (isPodioRateLimitError(err)) {
+        throw err;
+      }
+
       warn("queue.retry_item_failed", {
         queue_item_id,
         action: decision.action,

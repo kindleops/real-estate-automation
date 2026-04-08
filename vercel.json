@@ -2,24 +2,24 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     {
-      "path": "/api/internal/autopilot/run",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/internal/outbound/feed-master-owners",
-      "schedule": "*/10 * * * *"
-    },
-    {
       "path": "/api/internal/queue/run",
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/internal/outbound/feed-master-owners",
+      "schedule": "2-59/8 * * * *"
+    },
+    {
       "path": "/api/internal/queue/retry",
-      "schedule": "*/10 * * * *"
+      "schedule": "11-59/30 * * * *"
     },
     {
       "path": "/api/internal/queue/reconcile",
-      "schedule": "*/15 * * * *"
+      "schedule": "21 * * * *"
+    },
+    {
+      "path": "/api/internal/autopilot/run",
+      "schedule": "51 * * * *"
     }
   ]
 }

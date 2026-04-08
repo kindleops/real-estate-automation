@@ -2,6 +2,10 @@
 import { retrySendQueue } from "@/lib/domain/queue/retry-send-queue.js";
 import { recordSystemAlert, resolveSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
+import {
+  buildPodioCooldownSkipResult,
+  isPodioRateLimitError,
+} from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
 
 const DEFAULT_RETRY_LIMIT = 50;
@@ -9,10 +13,45 @@ const DEFAULT_RETRY_LIMIT = 50;
 export async function runRetryRunner({
   limit = DEFAULT_RETRY_LIMIT,
   master_owner_id = null,
-} = {}) {
+} = {}, deps = {}) {
   const scoped_master_owner_id = Number(master_owner_id || 0) || null;
+  const with_run_lock = deps.withRunLock || withRunLock;
+  const record_system_alert = deps.recordSystemAlert || recordSystemAlert;
+  const resolve_system_alert = deps.resolveSystemAlert || resolveSystemAlert;
+  const retry_send_queue = deps.retrySendQueue || retrySendQueue;
+  const build_cooldown_skip_result =
+    deps.buildPodioCooldownSkipResult || buildPodioCooldownSkipResult;
 
-  return withRunLock({
+  const cooldown_skip = await build_cooldown_skip_result({
+    processed_count: 0,
+    retried_count: 0,
+    scheduled_count: 0,
+    terminal_count: 0,
+    skipped_count: 0,
+    scanned_count: 0,
+    results: [],
+    master_owner_id: scoped_master_owner_id,
+  });
+
+  if (cooldown_skip?.podio_cooldown?.active) {
+    warn("queue.retry_runner_skipped_podio_cooldown", {
+      limit,
+      master_owner_id: scoped_master_owner_id,
+      retry_after_seconds: cooldown_skip.retry_after_seconds,
+      retry_after_at: cooldown_skip.retry_after_at,
+      podio_status: cooldown_skip.podio_cooldown?.status ?? null,
+      podio_path: cooldown_skip.podio_cooldown?.path ?? null,
+      podio_operation: cooldown_skip.podio_cooldown?.operation ?? null,
+      rate_limit_remaining:
+        cooldown_skip.podio_cooldown?.rate_limit_remaining ?? null,
+      rate_limit_limit:
+        cooldown_skip.podio_cooldown?.rate_limit_limit ?? null,
+    });
+
+    return cooldown_skip;
+  }
+
+  return with_run_lock({
     scope: scoped_master_owner_id
       ? `queue-retry:${scoped_master_owner_id}`
       : "queue-retry",
@@ -23,7 +62,7 @@ export async function runRetryRunner({
       master_owner_id: scoped_master_owner_id,
     },
     onLocked: async (lock) => {
-      await recordSystemAlert({
+      await record_system_alert({
         subsystem: "retries",
         code: "runner_overlap",
         severity: "warning",
@@ -60,13 +99,13 @@ export async function runRetryRunner({
       });
 
       try {
-        const result = await retrySendQueue({
+        const result = await retry_send_queue({
           limit,
           master_owner_id: scoped_master_owner_id,
         });
 
         if ((result?.skipped_count || 0) > 0) {
-          await recordSystemAlert({
+          await record_system_alert({
             subsystem: "retries",
             code: "runner_skipped_items",
             severity: "warning",
@@ -80,7 +119,7 @@ export async function runRetryRunner({
             },
           });
         } else {
-          await resolveSystemAlert({
+          await resolve_system_alert({
             subsystem: "retries",
             code: "runner_skipped_items",
             dedupe_key: scoped_master_owner_id
@@ -105,13 +144,32 @@ export async function runRetryRunner({
           ...result,
         };
       } catch (err) {
+        if (isPodioRateLimitError(err)) {
+          warn("queue.retry_runner_rate_limit_abort", {
+            limit,
+            master_owner_id: scoped_master_owner_id,
+            message: err?.message || "Podio cooldown active",
+          });
+
+          return build_cooldown_skip_result({
+            processed_count: 0,
+            retried_count: 0,
+            scheduled_count: 0,
+            terminal_count: 0,
+            skipped_count: 0,
+            scanned_count: 0,
+            results: [],
+            master_owner_id: scoped_master_owner_id,
+          });
+        }
+
         warn("queue.retry_runner_failed", {
           limit,
           message: err?.message || "Unknown retry runner error",
           master_owner_id: scoped_master_owner_id,
         });
 
-        await recordSystemAlert({
+        await record_system_alert({
           subsystem: "retries",
           code: "runner_failed",
           severity: "high",

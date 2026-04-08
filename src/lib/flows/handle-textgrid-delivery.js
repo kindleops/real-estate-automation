@@ -35,6 +35,7 @@ import {
 import { updateMessageEventStatus } from "@/lib/domain/events/update-message-event-status.js";
 import { updateBrainAfterDelivery } from "@/lib/domain/brain/update-brain-after-delivery.js";
 import { info, warn } from "@/lib/logging/logger.js";
+import { normalizeTextgridDeliveryPayload } from "@/lib/webhooks/textgrid-delivery-normalize.js";
 
 const QUEUE_FIELDS = {
   queue_status: "queue-status",
@@ -101,41 +102,30 @@ function lower(value) {
 }
 
 function extractWebhookPayload(payload = {}) {
-  const message_id =
-    payload.id ||
-    payload.message_id ||
-    payload.messageId ||
-    null;
-
-  const from =
-    payload.from ||
-    payload.sender ||
-    null;
-
-  const to =
-    payload.to ||
-    payload.recipient ||
-    null;
-
+  const normalized = normalizeTextgridDeliveryPayload(payload?.raw || payload);
+  const message_id = normalized.message_id || null;
+  const from = normalized.from || null;
+  const to = normalized.to || null;
   const status = lower(
-    payload.status ||
+    normalized.status ||
+      payload.status ||
       payload.event_type ||
       payload.event ||
       ""
   );
-
   const error_message =
+    normalized.error_message ||
     payload.error_message ||
     payload.error?.message ||
     "";
-
   const error_status =
+    normalized.error_code ||
     payload.error_status ||
     payload.error?.status ||
     payload.status_code ||
     null;
-
   const client_reference_id =
+    normalized.client_reference_id ||
     payload.client_reference_id ||
     payload.clientReferenceId ||
     payload.external_id ||
@@ -145,8 +135,8 @@ function extractWebhookPayload(payload = {}) {
     payload.raw?.external_id ||
     payload.raw?.externalId ||
     null;
-
   const delivered_at =
+    normalized.delivered_at ||
     payload.delivered_at ||
     payload.timestamp ||
     payload.updated_at ||

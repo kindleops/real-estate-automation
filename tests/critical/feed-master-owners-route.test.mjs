@@ -5,7 +5,16 @@ import {
   normalizeFeederRequest,
   runFeederWithRollout,
 } from "@/lib/domain/master-owners/feed-master-owners-request.js";
-import { DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME } from "@/lib/config/rollout-controls.js";
+import {
+  DEFAULT_FEEDER_BATCH_SIZE,
+  DEFAULT_FEEDER_BUFFER_CRITICAL_LOW,
+  DEFAULT_FEEDER_BUFFER_HEALTHY_TARGET,
+  DEFAULT_FEEDER_BUFFER_IDEAL_TARGET,
+  DEFAULT_FEEDER_BUFFER_MIN_QUEUED,
+  DEFAULT_FEEDER_BUFFER_REPLENISH_TARGET,
+  DEFAULT_FEEDER_SCAN_LIMIT,
+  DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME,
+} from "@/lib/config/rollout-controls.js";
 
 function makeLogger() {
   const entries = [];
@@ -98,8 +107,8 @@ test("runFeederWithRollout normalizes zero limit and scan_limit to defaults", as
   );
 
   assert.equal(execute_calls.length, 1);
-  assert.equal(execute_calls[0].limit, 25);
-  assert.equal(execute_calls[0].scan_limit, 150);
+  assert.equal(execute_calls[0].limit, DEFAULT_FEEDER_BATCH_SIZE);
+  assert.equal(execute_calls[0].scan_limit, DEFAULT_FEEDER_SCAN_LIMIT);
   assert.equal(execute_calls[0].source_view_name, "SMS / TIER #1 / FILE #1");
 });
 
@@ -109,6 +118,150 @@ test("normalizeFeederRequest maps zero values to feeder defaults", () => {
     scan_limit: 0,
   });
 
-  assert.equal(normalized.limit, 25);
-  assert.equal(normalized.scan_limit, 150);
+  assert.equal(normalized.limit, DEFAULT_FEEDER_BATCH_SIZE);
+  assert.equal(normalized.scan_limit, DEFAULT_FEEDER_SCAN_LIMIT);
+});
+
+test("runFeederWithRollout skips safely when Podio cooldown is active", async () => {
+  const { execute_calls, deps } = makeDeps();
+  let with_run_lock_called = false;
+
+  const result = await runFeederWithRollout(
+    {
+      source_view_name: "SMS / TIER #1 / ALL",
+    },
+    {
+      ...deps,
+      buildPodioCooldownSkipResultImpl: async () => ({
+        ok: true,
+        skipped: true,
+        reason: "podio_rate_limit_cooldown_active",
+        retry_after_seconds: 3600,
+        retry_after_at: "2026-04-08T20:20:25.000Z",
+        podio_cooldown: {
+          active: true,
+          status: 420,
+          path: "/item/app/30541680/filter/",
+          operation: "filter_items",
+          rate_limit_remaining: 0,
+        },
+        scanned_count: 0,
+        eligible_owner_count: 0,
+        queued_count: 0,
+        skip_reason_counts: [],
+      }),
+      withRunLockImpl: async () => {
+        with_run_lock_called = true;
+        throw new Error("withRunLockImpl should not run during Podio cooldown");
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "podio_rate_limit_cooldown_active");
+  assert.equal(result.retry_after_seconds, 3600);
+  assert.equal(execute_calls.length, 0);
+  assert.equal(with_run_lock_called, false);
+});
+
+test("runFeederWithRollout tops up the queue buffer when future inventory is low", async () => {
+  const { execute_calls, deps } = makeDeps();
+  let with_run_lock_called = false;
+
+  const result = await runFeederWithRollout(
+    {
+      source_view_name: "SMS / TIER #1 / ALL",
+    },
+    {
+      ...deps,
+      resolveMutationDryRunImpl: () => ({
+        effective_dry_run: false,
+        reason: "live_mode",
+      }),
+      getRolloutControlsImpl: () => ({
+        feeder_default_batch: DEFAULT_FEEDER_BATCH_SIZE,
+        feeder_default_scan_limit: DEFAULT_FEEDER_SCAN_LIMIT,
+        feeder_buffer_min_queued: DEFAULT_FEEDER_BUFFER_MIN_QUEUED,
+        feeder_buffer_critical_low: DEFAULT_FEEDER_BUFFER_CRITICAL_LOW,
+        feeder_buffer_replenish_target: DEFAULT_FEEDER_BUFFER_REPLENISH_TARGET,
+        feeder_buffer_healthy_target: DEFAULT_FEEDER_BUFFER_HEALTHY_TARGET,
+        feeder_buffer_ideal_target: DEFAULT_FEEDER_BUFFER_IDEAL_TARGET,
+        feeder_max_batch: 500,
+        feeder_view_only_id: null,
+        feeder_view_only_name: null,
+        single_master_owner_id: null,
+      }),
+      capFeederBatchImpl: (value) => Math.min(Number(value || 0), 500),
+      capFeederScanLimitImpl: (value) => Math.min(Number(value || 0), 1000),
+      inspectQueueBufferImpl: async () => ({
+        queued_inventory_count: 180,
+        available_inventory_count: 180,
+        future_inventory_count: 12,
+        due_inventory_count: 6,
+        queued_future_count: 12,
+        queued_due_now_count: 6,
+        sending_count: 0,
+        failed_recent_count: 3,
+        critical_low_threshold: 250,
+        replenish_target: 750,
+        healthy_target: 1500,
+        ideal_target: 2000,
+        desired_buffer_target: 2000,
+        critical_low_threshold_breached: true,
+        replenish_threshold_met: false,
+        healthy_buffer_threshold_met: false,
+        ideal_buffer_threshold_met: false,
+        buffer_target: 2000,
+        buffer_deficit: 1820,
+        buffer_satisfied: false,
+        snapshot_limit: 500,
+      }),
+      withRunLockImpl: async ({ fn }) => {
+        with_run_lock_called = true;
+        return fn();
+      },
+    }
+  );
+
+  assert.equal(with_run_lock_called, true);
+  assert.equal(execute_calls.length, 1);
+  assert.equal(execute_calls[0].limit, 500);
+  assert.equal(execute_calls[0].scan_limit, 1000);
+  assert.equal(result.queue_inventory.available_inventory_count, 180);
+  assert.equal(result.queue_inventory.future_inventory_count, 12);
+  assert.equal(result.queue_inventory.critical_low_threshold_breached, true);
+  assert.equal(result.rollout.queue_inventory.buffer_deficit, 1820);
+});
+
+test("runFeederWithRollout skips live feeding when queued future inventory already satisfies the buffer", async () => {
+  const { execute_calls, deps } = makeDeps();
+
+  const result = await runFeederWithRollout(
+    {
+      source_view_name: "SMS / TIER #1 / ALL",
+    },
+    {
+      ...deps,
+      resolveMutationDryRunImpl: () => ({
+        effective_dry_run: false,
+        reason: "live_mode",
+      }),
+      inspectQueueBufferImpl: async () => ({
+        queued_inventory_count: 140,
+        future_inventory_count: 125,
+        due_inventory_count: 15,
+        buffer_target: 120,
+        buffer_deficit: 0,
+        buffer_satisfied: true,
+        snapshot_limit: 120,
+      }),
+    }
+  );
+
+  assert.equal(execute_calls.length, 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "feeder_queue_buffer_satisfied");
+  assert.equal(result.queue_inventory.future_inventory_count, 125);
 });

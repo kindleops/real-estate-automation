@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import axios from "axios";
 import APP_IDS from "@/lib/config/app-ids.js";
 import { child } from "@/lib/logging/logger.js";
@@ -32,6 +34,25 @@ const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_DELAY_MS = 15_000;
 const LOW_RATE_LIMIT_THRESHOLDS = [250, 100, 50];
+const FILTER_RESULT_CACHE_MAX_TTL_MS = 30_000;
+const PODIO_COOLDOWN_STATE_FILE =
+  process.env.PODIO_COOLDOWN_STATE_FILE ||
+  "/tmp/real-estate-automation-podio-rate-limit-cooldown.json";
+
+const _filter_result_cache =
+  globalThis.__rea_podio_filter_result_cache__ || new Map();
+if (!globalThis.__rea_podio_filter_result_cache__) {
+  globalThis.__rea_podio_filter_result_cache__ = _filter_result_cache;
+}
+
+const _podio_cooldown_runtime = globalThis.__rea_podio_cooldown_runtime__ || {
+  loaded: false,
+  state: null,
+  read_promise: null,
+};
+if (!globalThis.__rea_podio_cooldown_runtime__) {
+  globalThis.__rea_podio_cooldown_runtime__ = _podio_cooldown_runtime;
+}
 
 const REQUIRED_ENV = {
   PODIO_CLIENT_ID,
@@ -49,26 +70,67 @@ for (const [key, value] of Object.entries(REQUIRED_ENV)) {
 // ══════════════════════════════════════════════════════════════════════════
 
 export class PodioError extends Error {
-  constructor(message, { method, path, status, data } = {}) {
+  constructor(
+    message,
+    {
+      method,
+      path,
+      status,
+      data,
+      headers = null,
+      operation = null,
+      retry_after_seconds = null,
+      rate_limit_limit = null,
+      rate_limit_remaining = null,
+      code = null,
+      cooldown_until = null,
+      cooldown_active = false,
+      cause = null,
+    } = {}
+  ) {
     super(message);
     this.name = "PodioError";
     this.method = method ?? null;
     this.path = path ?? null;
     this.status = status ?? null;
     this.data = data ?? null;
+    this.headers = headers ?? null;
+    this.operation = operation ?? null;
+    this.retry_after_seconds = retry_after_seconds ?? null;
+    this.rate_limit_limit = rate_limit_limit ?? null;
+    this.rate_limit_remaining = rate_limit_remaining ?? null;
+    this.code = code ?? null;
+    this.cooldown_until = cooldown_until ?? null;
+    this.cooldown_active = Boolean(cooldown_active);
+    this.cause = cause ?? null;
   }
 }
 
 function toPodioError(err, method, path) {
   const status = err?.response?.status ?? null;
   const data = err?.response?.data ?? null;
+  const headers = err?.response?.headers ?? null;
+  const retry_after_seconds = getPodioRetryAfterSeconds(err, null);
+  const rate_limit = extractRateLimitMeta(headers);
   const message =
     data?.error_description ??
     data?.error ??
     err?.message ??
     "Unknown Podio error";
 
-  return new PodioError(message, { method, path, status, data });
+  return new PodioError(message, {
+    method,
+    path,
+    status,
+    data,
+    headers,
+    operation: derivePodioOperation(method, path),
+    retry_after_seconds,
+    rate_limit_limit: rate_limit.rate_limit_limit,
+    rate_limit_remaining: rate_limit.rate_limit_remaining,
+    code: err?.code ?? null,
+    cause: err ?? null,
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -322,8 +384,17 @@ export function isRetryablePodioRequestError(err) {
 }
 
 export function isPodioRateLimitError(err) {
+  if (err?.cooldown_active) return true;
+
   const status = err?.response?.status ?? err?.status ?? 0;
   if (status === 420 || status === 429) return true;
+
+  if (
+    clean(err?.data?.error).toLowerCase() === "podio_rate_limit_cooldown_active" ||
+    clean(err?.response?.data?.error).toLowerCase() === "podio_rate_limit_cooldown_active"
+  ) {
+    return true;
+  }
 
   const message_candidates = [
     err?.response?.data?.error_description,
@@ -338,6 +409,19 @@ export function isPodioRateLimitError(err) {
 }
 
 export function getPodioRetryAfterSeconds(err, fallback = null) {
+  const direct_candidates = [
+    err?.retry_after_seconds,
+    err?.response?.data?.retry_after_seconds,
+    getHeaderValue(err?.headers || err?.response?.headers || {}, "retry-after"),
+  ];
+
+  for (const candidate of direct_candidates) {
+    const seconds = Number(candidate);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return seconds;
+    }
+  }
+
   const message_candidates = [
     err?.response?.data?.error_description,
     err?.response?.data?.error,
@@ -356,6 +440,382 @@ export function getPodioRetryAfterSeconds(err, fallback = null) {
   }
 
   return fallback;
+}
+
+function buildEmptyPodioCooldownState() {
+  return {
+    active: false,
+    cooldown_started_at: null,
+    cooldown_until: null,
+    retry_after_seconds: null,
+    retry_after_seconds_remaining: null,
+    method: null,
+    path: null,
+    operation: null,
+    status: null,
+    rate_limit_limit: null,
+    rate_limit_remaining: null,
+    error_message: null,
+    updated_at: null,
+  };
+}
+
+function toTimestamp(value) {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function normalizePositiveInteger(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function normalizePodioCooldownState(value = null) {
+  if (!value || typeof value !== "object") {
+    return buildEmptyPodioCooldownState();
+  }
+
+  return {
+    ...buildEmptyPodioCooldownState(),
+    ...value,
+    active: Boolean(value?.active),
+    retry_after_seconds: normalizePositiveInteger(value?.retry_after_seconds, null),
+    rate_limit_limit: toHeaderNumber(value?.rate_limit_limit),
+    rate_limit_remaining: toHeaderNumber(value?.rate_limit_remaining),
+    status: toHeaderNumber(value?.status),
+    method: clean(value?.method).toUpperCase() || null,
+    path: clean(value?.path) || null,
+    operation: clean(value?.operation) || null,
+    cooldown_started_at: clean(value?.cooldown_started_at) || null,
+    cooldown_until: clean(value?.cooldown_until) || null,
+    error_message: clean(value?.error_message) || null,
+    updated_at: clean(value?.updated_at) || null,
+  };
+}
+
+function finalizePodioCooldownState(value = null) {
+  const state = normalizePodioCooldownState(value);
+  const cooldown_until_ts = toTimestamp(state.cooldown_until);
+
+  if (!state.active || cooldown_until_ts === null) {
+    return buildEmptyPodioCooldownState();
+  }
+
+  const remaining_ms = cooldown_until_ts - Date.now();
+  if (remaining_ms <= 0) {
+    return buildEmptyPodioCooldownState();
+  }
+
+  return {
+    ...state,
+    active: true,
+    retry_after_seconds_remaining: Math.max(1, Math.ceil(remaining_ms / 1000)),
+  };
+}
+
+async function persistPodioCooldownState(state) {
+  const file_path = PODIO_COOLDOWN_STATE_FILE;
+  const directory = path.dirname(file_path);
+  await fs.mkdir(directory, { recursive: true }).catch(() => {});
+  await fs.writeFile(
+    file_path,
+    JSON.stringify(normalizePodioCooldownState(state), null, 2),
+    "utf8"
+  );
+}
+
+async function loadPodioCooldownState(force_reload = false) {
+  if (_podio_cooldown_runtime.loaded && !force_reload) {
+    return normalizePodioCooldownState(_podio_cooldown_runtime.state);
+  }
+
+  if (_podio_cooldown_runtime.read_promise && !force_reload) {
+    return _podio_cooldown_runtime.read_promise;
+  }
+
+  const read_promise = fs
+    .readFile(PODIO_COOLDOWN_STATE_FILE, "utf8")
+    .then((raw) => {
+      try {
+        return normalizePodioCooldownState(JSON.parse(raw));
+      } catch {
+        return buildEmptyPodioCooldownState();
+      }
+    })
+    .catch((error) => {
+      if (error?.code !== "ENOENT") {
+        logger.warn("podio.cooldown_state_read_failed", {
+          message: error?.message || null,
+          file_path: PODIO_COOLDOWN_STATE_FILE,
+        });
+      }
+      return buildEmptyPodioCooldownState();
+    })
+    .finally(() => {
+      _podio_cooldown_runtime.read_promise = null;
+    });
+
+  _podio_cooldown_runtime.read_promise = read_promise;
+  const state = await read_promise;
+  _podio_cooldown_runtime.state = state;
+  _podio_cooldown_runtime.loaded = true;
+  return state;
+}
+
+export async function clearPodioRateLimitCooldown({
+  reason = "manual_clear",
+  suppress_log = false,
+} = {}) {
+  const next_state = {
+    ...buildEmptyPodioCooldownState(),
+    updated_at: new Date().toISOString(),
+  };
+
+  _podio_cooldown_runtime.state = next_state;
+  _podio_cooldown_runtime.loaded = true;
+
+  try {
+    await persistPodioCooldownState(next_state);
+  } catch (error) {
+    logger.warn("podio.cooldown_state_write_failed", {
+      message: error?.message || null,
+      file_path: PODIO_COOLDOWN_STATE_FILE,
+      reason,
+    });
+  }
+
+  if (!suppress_log) {
+    logger.info("podio.cooldown_cleared", {
+      reason,
+    });
+  }
+
+  return buildEmptyPodioCooldownState();
+}
+
+export async function getPodioRateLimitCooldown({ force_reload = false } = {}) {
+  const stored_state = await loadPodioCooldownState(force_reload);
+  const current_state = finalizePodioCooldownState(stored_state);
+
+  if (!current_state.active && stored_state?.active) {
+    await clearPodioRateLimitCooldown({
+      reason: "cooldown_expired",
+      suppress_log: true,
+    });
+    return buildEmptyPodioCooldownState();
+  }
+
+  return current_state;
+}
+
+export async function activatePodioRateLimitCooldown({
+  method = "",
+  path = "",
+  status = 420,
+  headers = {},
+  retry_after_seconds = null,
+  error = null,
+} = {}) {
+  const seconds = normalizePositiveInteger(
+    retry_after_seconds,
+    getPodioRetryAfterSeconds(error, null)
+  );
+
+  if (!seconds) {
+    return getPodioRateLimitCooldown();
+  }
+
+  const existing = await getPodioRateLimitCooldown();
+  const now = Date.now();
+  const next_until_ts = now + seconds * 1000;
+  const existing_until_ts = toTimestamp(existing.cooldown_until) ?? 0;
+  const cooldown_until_ts = Math.max(existing_until_ts, next_until_ts);
+  const rate_limit = extractRateLimitMeta(headers);
+  const next_state = normalizePodioCooldownState({
+    active: true,
+    cooldown_started_at: existing.active
+      ? existing.cooldown_started_at || new Date(now).toISOString()
+      : new Date(now).toISOString(),
+    cooldown_until: new Date(cooldown_until_ts).toISOString(),
+    retry_after_seconds: Math.max(
+      seconds,
+      normalizePositiveInteger(existing.retry_after_seconds_remaining, 0)
+    ),
+    method: clean(method).toUpperCase() || null,
+    path: clean(path) || null,
+    operation: derivePodioOperation(method, path),
+    status: Number.isFinite(Number(status)) ? Number(status) : 420,
+    rate_limit_limit: rate_limit.rate_limit_limit,
+    rate_limit_remaining:
+      rate_limit.rate_limit_remaining ?? 0,
+    error_message: clean(error?.message) || null,
+    updated_at: new Date().toISOString(),
+  });
+
+  _podio_cooldown_runtime.state = next_state;
+  _podio_cooldown_runtime.loaded = true;
+
+  try {
+    await persistPodioCooldownState(next_state);
+  } catch (persist_error) {
+    logger.warn("podio.cooldown_state_write_failed", {
+      message: persist_error?.message || null,
+      file_path: PODIO_COOLDOWN_STATE_FILE,
+      status: next_state.status,
+      path: next_state.path,
+      operation: next_state.operation,
+    });
+  }
+
+  logger.warn("podio.cooldown_activated", {
+    ...finalizePodioCooldownState(next_state),
+  });
+
+  return getPodioRateLimitCooldown();
+}
+
+export async function buildPodioCooldownSkipResult(base = {}) {
+  const cooldown = await getPodioRateLimitCooldown();
+  return {
+    ok: true,
+    skipped: true,
+    reason: "podio_rate_limit_cooldown_active",
+    retry_after_seconds:
+      cooldown.retry_after_seconds_remaining ??
+      cooldown.retry_after_seconds ??
+      null,
+    retry_after_at: cooldown.cooldown_until || null,
+    podio_cooldown: cooldown,
+    ...base,
+  };
+}
+
+function deriveErrorPath(error) {
+  const direct_path =
+    clean(error?.path) ||
+    clean(error?.config?.path) ||
+    clean(error?.response?.config?.path);
+  if (direct_path) return direct_path;
+
+  const raw_url =
+    clean(error?.config?.url) ||
+    clean(error?.response?.config?.url) ||
+    "";
+  if (!raw_url) return null;
+
+  try {
+    const parsed = new URL(raw_url);
+    return `${parsed.pathname}${parsed.search || ""}` || null;
+  } catch {
+    return raw_url.replace(PODIO_API_BASE, "") || null;
+  }
+}
+
+export function serializePodioError(error) {
+  const headers = error?.headers || error?.response?.headers || {};
+  const rate_limit = extractRateLimitMeta(headers);
+  const method =
+    clean(error?.method || error?.config?.method || error?.response?.config?.method)
+      .toUpperCase() || null;
+  const path = deriveErrorPath(error);
+  const retry_after_seconds = getPodioRetryAfterSeconds(error, null);
+
+  return {
+    name: clean(error?.name) || null,
+    message: clean(error?.message) || "Unknown Podio error",
+    stack: error?.stack || error?.cause?.stack || null,
+    code: clean(error?.code) || null,
+    status:
+      Number.isFinite(Number(error?.status)) ||
+      Number.isFinite(Number(error?.response?.status))
+        ? Number(error?.status ?? error?.response?.status)
+        : null,
+    method,
+    path,
+    operation:
+      clean(error?.operation) ||
+      (method && path ? derivePodioOperation(method, path) : null),
+    retry_after_seconds,
+    rate_limit_limit:
+      toHeaderNumber(error?.rate_limit_limit) ?? rate_limit.rate_limit_limit,
+    rate_limit_remaining:
+      toHeaderNumber(error?.rate_limit_remaining) ?? rate_limit.rate_limit_remaining,
+    cooldown_until: clean(error?.cooldown_until) || null,
+    cooldown_active: Boolean(error?.cooldown_active),
+    data_error: clean(error?.data?.error || error?.response?.data?.error) || null,
+    data_error_description:
+      clean(
+        error?.data?.error_description || error?.response?.data?.error_description
+      ) || null,
+  };
+}
+
+function stableSerialize(value) {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerialize(entry)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function normalizeCacheTtlMs(value) {
+  const ttl = Number(value);
+  if (!Number.isFinite(ttl) || ttl <= 0) return 0;
+  return Math.min(Math.floor(ttl), FILTER_RESULT_CACHE_MAX_TTL_MS);
+}
+
+async function readThroughFilterResultCache(cache_key, ttl_ms, loader) {
+  const ttl = normalizeCacheTtlMs(ttl_ms);
+  if (!ttl) {
+    return loader();
+  }
+
+  const now = Date.now();
+  const cached = _filter_result_cache.get(cache_key);
+
+  if (cached?.value && cached.expires_at > now) {
+    return cached.value;
+  }
+
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  if (cached && cached.expires_at <= now) {
+    _filter_result_cache.delete(cache_key);
+  }
+
+  const promise = Promise.resolve()
+    .then(loader)
+    .then((value) => {
+      _filter_result_cache.set(cache_key, {
+        value,
+        expires_at: Date.now() + ttl,
+      });
+      return value;
+    })
+    .catch((error) => {
+      _filter_result_cache.delete(cache_key);
+      throw error;
+    });
+
+  _filter_result_cache.set(cache_key, {
+    promise,
+    expires_at: now + ttl,
+  });
+
+  return promise;
+}
+
+export function clearPodioFilterResultCache() {
+  _filter_result_cache.clear();
 }
 
 export function recordPodioRateLimitObservation({
@@ -507,6 +967,14 @@ async function _executeWithRetry(buildConfig, attempt = 0) {
     });
 
     if (rate_limited) {
+      await activatePodioRateLimitCooldown({
+        method: config.method,
+        path: config.path,
+        status: err?.response?.status ?? 420,
+        headers: err?.response?.headers || {},
+        retry_after_seconds,
+        error: err,
+      });
       throw err;
     }
 
@@ -524,6 +992,48 @@ async function _executeWithRetry(buildConfig, attempt = 0) {
 // ══════════════════════════════════════════════════════════════════════════
 
 export async function podioRequest(method, path, data = null, params = null) {
+  const active_cooldown = await getPodioRateLimitCooldown();
+  if (active_cooldown.active) {
+    logger.warn("podio.request_skipped_cooldown", {
+      method: clean(method).toUpperCase() || null,
+      path: clean(path) || null,
+      operation: derivePodioOperation(method, path),
+      retry_after_seconds:
+        active_cooldown.retry_after_seconds_remaining ??
+        active_cooldown.retry_after_seconds ??
+        null,
+      cooldown_until: active_cooldown.cooldown_until || null,
+      rate_limit_remaining: active_cooldown.rate_limit_remaining ?? null,
+      rate_limit_limit: active_cooldown.rate_limit_limit ?? null,
+    });
+
+    throw new PodioError(
+      `Podio cooldown active until ${active_cooldown.cooldown_until}`,
+      {
+        method,
+        path,
+        status: active_cooldown.status || 420,
+        data: {
+          error: "podio_rate_limit_cooldown_active",
+        },
+        headers: {
+          "x-rate-limit-limit": active_cooldown.rate_limit_limit,
+          "x-rate-limit-remaining": active_cooldown.rate_limit_remaining,
+        },
+        operation: derivePodioOperation(method, path),
+        retry_after_seconds:
+          active_cooldown.retry_after_seconds_remaining ??
+          active_cooldown.retry_after_seconds ??
+          null,
+        rate_limit_limit: active_cooldown.rate_limit_limit ?? null,
+        rate_limit_remaining:
+          active_cooldown.rate_limit_remaining ?? null,
+        cooldown_until: active_cooldown.cooldown_until || null,
+        cooldown_active: true,
+      }
+    );
+  }
+
   const buildConfig = async () => ({
     method,
     url: `${PODIO_API_BASE}${path}`,
@@ -614,6 +1124,7 @@ export function filterAppItems(app_id, filters = {}, limitOrOptions = {}, maybeO
   let sort_by;
   let sort_desc;
   let remember;
+  let cache_ttl_ms = 0;
 
   if (typeof limitOrOptions === "number") {
     limit = limitOrOptions;
@@ -625,6 +1136,7 @@ export function filterAppItems(app_id, filters = {}, limitOrOptions = {}, maybeO
     sort_by = options.sort_by;
     sort_desc = options.sort_desc;
     remember = options.remember;
+    cache_ttl_ms = options.cache_ttl_ms ?? 0;
   }
 
   const payload = {
@@ -638,7 +1150,12 @@ export function filterAppItems(app_id, filters = {}, limitOrOptions = {}, maybeO
     ...(typeof remember === "boolean" && { remember }),
   };
 
-  return podioRequest("post", `/item/app/${app_id}/filter/`, payload);
+  const path = `/item/app/${app_id}/filter/`;
+  const cache_key = `filter:${app_id}:${stableSerialize(payload)}`;
+
+  return readThroughFilterResultCache(cache_key, cache_ttl_ms, () =>
+    podioRequest("post", path, payload)
+  );
 }
 
 export function filterAppItemsByView(
@@ -652,6 +1169,7 @@ export function filterAppItemsByView(
   let sort_by;
   let sort_desc;
   let remember;
+  let cache_ttl_ms = 0;
 
   if (typeof limitOrOptions === "number") {
     limit = limitOrOptions;
@@ -663,6 +1181,7 @@ export function filterAppItemsByView(
     sort_by = options.sort_by;
     sort_desc = options.sort_desc;
     remember = options.remember;
+    cache_ttl_ms = options.cache_ttl_ms ?? 0;
   }
 
   const payload = {
@@ -673,7 +1192,12 @@ export function filterAppItemsByView(
     ...(typeof remember === "boolean" && { remember }),
   };
 
-  return podioRequest("post", `/item/app/${app_id}/filter/${view_id}/`, payload);
+  const path = `/item/app/${app_id}/filter/${view_id}/`;
+  const cache_key = `filter_view:${app_id}:${view_id}:${stableSerialize(payload)}`;
+
+  return readThroughFilterResultCache(cache_key, cache_ttl_ms, () =>
+    podioRequest("post", path, payload)
+  );
 }
 
 export function getAppViews(app_id, { include_standard_views = false } = {}) {

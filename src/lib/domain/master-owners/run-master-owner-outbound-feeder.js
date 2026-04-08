@@ -1,5 +1,9 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 import {
+  DEFAULT_FEEDER_BATCH_SIZE,
+  DEFAULT_FEEDER_SCAN_LIMIT,
+} from "@/lib/config/rollout-controls.js";
+import {
   MASTER_OWNER_FIELDS,
   findMasterOwnerItems,
   findMasterOwnerItemsByView,
@@ -61,10 +65,11 @@ import {
   normalizeLanguage,
 } from "@/lib/providers/podio.js";
 import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
+import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
 import { child, info, warn } from "@/lib/logging/logger.js";
 
-const DEFAULT_BATCH_SIZE = 25;
-const DEFAULT_SCAN_LIMIT = 150;
+const DEFAULT_BATCH_SIZE = DEFAULT_FEEDER_BATCH_SIZE;
+const DEFAULT_SCAN_LIMIT = DEFAULT_FEEDER_SCAN_LIMIT;
 const SAFE_TEST_LIMIT = 3;
 const SAFE_TEST_SCAN_LIMIT = 10;
 const MAX_HISTORY_ITEMS = 100;
@@ -380,6 +385,7 @@ function buildTemplateSelectionInputs({
       route?.template_filters?.fallback_agent_type ||
       "Warm Professional",
     context,
+    allow_variant_group_fallback: true,
     allowed_variant_groups: is_first_touch ? FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS : undefined,
   };
 }
@@ -461,6 +467,11 @@ function summarizeTemplateResolutionDiagnostics(results = []) {
   const selected_templates = new Map();
   const failure_reasons = new Map();
   const missing_placeholder_counts = new Map();
+  let template_attached_count = 0;
+  let template_unattached_count = 0;
+  let template_app_field_written_count = 0;
+  let podio_template_attached_count = 0;
+  let podio_template_unattached_count = 0;
 
   for (const result of results) {
     const template_source = clean(
@@ -472,12 +483,39 @@ function summarizeTemplateResolutionDiagnostics(results = []) {
     const template_title = clean(
       result?.plan?.template_title || result?.queue_result?.selected_template_title
     );
+    const template_attached = Boolean(
+      result?.queue_result?.template_attached ||
+        result?.queue_result?.template_app_field_written
+    );
+    const template_app_field_written = Boolean(
+      result?.queue_result?.template_app_field_written
+    );
 
     if (template_source) {
       selected_template_sources.set(
         template_source,
         (selected_template_sources.get(template_source) || 0) + 1
       );
+    }
+
+    if (template_app_field_written) {
+      template_app_field_written_count += 1;
+    }
+
+    if (template_id) {
+      if (template_attached) {
+        template_attached_count += 1;
+      } else {
+        template_unattached_count += 1;
+      }
+
+      if (template_source === "podio") {
+        if (template_attached) {
+          podio_template_attached_count += 1;
+        } else {
+          podio_template_unattached_count += 1;
+        }
+      }
     }
 
     if (template_id) {
@@ -518,6 +556,11 @@ function summarizeTemplateResolutionDiagnostics(results = []) {
     selected_templates: [...selected_templates.values()]
       .sort((left, right) => right.count - left.count)
       .slice(0, 10),
+    template_attached_count,
+    template_unattached_count,
+    template_app_field_written_count,
+    podio_template_attached_count,
+    podio_template_unattached_count,
     failure_reason_counts: [...failure_reasons.entries()]
       .map(([reason, count]) => ({ reason, count }))
       .sort((left, right) => right.count - left.count),
@@ -684,6 +727,7 @@ function classifyCloseness(reason, full_result = null) {
   if (full_result?.ok && !full_result?.skipped) return 100;
   if (reason === "template_not_found" || reason === "textgrid_number_not_found") return 90;
   if (reason === "recent_contact_within_suppression_window") return 80;
+  if (reason === "recent_negative_inbound") return 79;
   if (reason === "duplicate_pending_queue_item") return 78;
   if (reason === "duplicate_within_suppression_window") return 76;
   if (reason === "no_usable_phone") return 60;
@@ -752,10 +796,33 @@ async function safeGetItem(
   }
 }
 
+// Returns the most recent inbound negative reply from owner history, or null.
+// Only considers events from the last 7 days to avoid suppressing on very old history.
+function findRecentNegativeInbound(history, cutoff_ts = null) {
+  const events = Array.isArray(history?.inbound_events) ? history.inbound_events : [];
+  const effective_cutoff = cutoff_ts ?? (Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  for (const event of events) {
+    const event_ts = toTimestamp(getDateValue(event, "timestamp", null));
+    if (!event_ts || event_ts < effective_cutoff) continue;
+    const message = getTextValue(event, "message", "") || "";
+    if (isNegativeReply(message)) {
+      return {
+        item_id: event?.item_id ?? null,
+        timestamp: getDateValue(event, "timestamp", null),
+        message,
+        event_ts,
+      };
+    }
+  }
+  return null;
+}
+
 function buildEmptyHistory() {
   return {
     queue_items: [],
     outbound_events: [],
+    inbound_events: [],
   };
 }
 
@@ -1609,7 +1676,7 @@ async function loadOwnerHistory(master_owner_id, { runtime = null, log = logger 
 
   const page_size = runtime?.test_mode ? 25 : MAX_HISTORY_ITEMS;
 
-  const [queue_items, outbound_events] = await Promise.all([
+  const [queue_items, outbound_events, inbound_events] = await Promise.all([
     timedStage(
       log,
       "master_owner_feeder.queue_duplicate_fetch",
@@ -1648,11 +1715,32 @@ async function loadOwnerHistory(master_owner_id, { runtime = null, log = logger 
           }
         )
     ),
+    // Fetch recent inbound events so the feeder can detect negative replies
+    // before creating new queue rows (prevents re-queuing after opt-out).
+    timedStage(
+      log,
+      "master_owner_feeder.inbound_event_fetch",
+      {
+        master_owner_id,
+      },
+      () =>
+        fetchAllItems(
+          APP_IDS.message_events,
+          {
+            "master-owner": master_owner_id,
+            direction: "Inbound",
+          },
+          {
+            page_size: Math.min(page_size, 25),
+          }
+        )
+    ),
   ]);
 
   const history = {
     queue_items,
     outbound_events,
+    inbound_events,
   };
 
   if (runtime?.owner_history_by_id) {
@@ -2453,6 +2541,31 @@ async function evaluateOwner({
     }
   }
 
+  // ── Negative-inbound suppression guard ──────────────────────────────────
+  // If the owner has sent a negative reply in the last 7 days, do not create
+  // any new queue rows.  This catches the case where the inbound webhook
+  // already canceled queued items but the feeder is running concurrently and
+  // would regenerate them.
+  const recent_negative_inbound = findRecentNegativeInbound(history);
+  if (recent_negative_inbound) {
+    log.info("master_owner_feeder.skipped_recent_negative_inbound", {
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      inbound_event_id: recent_negative_inbound.item_id,
+      inbound_timestamp: recent_negative_inbound.timestamp,
+      inbound_message: recent_negative_inbound.message,
+    });
+    return {
+      ok: false,
+      skipped: true,
+      reason: "recent_negative_inbound",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      inbound_event_id: recent_negative_inbound.item_id,
+      inbound_timestamp: recent_negative_inbound.timestamp,
+    };
+  }
+
   // For first-touch leads, skip sent-history suppression for the same reason as above:
   // sent queue rows or message events from prior bad sends are not proof of engagement.
   // The pending_duplicate guard above already prevents double-queuing same-phone items.
@@ -2958,18 +3071,35 @@ async function evaluateOwner({
     };
   }
 
-  // Part 3 — Log the selected template so template rotation can be monitored.
-  log.info("master_owner_feeder.template_rotation_selected", {
+  // Part 3 — Template selection audit log.
+  // Includes all inputs + selected template metadata so production logs can
+  // answer: "which template body was used and why?", "was a fallback triggered?",
+  // and "was the new expanded template set eligible but skipped?"
+  const is_local_fallback =
+    selected_template.source === "local_fallback" ||
+    Boolean(selected_template.template_fallback_reason);
+  log.info("master_owner_feeder.template_selection_audit", {
     master_owner_id,
     evaluation_depth,
+    phone_item_id: selected_phone_record.phone_item_id,
     ...template_resolution_inputs,
     template_id: selected_template.item_id,
-    use_case: selected_template.use_case || null,
-    variant_group: selected_template.variant_group || null,
+    template_title: selected_template.title || null,
+    template_use_case: selected_template.use_case || null,
+    template_variant_group: selected_template.variant_group || null,
+    template_source: selected_template.source || null,
+    template_resolution_source:
+      selected_template.template_resolution_source || null,
+    template_fallback_reason:
+      selected_template.template_fallback_reason || null,
+    is_local_fallback,
     rotation_key,
     recently_used_count: context?.recent?.recently_used_template_ids?.length || 0,
     brain_item_id: owner_brain_item_id ?? null,
-    template_source: selected_template.source || null,
+    is_first_touch,
+    sequence_position: template_selection_inputs.sequence_position || null,
+    tone: template_selection_inputs.tone || null,
+    language: template_selection_inputs.language || null,
   });
 
   // ── FINAL FIRST-TOUCH TEMPLATE GUARD ──────────────────────────────────────
@@ -3091,6 +3221,10 @@ async function evaluateOwner({
     outbound_number_diagnostics: outbound_number.diagnostics || null,
     template_id: selected_template.item_id,
     template_source: selected_template.source || null,
+    template_resolution_source:
+      selected_template.template_resolution_source || null,
+    template_fallback_reason:
+      selected_template.template_fallback_reason || null,
     template_title: selected_template.title || null,
     rendered_message_text,
     rendered_character_count: rendered_message_text.length,

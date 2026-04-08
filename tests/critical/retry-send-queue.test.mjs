@@ -5,6 +5,7 @@ import {
   buildRetryDecision,
   getRetryBackoffMinutes,
 } from "@/lib/domain/queue/retry-send-queue.js";
+import { runRetryRunner } from "@/lib/workers/retry-runner.js";
 import {
   categoryField,
   createPodioItem,
@@ -65,4 +66,48 @@ test("retry decision blocks terminal non-retryable failures", () => {
 
   assert.equal(decision.action, "terminal_non_retryable");
   assert.equal(decision.update["queue-status"], "Blocked");
+});
+
+test("retry runner skips safely when Podio cooldown is active", async () => {
+  let with_run_lock_called = false;
+
+  const result = await runRetryRunner(
+    {
+      limit: 10,
+      master_owner_id: 201,
+    },
+    {
+      buildPodioCooldownSkipResult: async () => ({
+        ok: true,
+        skipped: true,
+        reason: "podio_rate_limit_cooldown_active",
+        retry_after_seconds: 3600,
+        retry_after_at: "2026-04-08T20:20:25.000Z",
+        podio_cooldown: {
+          active: true,
+          status: 420,
+          path: "/item/app/30541680/filter/",
+          operation: "filter_items",
+          rate_limit_remaining: 0,
+        },
+        processed_count: 0,
+        retried_count: 0,
+        scheduled_count: 0,
+        terminal_count: 0,
+        skipped_count: 0,
+        scanned_count: 0,
+        results: [],
+      }),
+      withRunLock: async () => {
+        with_run_lock_called = true;
+        throw new Error("withRunLock should not run during Podio cooldown");
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "podio_rate_limit_cooldown_active");
+  assert.equal(result.retry_after_seconds, 3600);
+  assert.equal(with_run_lock_called, false);
 });

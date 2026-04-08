@@ -4,6 +4,11 @@ import {
   resolveMutationDryRun,
   resolveScopedId,
 } from "@/lib/config/rollout-controls.js";
+import {
+  buildPodioCooldownSkipResult,
+  isPodioRateLimitError,
+  serializePodioError,
+} from "@/lib/providers/podio.js";
 
 function asBoolean(value, fallback = false) {
   if (typeof value === "boolean") return value;
@@ -31,6 +36,8 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
   const run_send_queue =
     deps.runSendQueue ||
     (await import("@/lib/domain/queue/run-send-queue.js")).runSendQueue;
+  const build_podio_cooldown_skip_result =
+    deps.buildPodioCooldownSkipResult || buildPodioCooldownSkipResult;
   const route_logger = deps.logger;
   const json_response =
     deps.jsonResponse ||
@@ -120,12 +127,25 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
     route_logger?.info?.("queue_run.after_run_send_queue", {
       ok: result?.ok !== false,
       skipped: result?.skipped || false,
+      partial: result?.partial || false,
       dry_run: result?.dry_run ?? null,
       reason: result?.reason || null,
+      attempted_count: result?.attempted_count ?? null,
+      claimed_count: result?.claimed_count ?? null,
+      started_count: result?.started_count ?? null,
       processed_count: result?.processed_count ?? null,
       sent_count: result?.sent_count ?? null,
       failed_count: result?.failed_count ?? null,
+      blocked_count: result?.blocked_count ?? null,
       skipped_count: result?.skipped_count ?? null,
+      duplicate_locked_count: result?.duplicate_locked_count ?? null,
+      first_failing_queue_item_id:
+        result?.first_failing_queue_item_id ?? null,
+      first_failing_reason: result?.first_failing_reason ?? null,
+      first_failure_queue_item_id:
+        result?.first_failure_queue_item_id ?? null,
+      first_failure_reason: result?.first_failure_reason ?? null,
+      batch_duration_ms: result?.batch_duration_ms ?? null,
       due_rows: result?.due_rows ?? null,
       future_rows: result?.future_rows ?? null,
       total_rows_loaded: result?.total_rows_loaded ?? null,
@@ -140,12 +160,52 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       { status: statusForResult(result) }
     );
   } catch (error) {
-    route_logger?.error?.("queue_run.failed", { error });
+    const diagnostics = serializePodioError(error);
+
+    route_logger?.error?.("queue_run.failed", {
+      method,
+      error: diagnostics,
+    });
+
+    if (isPodioRateLimitError(error)) {
+      const result = await build_podio_cooldown_skip_result({
+        dry_run: false,
+        total_rows_loaded: 0,
+        queued_rows_loaded: 0,
+        due_rows: 0,
+        future_rows: 0,
+        outside_window_rows: 0,
+        attempted_count: 0,
+        claimed_count: 0,
+        started_count: 0,
+        processed_count: 0,
+        sent_count: 0,
+        failed_count: 0,
+        blocked_count: 0,
+        skipped_count: 0,
+        duplicate_locked_count: 0,
+        first_failure_queue_item_id: null,
+        first_failure_reason: null,
+        batch_duration_ms: 0,
+        results: [],
+        run_started_at: new Date().toISOString(),
+      });
+
+      return json_response(
+        {
+          ok: true,
+          route: "internal/queue/run",
+          result,
+        },
+        { status: 200 }
+      );
+    }
 
     return json_response(
       {
         ok: false,
         error: "queue_run_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );

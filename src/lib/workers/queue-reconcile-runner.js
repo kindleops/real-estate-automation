@@ -1,10 +1,12 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 
 import {
+  buildPodioCooldownSkipResult,
   fetchAllItems,
   getCategoryValue,
   getDateValue,
   getFirstAppReferenceId,
+  isPodioRateLimitError,
   getTextValue,
   updateItem,
 } from "@/lib/providers/podio.js";
@@ -23,6 +25,7 @@ import { info, warn } from "@/lib/logging/logger.js";
 
 const DEFAULT_LIMIT = 50;
 const DEFAULT_STALE_AFTER_MINUTES = 20;
+const MESSAGE_EVENT_TRIGGER_CACHE_TTL_MS = 15_000;
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -98,9 +101,15 @@ function mapFailureBucketToQueueReason(failure_bucket = "") {
 
 export async function findQueueEvidenceEvents(queue_item_id) {
   const [send_events, failed_events, delivery_events] = await Promise.all([
-    findMessageEventsByTriggerName(buildQueueSendTriggerName(queue_item_id), 20, 0),
-    findMessageEventsByTriggerName(buildQueueSendFailedTriggerName(queue_item_id), 20, 0),
-    findMessageEventsByTriggerName(buildDeliveryTriggerName(queue_item_id), 20, 0),
+    findMessageEventsByTriggerName(buildQueueSendTriggerName(queue_item_id), 20, 0, {
+      cache_ttl_ms: MESSAGE_EVENT_TRIGGER_CACHE_TTL_MS,
+    }),
+    findMessageEventsByTriggerName(buildQueueSendFailedTriggerName(queue_item_id), 20, 0, {
+      cache_ttl_ms: MESSAGE_EVENT_TRIGGER_CACHE_TTL_MS,
+    }),
+    findMessageEventsByTriggerName(buildDeliveryTriggerName(queue_item_id), 20, 0, {
+      cache_ttl_ms: MESSAGE_EVENT_TRIGGER_CACHE_TTL_MS,
+    }),
   ]);
 
   return sortNewestFirst([
@@ -242,13 +251,63 @@ export async function runQueueReconcileRunner({
   stale_after_minutes = DEFAULT_STALE_AFTER_MINUTES,
   now = new Date().toISOString(),
   master_owner_id = null,
-} = {}) {
+} = {}, deps = {}) {
   const provider_capabilities = getTextgridProviderCapabilities();
   const now_ts = toTimestamp(now) ?? Date.now();
   const stale_after_ms = Math.max(Number(stale_after_minutes) || 0, 1) * 60_000;
   const scoped_master_owner_id = Number(master_owner_id || 0) || null;
+  const with_run_lock = deps.withRunLock || withRunLock;
+  const record_system_alert = deps.recordSystemAlert || recordSystemAlert;
+  const resolve_system_alert = deps.resolveSystemAlert || resolveSystemAlert;
+  const fetch_all_items = deps.fetchAllItems || fetchAllItems;
+  const find_queue_evidence_events =
+    deps.findQueueEvidenceEvents || findQueueEvidenceEvents;
+  const recover_queue_item_from_evidence =
+    deps.recoverQueueItemFromEvidence || recoverQueueItemFromEvidence;
+  const build_cooldown_skip_result =
+    deps.buildPodioCooldownSkipResult || buildPodioCooldownSkipResult;
 
-  return withRunLock({
+  const cooldown_skip = await build_cooldown_skip_result({
+    now,
+    stale_after_minutes,
+    scanned_count: 0,
+    processed_count: 0,
+    recovered_delivered_count: 0,
+    recovered_failed_count: 0,
+    recovered_sent_count: 0,
+    manual_review_count: 0,
+    skipped_count: 0,
+    results: [],
+    master_owner_id: scoped_master_owner_id,
+    provider_verification_available: Boolean(
+      provider_capabilities?.message_status_lookup?.supported
+    ),
+    provider_verification_reason:
+      provider_capabilities?.message_status_lookup?.reason ||
+      "provider_verification_unavailable",
+  });
+
+  if (cooldown_skip?.podio_cooldown?.active) {
+    warn("queue.reconcile_skipped_podio_cooldown", {
+      now,
+      stale_after_minutes,
+      limit,
+      master_owner_id: scoped_master_owner_id,
+      retry_after_seconds: cooldown_skip.retry_after_seconds,
+      retry_after_at: cooldown_skip.retry_after_at,
+      podio_status: cooldown_skip.podio_cooldown?.status ?? null,
+      podio_path: cooldown_skip.podio_cooldown?.path ?? null,
+      podio_operation: cooldown_skip.podio_cooldown?.operation ?? null,
+      rate_limit_remaining:
+        cooldown_skip.podio_cooldown?.rate_limit_remaining ?? null,
+      rate_limit_limit:
+        cooldown_skip.podio_cooldown?.rate_limit_limit ?? null,
+    });
+
+    return cooldown_skip;
+  }
+
+  return with_run_lock({
     scope: scoped_master_owner_id
       ? `queue-reconcile:${scoped_master_owner_id}`
       : "queue-reconcile",
@@ -260,7 +319,7 @@ export async function runQueueReconcileRunner({
       master_owner_id: scoped_master_owner_id,
     },
     onLocked: async (lock) => {
-      await recordSystemAlert({
+      await record_system_alert({
         subsystem: "reconcile",
         code: "runner_overlap",
         severity: "warning",
@@ -310,7 +369,7 @@ export async function runQueueReconcileRunner({
         master_owner_id: scoped_master_owner_id,
       });
 
-      const sending_items = await fetchAllItems(
+      const sending_items = await fetch_all_items(
         APP_IDS.send_queue,
         {
           "queue-status": "Sending",
@@ -342,9 +401,9 @@ export async function runQueueReconcileRunner({
         const queue_item_id = item?.item_id || null;
 
         try {
-          const evidence_events = await findQueueEvidenceEvents(queue_item_id);
+          const evidence_events = await find_queue_evidence_events(queue_item_id);
           const evidence = classifyQueueEvidence(evidence_events);
-          const outcome = await recoverQueueItemFromEvidence(queue_item_id, evidence, now);
+          const outcome = await recover_queue_item_from_evidence(queue_item_id, evidence, now);
 
           if (outcome.action === "recovered_delivered") recovered_delivered_count += 1;
           if (outcome.action === "recovered_failed") recovered_failed_count += 1;
@@ -361,6 +420,14 @@ export async function runQueueReconcileRunner({
             ...outcome,
           });
         } catch (error) {
+          if (isPodioRateLimitError(error)) {
+            warn("queue.reconcile_rate_limit_abort", {
+              queue_item_id,
+              message: error?.message || "Podio cooldown active",
+            });
+            throw error;
+          }
+
           warn("queue.reconcile_item_failed", {
             queue_item_id,
             message: error?.message || "Unknown queue reconcile error",
@@ -398,7 +465,7 @@ export async function runQueueReconcileRunner({
       };
 
       if (manual_review_count > 0 || skipped_count > 0) {
-        await recordSystemAlert({
+        await record_system_alert({
           subsystem: "reconcile",
           code: "manual_review_required",
           severity: manual_review_count > 0 ? "high" : "warning",
@@ -420,7 +487,7 @@ export async function runQueueReconcileRunner({
           },
         });
       } else {
-        await resolveSystemAlert({
+        await resolve_system_alert({
           subsystem: "reconcile",
           code: "manual_review_required",
           dedupe_key: scoped_master_owner_id

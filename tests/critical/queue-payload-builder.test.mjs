@@ -587,6 +587,9 @@ test("Part 6 — result.queue_id is null when no composite id provided", async (
 // Issue 3: category blank — secondary_category was always null.  buildSendQueueItem
 //          now reads owner-type from the master owner item and maps it.
 //
+// Issue 3b: owner-type blank — Send Queue did not persist the dedicated owner
+//           type field. It now reads owner-type from the linked property item.
+//
 // Issue 4: contact-window blank — resolveContactWindowField omitted any value
 //          without a schema option ID.  Values matching CONTACT_WINDOW_PATTERN are
 //          now passed through to schema.js's compat bypass.
@@ -731,6 +734,57 @@ test("Part 7 — property-type written as 'Multi-Family' from property item", as
   });
 
   assert.equal(captured_fields?.["property-type"], "Multi-Family");
+});
+
+test("Part 7 — owner-type written from linked property owner-type-2", async () => {
+  const property_item = createPodioItem(5102, {
+    "owner-type-2": categoryField("Corporate"),
+  });
+  const master_owner_item = createPodioItem(201, {
+    "owner-type": categoryField("INDIVIDUAL | ABSENTEE"),
+  });
+  const context = {
+    found: true,
+    items: {
+      phone_item: makeActivePhoneItem(),
+      brain_item: null,
+      master_owner_item,
+      property_item,
+      agent_item: null,
+      market_item: null,
+    },
+    ids: {
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: property_item.item_id,
+      market_id: null,
+      assigned_agent_id: null,
+    },
+    recent: { touch_count: 0 },
+    summary: { total_messages_sent: 0 },
+  };
+
+  let captured_fields = null;
+  const result = await buildSendQueueItem({
+    context,
+    rendered_message_text: "Hi there",
+    textgrid_number_item_id: 601,
+    scheduled_for_local: "2026-04-04 09:00:00",
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 92015 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.ok(result.ok);
+  assert.equal(result.owner_type_written, true, "owner-type must be written");
+  assert.equal(
+    captured_fields?.["owner-type"],
+    "Corporate",
+    "owner-type must come from linked property owner-type-2"
+  );
 });
 
 // ── Part 7.3: category reads from master owner's owner-type ──────────────────

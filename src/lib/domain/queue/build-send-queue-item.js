@@ -57,6 +57,7 @@ const QUEUE_FIELDS = {
 
   property_address: "property-address",
   property_type: "property-type",
+  owner_type: "owner-type",
   category: "category",
   use_case_template: "use-case-template",
 };
@@ -90,15 +91,37 @@ function stripHtml(value) {
     .replace(/&#39;/g, "'");
 }
 
+// Fix malformed punctuation spacing that can arise from template rendering:
+//   "Hi Jose ,"  → "Hi Jose,"
+//   "this is Ricky ."  → "this is Ricky."
+//   "sold - or - kept"  → handled correctly (em/en dash normalization)
+// Applied as a final pass before the text is stored in Podio.
+export function normalizeTextForSms(value) {
+  return String(value ?? "")
+    // Remove whitespace immediately before terminal punctuation
+    .replace(/\s+([,\.!?;:])/g, "$1")
+    // Normalize multiple spaces inside a sentence to a single space
+    .replace(/\s{2,}/g, " ")
+    // Normalize em-dash / en-dash surrounded by extra spaces: "word — word" stays,
+    // "word  —  word" (extra spaces) collapses to "word — word"
+    .replace(/\s{2,}([\u2013\u2014])\s{2,}/g, " $1 ")
+    .replace(/\s{2,}([\u2013\u2014])/g, " $1")
+    .replace(/([\u2013\u2014])\s{2,}/g, "$1 ")
+    .trim();
+}
+
 // Flatten a rendered SMS for persistence in the Send Queue message-text field.
 // 1. Strip any HTML markup the template renderer may have preserved.
 // 2. Replace all CRLF/CR/LF sequences with a single space.
 // 3. Collapse runs of whitespace and trim.
+// 4. Fix punctuation spacing ("Hi Jose ," → "Hi Jose,").
 export function normalizeForQueueText(value) {
-  return stripHtml(String(value ?? ""))
-    .replace(/\r\n|\r|\n/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+  return normalizeTextForSms(
+    stripHtml(String(value ?? ""))
+      .replace(/\r\n|\r|\n/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  );
 }
 
 // Accepted contact-window time-range format: "HH:MM AM - HH:MM PM TZ"
@@ -408,6 +431,52 @@ function shouldRetryQueueCreateWithoutTemplate(error) {
   );
 }
 
+async function createQueueItemWithTemplateCandidates({
+  create_item,
+  fields,
+  template_candidates = [],
+}) {
+  if (!template_candidates.length) {
+    return {
+      created: await create_item(APP_IDS.send_queue, fields),
+      selected_candidate: null,
+      template_attach_rejected: false,
+      template_attach_warning: null,
+    };
+  }
+
+  for (const candidate of template_candidates) {
+    const attempt_fields = {
+      ...fields,
+      [QUEUE_FIELDS.template]: candidate.field_value,
+    };
+
+    try {
+      return {
+        created: await create_item(APP_IDS.send_queue, attempt_fields),
+        selected_candidate: candidate,
+        template_attach_rejected: false,
+        template_attach_warning: null,
+      };
+    } catch (error) {
+      if (!shouldRetryQueueCreateWithoutTemplate(error)) {
+        throw error;
+      }
+    }
+  }
+
+  const fallback_fields = { ...fields };
+  delete fallback_fields[QUEUE_FIELDS.template];
+
+  return {
+    created: await create_item(APP_IDS.send_queue, fallback_fields),
+    selected_candidate: null,
+    template_attach_rejected: true,
+    template_attach_warning:
+      "Template relation was skipped because Send Queue.template rejected the selected template reference.",
+  };
+}
+
 export async function buildSendQueueItem({
   context,
   rendered_message_text,
@@ -588,15 +657,25 @@ export async function buildSendQueueItem({
   const resolved_property_type = direct_property_type || property_type;
   const property_type_field = resolveQueueCategoryField(QUEUE_FIELDS.property_type, resolved_property_type);
 
+  // Persist the queue row's explicit owner-type from the linked Property item.
+  // Properties stores the normalized owner bucket on owner-type-2, while
+  // Master Owners stores the raw absentee/owner-occ hybrid type on owner-type.
+  const property_owner_type =
+    getCategoryValue(property_item, "owner-type-2", null) ||
+    getCategoryValue(property_item, "owner-type", null);
   // Resolve owner entity category from the master owner item when the caller
   // does not supply a secondary_category.
   const owner_type_raw = getCategoryValue(master_owner_item, "owner-type", null);
+  const resolved_owner_type =
+    property_owner_type || mapOwnerTypeToQueueCategory(owner_type_raw);
   const resolved_owner_category = secondary_category || mapOwnerTypeToQueueCategory(owner_type_raw);
+  const owner_type_field = resolveQueueCategoryField(QUEUE_FIELDS.owner_type, resolved_owner_type);
   const category_field = resolveQueueCategoryField(QUEUE_FIELDS.category, resolved_owner_category);
   const use_case_template_field = resolveQueueCategoryField(QUEUE_FIELDS.use_case_template, use_case_template);
 
   for (const [field_name, source_value, resolved] of [
     [QUEUE_FIELDS.property_type, property_type, property_type_field],
+    [QUEUE_FIELDS.owner_type, resolved_owner_type, owner_type_field],
     [QUEUE_FIELDS.category, secondary_category, category_field],
     [QUEUE_FIELDS.use_case_template, use_case_template, use_case_template_field],
   ]) {
@@ -618,6 +697,7 @@ export async function buildSendQueueItem({
     template_item,
   });
   const template_field_value = template_reference.field_value;
+  const template_candidates = template_reference.attachment_candidates || [];
   const missing_relation_warnings = [];
 
   if (!master_owner_id && (master_owner_item?.item_id || context.ids?.master_owner_id)) {
@@ -681,7 +761,6 @@ export async function buildSendQueueItem({
     ...(property_id ? { [QUEUE_FIELDS.properties]: asArrayAppRef(property_id) } : {}),
     ...(market_id ? { [QUEUE_FIELDS.market]: asArrayAppRef(market_id) } : {}),
     ...(assigned_agent_id ? { [QUEUE_FIELDS.sms_agent]: asArrayAppRef(assigned_agent_id) } : {}),
-    ...(template_field_value ? { [QUEUE_FIELDS.template]: template_field_value } : {}),
     ...(message_text ? { [QUEUE_FIELDS.message_text]: message_text } : {}),
     ...(message_text ? { [QUEUE_FIELDS.character_count]: countCharacters(message_text) } : {}),
     ...(personalization_tags_used.length
@@ -692,6 +771,7 @@ export async function buildSendQueueItem({
       ? { [QUEUE_FIELDS.property_address]: property_address }
       : {}),
     ...(property_type_field.omitted ? {} : { [QUEUE_FIELDS.property_type]: property_type_field.field_value }),
+    ...(owner_type_field.omitted ? {} : { [QUEUE_FIELDS.owner_type]: owner_type_field.field_value }),
     ...(category_field.omitted ? {} : { [QUEUE_FIELDS.category]: category_field.field_value }),
     ...(use_case_template_field.omitted ? {} : { [QUEUE_FIELDS.use_case_template]: use_case_template_field.field_value }),
   };
@@ -705,22 +785,18 @@ export async function buildSendQueueItem({
   let created = null;
   let template_attach_warning = null;
   let template_attach_rejected = false;
+  let selected_template_candidate = null;
 
-  try {
-    created = await create_item(APP_IDS.send_queue, fields);
-  } catch (error) {
-    if (!template_field_value || !shouldRetryQueueCreateWithoutTemplate(error)) {
-      throw error;
-    }
-
-    const retry_fields = { ...fields };
-    delete retry_fields[QUEUE_FIELDS.template];
-
-    created = await create_item(APP_IDS.send_queue, retry_fields);
-    template_attach_rejected = true;
-    template_attach_warning =
-      "Template relation was skipped because Send Queue.template rejected the selected template reference.";
-  }
+  ({
+    created,
+    selected_candidate: selected_template_candidate,
+    template_attach_rejected,
+    template_attach_warning,
+  } = await createQueueItemWithTemplateCandidates({
+    create_item,
+    fields,
+    template_candidates,
+  }));
 
   const resolved_queue_id = queue_id || null;
   const queue_sequence_value = created?.item_id ? Number(created.item_id) : null;
@@ -732,9 +808,10 @@ export async function buildSendQueueItem({
   }
 
   const template_app_field_written =
-    Boolean(template_field_value) && !template_attach_rejected;
+    Boolean(selected_template_candidate?.attached_template_id) &&
+    !template_attach_rejected;
   const template_relation_id = template_app_field_written
-    ? template_reference.attached_template_id
+    ? selected_template_candidate?.attached_template_id ?? null
     : null;
 
   return {
@@ -746,18 +823,33 @@ export async function buildSendQueueItem({
     textgrid_number_item_id,
     template_id,
     selected_template_id: template_reference.selected_template_id ?? null,
+    selected_template_item_id: template_reference.selected_template_item_id ?? null,
     selected_template_source: template_reference.selected_template_source ?? null,
     selected_template_title: template_reference.selected_template_title ?? null,
+    selected_template_use_case: template_reference.selected_template_use_case ?? null,
+    selected_template_variant_group:
+      template_reference.selected_template_variant_group ?? null,
+    selected_template_language: template_reference.selected_template_language ?? null,
+    selected_template_tone: template_reference.selected_template_tone ?? null,
+    selected_template_resolution_source:
+      template_reference.selected_template_resolution_source ?? null,
+    selected_template_fallback_reason:
+      template_reference.selected_template_fallback_reason ?? null,
     template_relation_id,
     attempted_template_relation_id: template_reference.attached_template_id ?? null,
     template_app_field_written,
     template_attachment_strategy: template_attach_rejected
       ? "podio_rejected_template_reference"
-      : template_reference.attachment_strategy ?? null,
+      : selected_template_candidate?.attachment_strategy ??
+        template_reference.attachment_strategy ??
+        null,
     template_attachment_reason: template_attach_rejected
       ? "template_attach_rejected_by_podio"
       : template_reference.attachment_reason ?? null,
     template_target_app_ids: template_reference.target_app_ids || [],
+    template_relation_candidates: template_candidates.map(
+      (candidate) => candidate.attached_template_id
+    ),
     template_attached: template_app_field_written,
     message_text: message_text || null,
     deferred_message_resolution: Boolean(defer_message_resolution && !message_text),
@@ -770,6 +862,7 @@ export async function buildSendQueueItem({
       : null,
     property_address_written: Boolean(property_id && property_address),
     property_type_written: !property_type_field.omitted,
+    owner_type_written: !owner_type_field.omitted,
     category_written: !category_field.omitted,
     use_case_template_written: !use_case_template_field.omitted,
     warnings: [

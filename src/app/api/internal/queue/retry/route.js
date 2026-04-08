@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 
 import { capRetryBatch, getRolloutControls, resolveScopedId } from "@/lib/config/rollout-controls.js";
 import { child } from "@/lib/logging/logger.js";
+import {
+  buildPodioCooldownSkipResult,
+  isPodioRateLimitError,
+  serializePodioError,
+} from "@/lib/providers/podio.js";
 import { runRetryRunner } from "@/lib/workers/retry-runner.js";
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
 
@@ -57,6 +62,19 @@ export async function GET(request) {
       master_owner_id: master_owner_scope.effective_id,
     });
 
+    logger.info("queue_retry.completed", {
+      method: "GET",
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || null,
+      processed_count: result?.processed_count ?? 0,
+      retried_count: result?.retried_count ?? 0,
+      scheduled_count: result?.scheduled_count ?? 0,
+      terminal_count: result?.terminal_count ?? 0,
+      skipped_count: result?.skipped_count ?? 0,
+      retry_after_seconds: result?.retry_after_seconds ?? null,
+    });
+
     return NextResponse.json(
       {
         ok: result?.ok !== false,
@@ -66,15 +84,39 @@ export async function GET(request) {
       { status: statusForResult(result) }
     );
   } catch (error) {
-    logger.warn("queue_retry.failed", {
+    const diagnostics = serializePodioError(error);
+
+    logger.error("queue_retry.failed", {
       method: "GET",
-      message: error?.message || "Unknown queue retry error",
+      error: diagnostics,
     });
+
+    if (isPodioRateLimitError(error)) {
+      const result = await buildPodioCooldownSkipResult({
+        processed_count: 0,
+        retried_count: 0,
+        scheduled_count: 0,
+        terminal_count: 0,
+        skipped_count: 0,
+        scanned_count: 0,
+        results: [],
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          route: "internal/queue/retry",
+          result,
+        },
+        { status: 200 }
+      );
+    }
 
     return NextResponse.json(
       {
         ok: false,
         error: "queue_retry_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );
@@ -117,6 +159,19 @@ export async function POST(request) {
       master_owner_id: master_owner_scope.effective_id,
     });
 
+    logger.info("queue_retry.completed", {
+      method: "POST",
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || null,
+      processed_count: result?.processed_count ?? 0,
+      retried_count: result?.retried_count ?? 0,
+      scheduled_count: result?.scheduled_count ?? 0,
+      terminal_count: result?.terminal_count ?? 0,
+      skipped_count: result?.skipped_count ?? 0,
+      retry_after_seconds: result?.retry_after_seconds ?? null,
+    });
+
     return NextResponse.json(
       {
         ok: result?.ok !== false,
@@ -126,15 +181,39 @@ export async function POST(request) {
       { status: statusForResult(result) }
     );
   } catch (error) {
-    logger.warn("queue_retry.failed", {
+    const diagnostics = serializePodioError(error);
+
+    logger.error("queue_retry.failed", {
       method: "POST",
-      message: error?.message || "Unknown queue retry error",
+      error: diagnostics,
     });
+
+    if (isPodioRateLimitError(error)) {
+      const result = await buildPodioCooldownSkipResult({
+        processed_count: 0,
+        retried_count: 0,
+        scheduled_count: 0,
+        terminal_count: 0,
+        skipped_count: 0,
+        scanned_count: 0,
+        results: [],
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          route: "internal/queue/retry",
+          result,
+        },
+        { status: 200 }
+      );
+    }
 
     return NextResponse.json(
       {
         ok: false,
         error: "queue_retry_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );

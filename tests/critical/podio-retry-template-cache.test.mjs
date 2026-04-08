@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  activatePodioRateLimitCooldown,
+  clearPodioRateLimitCooldown,
   getPodioRetryAfterSeconds,
+  getPodioRateLimitCooldown,
   getLatestPodioRateLimitStatus,
   isPodioRateLimitError,
   isRetryablePodioRequestError,
@@ -108,6 +111,61 @@ test("Podio rate-limit observability tracks the latest quota snapshot", () => {
   assert.equal(latest.low_remaining_threshold, 100);
 
   resetPodioRateLimitObservability();
+});
+
+test("Podio cooldown activates from retry-after windows and reports remaining wait time", async () => {
+  await clearPodioRateLimitCooldown({ suppress_log: true });
+
+  await activatePodioRateLimitCooldown({
+    method: "post",
+    path: "/item/app/30541680/filter/",
+    status: 420,
+    headers: {
+      "x-rate-limit-limit": "250",
+      "x-rate-limit-remaining": "0",
+    },
+    retry_after_seconds: 3600,
+    error: new Error(
+      "You have hit the rate limit. Please wait 3600 seconds before trying again."
+    ),
+  });
+
+  const cooldown = await getPodioRateLimitCooldown();
+
+  assert.equal(cooldown.active, true);
+  assert.equal(cooldown.path, "/item/app/30541680/filter/");
+  assert.equal(cooldown.operation, "filter_items");
+  assert.equal(cooldown.rate_limit_remaining, 0);
+  assert.ok(
+    cooldown.retry_after_seconds_remaining >= 3590 &&
+      cooldown.retry_after_seconds_remaining <= 3600
+  );
+
+  await clearPodioRateLimitCooldown({ suppress_log: true });
+});
+
+test("Podio cooldown clears cleanly after reset", async () => {
+  await clearPodioRateLimitCooldown({ suppress_log: true });
+
+  await activatePodioRateLimitCooldown({
+    method: "post",
+    path: "/item/app/30541680/filter/",
+    status: 420,
+    retry_after_seconds: 60,
+    headers: {
+      "x-rate-limit-limit": "250",
+      "x-rate-limit-remaining": "0",
+    },
+    error: new Error(
+      "You have hit the rate limit. Please wait 60 seconds before trying again."
+    ),
+  });
+
+  await clearPodioRateLimitCooldown({ suppress_log: true });
+  const cooldown = await getPodioRateLimitCooldown();
+
+  assert.equal(cooldown.active, false);
+  assert.equal(cooldown.cooldown_until, null);
 });
 
 test("template batch cache reuses identical filter fetches", async () => {
@@ -321,6 +379,8 @@ test("template loader prefers active Podio templates over local fallbacks", asyn
 
   assert.equal(selected?.item_id, 9101);
   assert.equal(selected?.source, "podio");
+  assert.equal(selected?.template_resolution_source, "podio_template");
+  assert.equal(selected?.template_fallback_reason, null);
 });
 
 test("template loader falls back to local templates when Podio template fetch fails", async () => {
@@ -339,6 +399,73 @@ test("template loader falls back to local templates when Podio template fetch fa
 
   assert.equal(selected?.source, "local_registry");
   assert.match(selected?.item_id || "", /^local-template:/);
+  assert.equal(selected?.template_resolution_source, "local_template_fallback");
+  assert.equal(selected?.template_fallback_reason, "podio_template_fetch_failed");
+});
+
+test("template loader uses stage-based Podio fallback before local templates when enabled", async () => {
+  const selected = await loadTemplate({
+    category: "Residential",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    tone: "Warm",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    context: buildTemplateContext(),
+    allow_variant_group_fallback: true,
+    remote_fetcher: async (filter_set) => {
+      if (!filter_set.stage || filter_set["use-case"]) return [];
+      return [
+        {
+          item_id: 9201,
+          source: "podio",
+          use_case: null,
+          variant_group: filter_set.stage,
+          tone: "Warm",
+          gender_variant: "Neutral",
+          language: "English",
+          sequence_position: "1st Touch",
+          paired_with_agent_type: "Warm Professional",
+          text: "Hi {{seller_first_name}}, are you the owner of {{property_address}}?",
+          active: "Yes",
+          category_primary: "Residential",
+          category_secondary: null,
+          deliverability_score: 60,
+          spam_risk: 2,
+          historical_reply_rate: 10,
+          total_conversations: 3,
+          total_replies: 1,
+        },
+      ];
+    },
+    local_fetcher: () => [
+      {
+        item_id: "local-9201",
+        source: "local_registry",
+        use_case: "ownership_check",
+        variant_group: "Stage 1 — Ownership Confirmation",
+        tone: "Warm",
+        gender_variant: "Neutral",
+        language: "English",
+        sequence_position: "1st Touch",
+        paired_with_agent_type: "Warm Professional",
+        text: "Hi {{seller_first_name}}, are you the owner of {{property_address}}?",
+        active: "Yes",
+        category_primary: "Residential",
+        category_secondary: null,
+        deliverability_score: 99,
+        spam_risk: 0,
+        historical_reply_rate: 99,
+        total_conversations: 99,
+        total_replies: 99,
+      },
+    ],
+  });
+
+  assert.equal(selected?.item_id, 9201);
+  assert.equal(selected?.source, "podio");
+  assert.equal(selected?.template_resolution_source, "podio_template");
 });
 
 test("template loader falls back to agent-free Stage 1 local templates when agent metadata is missing", async () => {

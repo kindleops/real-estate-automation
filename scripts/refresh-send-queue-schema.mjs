@@ -8,6 +8,7 @@
  * Run once after new category fields / options are added to the Send Queue
  * Podio app.  The supplement currently has options: [] for:
  *   - property-type
+ *   - owner-type
  *   - category
  *   - use-case-template
  *
@@ -36,7 +37,13 @@ const SUPPLEMENT_PATH = path.resolve(
 );
 
 // Fields we want to refresh in the Send Queue supplement.
-const TARGET_FIELDS = ["property-type", "category", "use-case-template", "property-address"];
+const TARGET_FIELDS = [
+  "property-type",
+  "owner-type",
+  "category",
+  "use-case-template",
+  "property-address",
+];
 
 // ── Fetch ────────────────────────────────────────────────────────────────────
 
@@ -82,7 +89,7 @@ for (const ext_id of TARGET_FIELDS) {
 
 // ── Patch supplement ─────────────────────────────────────────────────────────
 
-const PATCH_TARGETS = ["property-type", "category", "use-case-template"];
+const PATCH_TARGETS = ["property-type", "owner-type", "category", "use-case-template"];
 
 let source = readFileSync(SUPPLEMENT_PATH, "utf8");
 let patched = false;

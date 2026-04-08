@@ -26,6 +26,8 @@ import {
 
 import { validateActivePhone } from "@/lib/domain/compliance/validate-active-phone.js";
 import { shouldSuppressOutreach } from "@/lib/domain/compliance/should-suppress-outreach.js";
+import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
+import { loadRecentEvents } from "@/lib/domain/context/load-recent-events.js";
 import { validateSendQueueItem } from "@/lib/domain/queue/validate-send-queue-item.js";
 import { logOutboundMessageEvent } from "@/lib/domain/events/log-outbound-message-event.js";
 import {
@@ -119,6 +121,12 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function toTimestamp(value) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
 function lower(value) {
   return clean(value).toLowerCase();
 }
@@ -173,6 +181,51 @@ function shouldRetryQueueUpdateWithoutTemplate(error) {
       message.includes("value")
     )
   );
+}
+
+async function updateQueueItemWithTemplateCandidates({
+  queue_item_id,
+  base_payload,
+  template_reference,
+}) {
+  const template_candidates = template_reference?.attachment_candidates || [];
+  let template_attach_rejected = false;
+
+  if (!template_candidates.length) {
+    await updateItem(queue_item_id, base_payload);
+    return {
+      selected_template_candidate: null,
+      template_attach_rejected,
+    };
+  }
+
+  for (const candidate of template_candidates) {
+    const attempt_payload = {
+      ...base_payload,
+      [QUEUE_FIELDS.template]: candidate.field_value,
+    };
+
+    try {
+      await updateItem(queue_item_id, attempt_payload);
+      return {
+        selected_template_candidate: candidate,
+        template_attach_rejected: false,
+      };
+    } catch (error) {
+      logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write", error);
+      if (!shouldRetryQueueUpdateWithoutTemplate(error)) {
+        throw error;
+      }
+
+      template_attach_rejected = true;
+    }
+  }
+
+  await updateItem(queue_item_id, base_payload);
+  return {
+    selected_template_candidate: null,
+    template_attach_rejected,
+  };
 }
 
 function logRevisionLimitPhase(queue_item_id, operation, phase, err) {
@@ -358,6 +411,11 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
       selected_template_source: null,
       selected_template_title: null,
       template_app_field_written: Boolean(existing_template_id),
+      template_attached: Boolean(existing_template_id),
+      selected_template_resolution_source: Boolean(existing_template_id)
+        ? "existing_queue_template_relation"
+        : null,
+      selected_template_fallback_reason: null,
       queue_item,
     };
   }
@@ -506,6 +564,7 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     rotation_key,
     fallback_agent_type:
       route?.template_filters?.fallback_agent_type || "Warm Professional",
+    allow_variant_group_fallback: true,
   });
 
   if (!selected_template?.item_id) {
@@ -585,58 +644,40 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     ...(render_result.used_placeholders?.length
       ? { [QUEUE_FIELDS.personalization_tags_used]: render_result.used_placeholders }
       : {}),
-    ...(template_reference.field_value
-      ? { [QUEUE_FIELDS.template]: template_reference.field_value }
-      : {}),
   };
-  let template_attach_rejected = false;
-
-  if (template_reference.field_value) {
-    try {
-      await updateItem(queue_item_id, queue_resolution_payload);
-    } catch (error) {
-      logRevisionLimitPhase(queue_item_id, "resolve_deferred_message", "template_write", error);
-      if (!shouldRetryQueueUpdateWithoutTemplate(error)) {
-        throw error;
-      }
-
-      delete queue_resolution_payload[QUEUE_FIELDS.template];
-      template_attach_rejected = true;
-
-      try {
-        await updateItem(queue_item_id, queue_resolution_payload);
-      } catch (retryError) {
-        logRevisionLimitPhase(
-          queue_item_id,
-          "resolve_deferred_message",
-          "template_write_retry",
-          retryError
-        );
-        throw retryError;
-      }
-    }
-  } else {
-    await updateItem(queue_item_id, queue_resolution_payload);
-  }
+  const {
+    selected_template_candidate,
+    template_attach_rejected,
+  } = await updateQueueItemWithTemplateCandidates({
+    queue_item_id,
+    base_payload: queue_resolution_payload,
+    template_reference,
+  });
 
   const refreshed_queue_item = await getItem(queue_item_id);
   const template_relation_id =
     getFirstAppReferenceId(refreshed_queue_item, QUEUE_FIELDS.template, null) || null;
   const template_app_field_written =
-    Boolean(template_reference.field_value) &&
+    Boolean(selected_template_candidate?.attached_template_id) &&
     !template_attach_rejected &&
-    String(template_relation_id || "") === String(template_reference.attached_template_id || "");
+    String(template_relation_id || "") ===
+      String(selected_template_candidate?.attached_template_id || "");
 
   info("queue.message_resolution_completed", {
     queue_item_id,
     template_id: selected_template.item_id,
     template_source: selected_template.source || null,
+    template_resolution_source:
+      selected_template.template_resolution_source || null,
+    template_fallback_reason:
+      selected_template.template_fallback_reason || null,
     template_title: selected_template.title || null,
     template_relation_id,
     template_app_field_written,
     template_attachment_strategy: template_attach_rejected
       ? "podio_rejected_template_reference"
-      : template_reference.attachment_strategy,
+      : selected_template_candidate?.attachment_strategy ||
+        template_reference.attachment_strategy,
     template_attachment_reason: template_attach_rejected
       ? "template_attach_rejected_by_podio"
       : template_reference.attachment_reason,
@@ -652,7 +693,12 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     selected_template_id: selected_template.item_id,
     selected_template_source: selected_template.source || null,
     selected_template_title: selected_template.title || null,
+    selected_template_resolution_source:
+      selected_template.template_resolution_source || null,
+    selected_template_fallback_reason:
+      selected_template.template_fallback_reason || null,
     template_app_field_written,
+    template_attached: template_app_field_written,
     template_item: selected_template.raw || null,
     canonical_flow: deriveCanonicalSellerFlowFromTemplate(selected_template),
     message_text: rendered_message_text,
@@ -1015,7 +1061,7 @@ export async function logFailedOutboundMessageEvent(payload = {}) {
   return createMessageEvent(buildFailedOutboundMessageEventFields(payload));
 }
 
-async function failQueueItem(
+export async function failQueueItem(
   queue_item_id,
   {
     queue_status = "Failed",
@@ -1223,14 +1269,21 @@ export async function processSendQueueItem(queue_item_id) {
   const initial_phone_item_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.phone_number, null);
   const initial_master_owner_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.master_owner, null);
   const initial_prospect_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null);
+  const has_persisted_message_text = Boolean(
+    clean(getTextValue(queue_item, QUEUE_FIELDS.message_text, ""))
+  );
+  let initial_phone_item = null;
+  let initial_brain_item = null;
 
-  const [initial_phone_item, initial_brain_item] = await Promise.all([
-    initial_phone_item_id ? safeGetItem(initial_phone_item_id) : Promise.resolve(null),
-    resolveBrainForQueue({
-      master_owner_id: initial_master_owner_id,
-      prospect_id: initial_prospect_id,
-    }),
-  ]);
+  if (!has_persisted_message_text) {
+    [initial_phone_item, initial_brain_item] = await Promise.all([
+      initial_phone_item_id ? safeGetItem(initial_phone_item_id) : Promise.resolve(null),
+      resolveBrainForQueue({
+        master_owner_id: initial_master_owner_id,
+        prospect_id: initial_prospect_id,
+      }),
+    ]);
+  }
 
   const message_resolution = await resolveDeferredQueueMessage(queue_item, {
     queue_item_id,
@@ -1251,12 +1304,15 @@ export async function processSendQueueItem(queue_item_id) {
       _phase: "message_resolution_failed",
     });
 
-    return {
-      ok: false,
-      reason: message_resolution.reason,
-      details: message_resolution.details || null,
-    };
-  }
+      return {
+        ok: false,
+        reason: message_resolution.reason,
+        details: message_resolution.details || null,
+        queue_status: "Blocked",
+        failed_reason: "Network Error",
+        claimed: false,
+      };
+    }
 
   if (message_resolution.queue_item?.item_id) {
     queue_item = message_resolution.queue_item;
@@ -1275,6 +1331,7 @@ export async function processSendQueueItem(queue_item_id) {
         ok: true,
         skipped: true,
         reason: queue_validation.reason,
+        claimed: false,
       };
     }
 
@@ -1314,6 +1371,15 @@ export async function processSendQueueItem(queue_item_id) {
     return {
       ok: false,
       reason: queue_validation.reason,
+      queue_status:
+        queue_validation.reason === "junk_message_body" ? "Blocked" : "Failed",
+      failed_reason:
+        queue_validation.reason === "missing_phone_item"
+          ? "Invalid Number"
+          : queue_validation.reason === "junk_message_body"
+            ? "Content Filter"
+            : "Network Error",
+      claimed: false,
     };
   }
 
@@ -1332,6 +1398,10 @@ export async function processSendQueueItem(queue_item_id) {
     template_relation_id ||
     null;
   const selected_template_source = message_resolution.selected_template_source || null;
+  const selected_template_resolution_source =
+    message_resolution.selected_template_resolution_source || null;
+  const selected_template_fallback_reason =
+    message_resolution.selected_template_fallback_reason || null;
   const selected_template_title = message_resolution.selected_template_title || null;
   const master_owner_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.master_owner, null);
   const prospect_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null);
@@ -1346,24 +1416,12 @@ export async function processSendQueueItem(queue_item_id) {
       message_body,
     }));
 
-  const [phone_item, outbound_number_item, brain_item] = await Promise.all([
+  const [phone_item, outbound_number_item] = await Promise.all([
     initial_phone_item && String(initial_phone_item?.item_id || "") === String(phone_item_id)
       ? Promise.resolve(initial_phone_item)
       : safeGetItem(phone_item_id),
     safeGetItem(outbound_number_item_id),
-    initial_brain_item
-      ? Promise.resolve(initial_brain_item)
-      : resolveBrainForQueue({ master_owner_id, prospect_id }),
   ]);
-
-  const brain_id = brain_item?.item_id ?? null;
-  const { property_id: resolved_property_id, market_id: resolved_market_id } =
-    await resolveQueuePropertyAndMarket({
-      property_id,
-      market_id,
-      master_owner_id,
-      brain_item,
-    });
 
   const phone_validation = validateActivePhone(phone_item);
 
@@ -1384,36 +1442,9 @@ export async function processSendQueueItem(queue_item_id) {
     return {
       ok: false,
       reason: phone_validation.reason,
-    };
-  }
-
-  const suppression = shouldSuppressOutreach({
-    phone_item,
-    brain_item,
-  });
-
-  if (suppression.suppress) {
-    warn("queue.process_suppressed", {
-      queue_item_id,
-      phone_item_id,
-      reason: suppression.reason,
-      details: suppression.details,
-    });
-
-    await failQueueItem(queue_item_id, {
       queue_status: "Blocked",
-      failed_reason:
-        suppression.reason === "phone_post_contact_suppression" ||
-        suppression.reason === "classification_stop_texting"
-          ? "Opt-Out"
-          : "Network Error",
-    });
-
-    return {
-      ok: false,
-      suppressed: true,
-      reason: suppression.reason,
-      details: suppression.details,
+      failed_reason: "Invalid Number",
+      claimed: false,
     };
   }
 
@@ -1425,25 +1456,6 @@ export async function processSendQueueItem(queue_item_id) {
   );
   const from_number = outbound_number_validation.normalized_from || "";
   const client_reference_id = buildQueueClientReferenceId(queue_item_id);
-
-  info("queue.process_send_preflight", {
-    queue_item_id,
-    phone_item_id,
-    outbound_number_item_id,
-    property_id: resolved_property_id,
-    template_id: template_relation_id,
-    selected_template_id,
-    selected_template_source,
-    selected_template_title,
-    normalized_to: clean(to_number) || null,
-    normalized_from: clean(from_number) || null,
-    send_endpoint: getTextgridSendEndpoint(),
-    outbound_number_found: Boolean(outbound_number_item?.item_id),
-    outbound_number_valid: outbound_number_validation.ok,
-    outbound_number_status: outbound_number_validation.status || null,
-    outbound_number_hard_pause: outbound_number_validation.hard_pause || null,
-    outbound_number_pause_until: outbound_number_validation.pause_until || null,
-  });
 
   if (!to_number || !outbound_number_validation.ok) {
     const preflight_reason = !to_number
@@ -1461,13 +1473,13 @@ export async function processSendQueueItem(queue_item_id) {
 
     try {
       await logFailedOutboundMessageEvent({
-        brain_item,
-        conversation_item_id: brain_id,
+        brain_item: null,
+        conversation_item_id: null,
         queue_item_id,
         master_owner_id,
         prospect_id,
-        property_id: resolved_property_id,
-        market_id: resolved_market_id,
+        property_id,
+        market_id,
         phone_item_id,
         outbound_number_item_id,
         template_id: template_relation_id,
@@ -1505,8 +1517,146 @@ export async function processSendQueueItem(queue_item_id) {
     return {
       ok: false,
       reason: preflight_reason,
+      queue_status: "Blocked",
+      failed_reason: "Invalid Number",
+      claimed: false,
     };
   }
+
+  const brain_item = initial_brain_item
+    ? initial_brain_item
+    : await resolveBrainForQueue({ master_owner_id, prospect_id });
+  const brain_id = brain_item?.item_id ?? null;
+
+  const suppression = shouldSuppressOutreach({
+    phone_item,
+    brain_item,
+  });
+
+  if (suppression.suppress) {
+    warn("queue.process_suppressed", {
+      queue_item_id,
+      phone_item_id,
+      reason: suppression.reason,
+      details: suppression.details,
+    });
+
+    await failQueueItem(queue_item_id, {
+      queue_status: "Blocked",
+      failed_reason:
+        suppression.reason === "phone_post_contact_suppression" ||
+        suppression.reason === "classification_stop_texting"
+          ? "Opt-Out"
+          : "Network Error",
+    });
+
+    return {
+      ok: false,
+      suppressed: true,
+      reason: suppression.reason,
+      details: suppression.details,
+      queue_status: "Blocked",
+      failed_reason:
+        suppression.reason === "phone_post_contact_suppression" ||
+        suppression.reason === "classification_stop_texting"
+          ? "Opt-Out"
+          : "Network Error",
+      claimed: false,
+    };
+  }
+
+  // ── Pre-send stale-state guard ───────────────────────────────────────────
+  // Before claiming and sending, reload recent conversation events to catch
+  // negative replies that arrived after this queue item was created but before
+  // processSendQueue ran.  This is the second line of defence: the first is
+  // cancelPendingQueueItemsForOwner called synchronously from the inbound
+  // webhook handler, which cancels items to "Blocked" immediately.  The guard
+  // here catches the race where the inbound arrives after the item is fetched
+  // for processing but before it is claimed.
+  const queue_item_scheduled_ts =
+    toTimestamp(getDateValue(queue_item, QUEUE_FIELDS.scheduled_for_utc, null)) ||
+    toTimestamp(getDateValue(queue_item, QUEUE_FIELDS.scheduled_for_local, null)) ||
+    null;
+
+  let recent_events_result = null;
+  if (master_owner_id || phone_item_id) {
+    try {
+      recent_events_result = await loadRecentEvents({
+        master_owner_id,
+        phone_item_id,
+        limit: 20,
+      });
+    } catch (_err) {
+      // Non-fatal: if recent events cannot be loaded, proceed with send.
+    }
+  }
+
+  if (recent_events_result?.events?.length) {
+    const negative_inbound = recent_events_result.events.find((event) => {
+      if (lower(event.direction || "") !== "inbound") return false;
+      const event_ts = toTimestamp(event.timestamp);
+      if (!event_ts) return false;
+      // Only block if the inbound arrived after this item was scheduled
+      // (i.e. the seller replied AFTER we queued this touch).
+      if (queue_item_scheduled_ts && event_ts <= queue_item_scheduled_ts) return false;
+      return isNegativeReply(event.message || "");
+    });
+
+    if (negative_inbound) {
+      warn("queue.process_aborted_newer_negative_inbound", {
+        queue_item_id,
+        phone_item_id,
+        master_owner_id,
+        inbound_event_id: negative_inbound.item_id,
+        inbound_timestamp: negative_inbound.timestamp,
+        inbound_message: negative_inbound.message,
+        queue_item_scheduled_ts,
+      });
+
+      await failQueueItem(queue_item_id, {
+        queue_status: "Blocked",
+        failed_reason: "Opt-Out",
+        _phase: "pre_send_negative_inbound_guard",
+      });
+
+      return {
+        ok: false,
+        reason: "newer_inbound_negative_reply",
+        queue_status: "Blocked",
+        failed_reason: "Opt-Out",
+        claimed: false,
+      };
+    }
+  }
+
+  const { property_id: resolved_property_id, market_id: resolved_market_id } =
+    await resolveQueuePropertyAndMarket({
+      property_id,
+      market_id,
+      master_owner_id,
+      brain_item,
+    });
+
+  info("queue.process_send_preflight", {
+    queue_item_id,
+    phone_item_id,
+    outbound_number_item_id,
+    property_id: resolved_property_id,
+    template_id: template_relation_id,
+    selected_template_id,
+    selected_template_source,
+    selected_template_resolution_source,
+    selected_template_fallback_reason,
+    selected_template_title,
+    normalized_to: clean(to_number) || null,
+    normalized_from: clean(from_number) || null,
+    send_endpoint: getTextgridSendEndpoint(),
+    outbound_number_found: Boolean(outbound_number_item?.item_id),
+    outbound_number_valid: outbound_number_validation.ok,
+    outbound_number_status: outbound_number_validation.status || null,
+    outbound_number_hard_pause: outbound_number_validation.hard_pause || null,
+    outbound_number_pause_until: outbound_number_validation.pause_until || null,
+  });
 
   const queue_context_updates = {
     ...(!property_id && resolved_property_id
@@ -1534,6 +1684,8 @@ export async function processSendQueueItem(queue_item_id) {
       ok: true,
       skipped: true,
       reason: claim.reason,
+      claim_conflict: true,
+      claimed: false,
     };
   }
 
@@ -1610,8 +1762,10 @@ export async function processSendQueueItem(queue_item_id) {
       ok: false,
       sent: false,
       reason: send_result.error_message || "textgrid_send_failed",
+      queue_status: "Failed",
       failed_reason,
       bookkeeping_errors,
+      claimed: true,
     };
   }
 
@@ -1652,6 +1806,8 @@ export async function processSendQueueItem(queue_item_id) {
     template_id: template_relation_id,
     selected_template_id,
     selected_template_source,
+    selected_template_resolution_source,
+    selected_template_fallback_reason,
     selected_template_title,
     provider_message_id: send_result.message_id,
     brain_id,
@@ -1661,10 +1817,15 @@ export async function processSendQueueItem(queue_item_id) {
 
   return {
     ...bookkeeping_result,
+    queue_status: bookkeeping_result?.sent ? "Sent" : null,
     template_relation_id,
     selected_template_id,
     selected_template_source,
+    selected_template_resolution_source,
+    selected_template_fallback_reason,
     selected_template_title,
+    template_attached: message_resolution.template_attached ?? false,
+    claimed: true,
   };
 }
 

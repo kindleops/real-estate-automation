@@ -169,6 +169,50 @@ test("runSendQueue bypasses withRunLock entirely and enters executeRun when dry_
   assert.equal(find(entries, "queue.run_skipped_lock_active"), undefined, "lock warn must NOT appear in dry_run");
 });
 
+test("runSendQueue skips safely when Podio cooldown is active", async () => {
+  const { entries, info, warn } = makeLogger();
+  let with_run_lock_called = false;
+
+  const result = await runSendQueue(
+    { limit: 10, now: NOW },
+    {
+      ...makeDeps({ logger: { entries, info, warn } }),
+      buildPodioCooldownSkipResult: async () => ({
+        ok: true,
+        skipped: true,
+        reason: "podio_rate_limit_cooldown_active",
+        retry_after_seconds: 3600,
+        retry_after_at: "2026-04-08T20:20:25.000Z",
+        podio_cooldown: {
+          active: true,
+          status: 420,
+          path: "/item/app/30541680/filter/",
+          operation: "filter_items",
+          rate_limit_remaining: 0,
+        },
+        processed_count: 0,
+        sent_count: 0,
+        failed_count: 0,
+        skipped_count: 0,
+        results: [],
+      }),
+      withRunLock: async () => {
+        with_run_lock_called = true;
+        throw new Error("withRunLock should not run during Podio cooldown");
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "podio_rate_limit_cooldown_active");
+  assert.equal(result.retry_after_seconds, 3600);
+  assert.equal(with_run_lock_called, false);
+
+  const cooldown_warn = find(entries, "queue.run_skipped_podio_cooldown");
+  assert.ok(cooldown_warn, "queue.run_skipped_podio_cooldown should be emitted");
+});
+
 // ─── test 4: forceReleaseStaleLock clears a stuck lock record ────────────────
 
 test("forceReleaseStaleLock releases a stuck lock record", async () => {

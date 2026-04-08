@@ -625,19 +625,27 @@ function withTemplateSource(templates = [], source = "podio") {
   }));
 }
 
-async function fetchRemoteTemplatesSafely(remote_fetcher, filter_set) {
-  try {
-    const batch = await remote_fetcher(filter_set);
-    return withTemplateSource(batch, "podio");
-  } catch (error) {
-    if (isTemplateFilterValidationError(error)) {
-      return [];
-    }
-    // Keep outbound systems queueable even when Podio template reads fail.
-    // Local templates are the safety net, so remote fetch failures degrade to
-    // an empty remote batch instead of hard-failing selection.
-    return [];
-  }
+function createTemplateResolutionDiagnostics() {
+  return {
+    podio_fetch_failures: 0,
+    podio_filter_validation_failures: 0,
+    podio_batches_with_results: 0,
+    podio_candidates_considered: 0,
+    local_candidates_considered: 0,
+    selected_bucket_source: null,
+  };
+}
+
+function summarizeTemplateResolutionDiagnostics(diagnostics = {}) {
+  return {
+    podio_fetch_failures: diagnostics.podio_fetch_failures || 0,
+    podio_filter_validation_failures:
+      diagnostics.podio_filter_validation_failures || 0,
+    podio_batches_with_results: diagnostics.podio_batches_with_results || 0,
+    podio_candidates_considered: diagnostics.podio_candidates_considered || 0,
+    local_candidates_considered: diagnostics.local_candidates_considered || 0,
+    selected_bucket_source: diagnostics.selected_bucket_source || null,
+  };
 }
 
 function filterRenderableTemplates(
@@ -672,14 +680,33 @@ async function collectBucketCandidates({
   // and later-stage templates from the scoring pool without needing a separate
   // Podio query.
   allowed_variant_groups = null,
+  diagnostics = null,
 }) {
   let all_candidates = [];
 
   for (const filter_set of filter_sets) {
-    const batch =
-      source === "podio"
-        ? await fetchRemoteTemplatesSafely(remote_fetcher, filter_set)
-        : withTemplateSource(local_fetcher(filter_set), "local_registry");
+    let batch = [];
+
+    if (source === "podio") {
+      try {
+        batch = await remote_fetcher(filter_set);
+        batch = withTemplateSource(batch, "podio");
+      } catch (error) {
+        if (isTemplateFilterValidationError(error)) {
+          if (diagnostics) diagnostics.podio_filter_validation_failures += 1;
+          batch = [];
+        } else {
+          if (diagnostics) diagnostics.podio_fetch_failures += 1;
+          batch = [];
+        }
+      }
+    } else {
+      batch = withTemplateSource(local_fetcher(filter_set), "local_registry");
+    }
+
+    if (diagnostics && source === "podio" && batch.length > 0) {
+      diagnostics.podio_batches_with_results += 1;
+    }
 
     all_candidates.push(...batch);
 
@@ -701,6 +728,14 @@ async function collectBucketCandidates({
     all_candidates = all_candidates.filter(
       (t) => !t.variant_group || allowed_variant_groups.has(t.variant_group)
     );
+  }
+
+  if (diagnostics) {
+    if (source === "podio") {
+      diagnostics.podio_candidates_considered += all_candidates.length;
+    } else {
+      diagnostics.local_candidates_considered += all_candidates.length;
+    }
   }
 
   if (!all_candidates.length) return [];
@@ -814,6 +849,7 @@ export async function loadTemplateCandidates({
   local_fetcher = fetchLocalTemplates,
   allowed_variant_groups = null,
 }) {
+  const resolution_diagnostics = createTemplateResolutionDiagnostics();
   const normalized_preferences = normalizeTemplateFilters({
     category,
     secondary_category,
@@ -971,9 +1007,32 @@ export async function loadTemplateCandidates({
       template_render_overrides,
       preferences,
       allowed_variant_groups,
+      diagnostics: resolution_diagnostics,
     });
 
-    if (scored.length) return scored;
+    if (scored.length) {
+      resolution_diagnostics.selected_bucket_source = bucket.source;
+      const template_resolution_source =
+        bucket.source === "podio"
+          ? "podio_template"
+          : "local_template_fallback";
+      const template_fallback_reason =
+        bucket.source === "local_registry"
+          ? resolution_diagnostics.podio_fetch_failures > 0
+            ? "podio_template_fetch_failed"
+            : "no_podio_template_match"
+          : null;
+      const selection_diagnostics = summarizeTemplateResolutionDiagnostics(
+        resolution_diagnostics
+      );
+
+      return scored.map((template) => ({
+        ...template,
+        template_resolution_source,
+        template_fallback_reason,
+        template_selection_diagnostics: selection_diagnostics,
+      }));
+    }
   }
 
   return [];

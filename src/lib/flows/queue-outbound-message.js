@@ -15,6 +15,7 @@ import {
   getCategoryValue,
   getFirstAppReferenceId,
   getNumberValue,
+  getDateValue,
   normalizeUsPhone10,
 } from "@/lib/providers/podio.js";
 import { findQueueItems } from "@/lib/podio/queries/find-queue-items.js";
@@ -184,8 +185,31 @@ function deriveNextTouchNumber({
 
 const PENDING_QUEUE_STATUSES = new Set(["queued", "sending"]);
 
-export function findPendingQueueDuplicateItem(queue_items = [], phone_item_id, touch_number) {
+function toTimestamp(value) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+/**
+ * Find a pending duplicate queue item.
+ *
+ * Matches on:
+ *   1. Same phone_item_id + same touch_number (existing check — exact duplicate)
+ *   2. Same phone_item_id + same use_case created within the last 24 hours
+ *      (prevents re-queuing the same use-case touch after a cancellation race)
+ *
+ * @param {object[]} queue_items
+ * @param {number|string|null} phone_item_id
+ * @param {number} touch_number
+ * @param {string|null} use_case  Normalized use_case label for secondary dedupe
+ * @returns {object|null}
+ */
+export function findPendingQueueDuplicateItem(queue_items = [], phone_item_id, touch_number, use_case = null) {
   if (!phone_item_id) return null;
+
+  const now_ts = Date.now();
+  const window_24h_ts = now_ts - 24 * 60 * 60 * 1000;
 
   return (
     queue_items.find((item) => {
@@ -195,8 +219,22 @@ export function findPendingQueueDuplicateItem(queue_items = [], phone_item_id, t
       const candidate_phone_id = getFirstAppReferenceId(item, "phone-number", null);
       if (String(candidate_phone_id || "") !== String(phone_item_id || "")) return false;
 
+      // Primary guard: exact same touch number
       const candidate_touch = Number(getNumberValue(item, "touch-number", 0) || 0);
-      return candidate_touch === Number(touch_number || 0);
+      if (candidate_touch === Number(touch_number || 0)) return true;
+
+      // Secondary guard: same use_case within 24-hour window
+      if (use_case) {
+        const candidate_use_case = clean(getCategoryValue(item, "use-case-template", "") || "").toLowerCase();
+        if (candidate_use_case && candidate_use_case === clean(use_case).toLowerCase()) {
+          const scheduled_ts =
+            toTimestamp(getDateValue(item, "scheduled-for-utc", null)) ||
+            toTimestamp(getDateValue(item, "scheduled-for-local", null));
+          if (scheduled_ts && scheduled_ts >= window_24h_ts) return true;
+        }
+      }
+
+      return false;
     }) || null
   );
 }
@@ -456,6 +494,7 @@ export async function queueOutboundMessage({
       fallback_agent_type: resolved_fallback_agent_type,
       context,
       template_render_overrides,
+      allow_variant_group_fallback: true,
     });
   }
 
@@ -628,7 +667,8 @@ export async function queueOutboundMessage({
   const duplicate_queue_item = findPendingQueueDuplicateItem(
     queue_history,
     context?.ids?.phone_item_id || null,
-    resolved_touch_number
+    resolved_touch_number,
+    resolved_use_case
   );
 
   if (duplicate_queue_item) {
@@ -653,6 +693,29 @@ export async function queueOutboundMessage({
       route,
     };
   }
+
+  // ── Template selection audit log ─────────────────────────────────────────
+  // Emitted before every queue write so production logs can trace exactly
+  // which template was selected, why, and whether a local fallback was used.
+  info("outbound.template_selection_audit", {
+    inbound_from: resolved_inbound_from,
+    phone_item_id: context?.ids?.phone_item_id || null,
+    master_owner_id: context?.ids?.master_owner_id || null,
+    selected_template_id: selected_template_id || null,
+    selected_template_title: selected_template?.title || null,
+    selected_template_use_case: selected_template?.use_case || null,
+    selected_template_variant_group: selected_template?.variant_group || null,
+    selected_template_source: selected_template?.source || null,
+    selected_template_resolution_source: selected_template?.template_resolution_source || null,
+    selected_template_fallback_reason: selected_template?.template_fallback_reason || null,
+    is_local_fallback: selected_template?.source === "local_fallback" || Boolean(selected_template?.template_fallback_reason),
+    resolved_use_case,
+    resolved_variant_group,
+    resolved_language,
+    resolved_sequence_position,
+    resolved_agent_type,
+    message_override_used: Boolean(message_override),
+  });
 
   const queue_result = await buildSendQueueItemImpl({
     context,
@@ -697,9 +760,14 @@ export async function queueOutboundMessage({
     phone_item_id: context?.ids?.phone_item_id || null,
     template_id: selected_template_id,
     template_source: selected_template?.source || null,
+    template_resolution_source:
+      selected_template?.template_resolution_source || null,
+    template_fallback_reason:
+      selected_template?.template_fallback_reason || null,
     template_title: selected_template?.title || null,
     template_relation_id: queue_result?.template_relation_id ?? null,
     template_app_field_written: queue_result?.template_app_field_written ?? false,
+    template_attached: queue_result?.template_attached ?? false,
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     use_case: resolved_use_case,
     stage: route?.stage || null,
@@ -717,9 +785,14 @@ export async function queueOutboundMessage({
     template_id: selected_template_id,
     template_item: selected_template,
     selected_template_source: selected_template?.source || null,
+    selected_template_resolution_source:
+      selected_template?.template_resolution_source || null,
+    selected_template_fallback_reason:
+      selected_template?.template_fallback_reason || null,
     selected_template_title: selected_template?.title || null,
     template_relation_id: queue_result?.template_relation_id ?? null,
     template_app_field_written: queue_result?.template_app_field_written ?? false,
+    template_attached: queue_result?.template_attached ?? false,
     message_override_used: Boolean(message_override),
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     rendered_message_text: final_message_text,

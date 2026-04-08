@@ -8,10 +8,10 @@ const BASE_SEND_QUEUE_SCHEMA =
   PODIO_ATTACHED_BASE_SCHEMA[String(APP_IDS.send_queue)] || null;
 
 export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
-  // Send Queue — extends base schema with 4 enrichment fields added to the Podio
+  // Send Queue — extends base schema with enrichment fields added to the Podio
   // app after the initial schema snapshot.
   //
-  // Category fields (property-type, category, use-case-template) have options: []
+  // Category fields (property-type, owner-type, category, use-case-template) have options: []
   // because the real Podio option IDs were created after this snapshot.
   // resolveQueueCategoryField will safely omit them (reason: stale_empty_schema_options)
   // until the schema is refreshed.  Run to populate:
@@ -68,6 +68,20 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
         { id: 4, text: "Apartment" },
         { id: 5, text: "Other" },
         { id: 6, text: "Mobile Home" },
+      ],
+      },
+      "owner-type": {
+        label: "Owner Type",
+        type: "category",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [
+        { id: 1, text: "Corporate" },
+        { id: 2, text: "Individual" },
+        { id: 3, text: "Trust / Estate" },
+        { id: 4, text: "Bank / Lender" },
+        { id: 6, text: "Government" },
       ],
       },
       "category": {

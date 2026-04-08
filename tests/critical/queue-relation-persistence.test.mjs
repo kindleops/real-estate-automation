@@ -16,6 +16,7 @@ import {
   dateField,
   textField,
 } from "../helpers/test-helpers.js";
+import { PodioError } from "@/lib/providers/podio.js";
 
 function createActivePhoneItem(item_id = 401) {
   return createPodioItem(item_id, {
@@ -93,7 +94,77 @@ test("send queue row persists property, template, phone, and master owner relati
   assert.equal(result.selected_template_title, "Ownership Check V1");
   assert.equal(result.template_relation_id, 901);
   assert.equal(result.template_app_field_written, true);
+  assert.equal(result.template_attached, true);
+  assert.equal(result.selected_template_resolution_source, "podio_template");
   assert.equal(result.template_attachment_strategy, "template_id_bridge");
+});
+
+test("send queue row falls back to the direct Podio template item when the bridge relation is rejected", async () => {
+  const create_attempts = [];
+
+  const result = await buildSendQueueItem({
+    context: {
+      found: true,
+      items: {
+        phone_item: createActivePhoneItem(),
+        brain_item: null,
+        master_owner_item: createPodioItem(201),
+        property_item: null,
+        agent_item: null,
+        market_item: null,
+      },
+      ids: {
+        phone_item_id: 401,
+        master_owner_id: 201,
+        prospect_id: 301,
+        property_id: null,
+        market_id: null,
+        assigned_agent_id: null,
+      },
+      recent: {
+        touch_count: 0,
+      },
+      summary: {
+        total_messages_sent: 0,
+      },
+    },
+    queue_id: "template-direct-fallback",
+    rendered_message_text: "Hi there",
+    template_id: 9901,
+    template_item: {
+      item_id: 9901,
+      template_id: 901,
+      source: "podio",
+      template_resolution_source: "podio_template",
+      title: "Ownership Check V1",
+      raw: {
+        app: {
+          app_id: APP_IDS.templates,
+        },
+      },
+    },
+    textgrid_number_item_id: 501,
+    scheduled_for_local: "2026-04-04 12:43:17",
+    scheduled_for_utc: "2026-04-04 17:43:17",
+    create_item: async (_app_id, fields) => {
+      create_attempts.push(fields);
+
+      if (fields.template?.[0] === 901) {
+        throw new PodioError("template value rejected", { status: 400 });
+      }
+
+      return { item_id: 125 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(create_attempts.length, 2);
+  assert.deepEqual(create_attempts[0].template, [901]);
+  assert.deepEqual(create_attempts[1].template, [9901]);
+  assert.equal(result.template_relation_id, 9901);
+  assert.equal(result.template_app_field_written, true);
+  assert.equal(result.template_attached, true);
+  assert.equal(result.template_attachment_strategy, "selected_template_item_id");
 });
 
 test("send queue row still queues successfully when local template fallback is selected", async () => {
@@ -149,6 +220,8 @@ test("send queue row still queues successfully when local template fallback is s
   assert.equal(result.selected_template_source, "local_registry");
   assert.equal(result.template_relation_id, null);
   assert.equal(result.template_app_field_written, false);
+  assert.equal(result.template_attached, false);
+  assert.equal(result.selected_template_resolution_source, "local_template_fallback");
   assert.equal(result.template_attachment_reason, "local_template_not_attachable");
 });
 

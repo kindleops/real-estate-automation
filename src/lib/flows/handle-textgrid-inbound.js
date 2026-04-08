@@ -16,6 +16,8 @@ import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/may
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
 import { updateMasterOwnerAfterInbound } from "@/lib/domain/master-owners/update-master-owner-after-inbound.js";
+import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
+import { cancelPendingQueueItemsForOwner } from "@/lib/domain/queue/cancel-pending-queue-items.js";
 import {
   beginIdempotentProcessing,
   completeIdempotentProcessing,
@@ -43,6 +45,8 @@ const defaultDeps = {
   syncPipelineState,
   maybeQueueSellerStageReply,
   updateMasterOwnerAfterInbound,
+  isNegativeReply,
+  cancelPendingQueueItemsForOwner,
   beginIdempotentProcessing,
   completeIdempotentProcessing,
   failIdempotentProcessing,
@@ -261,6 +265,30 @@ export async function handleTextgridInboundWebhook(payload = {}) {
 
     const classification = await runtimeDeps.classify(message_body, brain_item);
 
+    // ── Negative-reply fast-path ─────────────────────────────────────────
+    // When the seller clearly says stop/no/not-interested, immediately cancel
+    // every pending queue item for this owner+phone so no further touches fire
+    // while the brain-stage and phone suppress flags propagate asynchronously.
+    const inbound_is_negative = runtimeDeps.isNegativeReply(message_body);
+    let queue_cancellation = null;
+
+    if (inbound_is_negative && (master_owner_id || phone_item_id)) {
+      queue_cancellation = await runtimeDeps.cancelPendingQueueItemsForOwner({
+        master_owner_id,
+        phone_item_id,
+        reason: "inbound_negative_reply",
+      });
+
+      runtimeDeps.info("textgrid.inbound_negative_reply_queue_canceled", {
+        message_id: extracted.message_id,
+        inbound_from,
+        master_owner_id,
+        phone_item_id,
+        canceled_count: queue_cancellation?.canceled_count ?? 0,
+        items_checked: queue_cancellation?.items_checked ?? 0,
+      });
+    }
+
     const route = runtimeDeps.resolveRoute({
       classification,
       brain_item,
@@ -459,6 +487,8 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       master_owner_id,
       prospect_id,
       property_id,
+      inbound_is_negative,
+      queue_canceled_count: queue_cancellation?.canceled_count ?? null,
       classification_source: classification?.source || null,
       route_stage: route?.stage || null,
       route_use_case: route?.use_case || null,
@@ -489,6 +519,8 @@ export async function handleTextgridInboundWebhook(payload = {}) {
       inbound_from,
       inbound_to,
       body: message_body,
+      inbound_is_negative,
+      queue_cancellation,
       context,
       classification,
       route,

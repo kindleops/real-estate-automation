@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 
 import {
+  buildPodioCooldownSkipResult,
+  isPodioRateLimitError,
+  serializePodioError,
+} from "@/lib/providers/podio.js";
+import {
   capAutopilotScan,
   getRolloutControls,
   resolveMutationDryRun,
@@ -68,6 +73,40 @@ async function runAutopilotWithRollout({
   const lock_scope = effective_contract_item_id
     ? `autopilot:${effective_contract_item_id}`
     : "autopilot";
+
+  const cooldown_skip = await buildPodioCooldownSkipResult({
+    dry_run: effective_dry_run,
+    contract_item_id: effective_contract_item_id,
+    scan_limit: effective_scan_limit,
+    rollout: {
+      requested_dry_run: Boolean(dry_run),
+      effective_dry_run,
+      rollout_reason: dry_run_resolution.reason,
+      requested_scan_limit: scan_limit,
+      effective_scan_limit,
+      requested_contract_item_id: contract_item_id,
+      effective_contract_item_id,
+    },
+  });
+
+  if (cooldown_skip?.podio_cooldown?.active) {
+    logger.warn("autopilot_run.skipped_podio_cooldown", {
+      scan_limit: effective_scan_limit,
+      dry_run: effective_dry_run,
+      contract_item_id: effective_contract_item_id,
+      retry_after_seconds: cooldown_skip.retry_after_seconds,
+      retry_after_at: cooldown_skip.retry_after_at,
+      podio_status: cooldown_skip.podio_cooldown?.status ?? null,
+      podio_path: cooldown_skip.podio_cooldown?.path ?? null,
+      podio_operation: cooldown_skip.podio_cooldown?.operation ?? null,
+      rate_limit_remaining:
+        cooldown_skip.podio_cooldown?.rate_limit_remaining ?? null,
+      rate_limit_limit:
+        cooldown_skip.podio_cooldown?.rate_limit_limit ?? null,
+    });
+
+    return cooldown_skip;
+  }
 
   const execute = async () =>
     runDealsAutopilot({
@@ -156,6 +195,12 @@ async function runAutopilotWithRollout({
 }
 
 export async function GET(request) {
+  let request_meta = {
+    scan_limit: null,
+    dry_run: false,
+    contract_item_id: null,
+  };
+
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
@@ -164,11 +209,25 @@ export async function GET(request) {
     const scan_limit = asNumber(searchParams.get("scan_limit"), null);
     const dry_run = asBoolean(searchParams.get("dry_run"), false);
     const contract_item_id = asNumber(searchParams.get("contract_id"), null);
+    request_meta = {
+      scan_limit,
+      dry_run,
+      contract_item_id,
+    };
 
     const result = await runAutopilotWithRollout({
       scan_limit,
       dry_run,
       contract_item_id,
+    });
+
+    logger.info("autopilot_run.completed", {
+      method: "GET",
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || null,
+      scan_limit: result?.scan_limit ?? scan_limit,
+      retry_after_seconds: result?.retry_after_seconds ?? null,
     });
 
     return NextResponse.json({
@@ -177,12 +236,30 @@ export async function GET(request) {
       result,
     });
   } catch (error) {
-    logger.error("autopilot_run.failed", { error });
+    const diagnostics = serializePodioError(error);
+
+    logger.error("autopilot_run.failed", {
+      method: "GET",
+      error: diagnostics,
+    });
+
+    if (isPodioRateLimitError(error)) {
+      const result = await buildPodioCooldownSkipResult({
+        ...request_meta,
+      });
+
+      return NextResponse.json({
+        ok: true,
+        route: "internal/autopilot/run",
+        result,
+      });
+    }
 
     return NextResponse.json(
       {
         ok: false,
         error: "autopilot_run_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );
@@ -190,6 +267,12 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  let request_meta = {
+    scan_limit: null,
+    dry_run: false,
+    contract_item_id: null,
+  };
+
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
@@ -198,11 +281,25 @@ export async function POST(request) {
     const scan_limit = asNumber(body?.scan_limit, null);
     const dry_run = asBoolean(body?.dry_run, false);
     const contract_item_id = asNumber(body?.contract_id, null);
+    request_meta = {
+      scan_limit,
+      dry_run,
+      contract_item_id,
+    };
 
     const result = await runAutopilotWithRollout({
       scan_limit,
       dry_run,
       contract_item_id,
+    });
+
+    logger.info("autopilot_run.completed", {
+      method: "POST",
+      ok: result?.ok !== false,
+      skipped: result?.skipped || false,
+      reason: result?.reason || null,
+      scan_limit: result?.scan_limit ?? scan_limit,
+      retry_after_seconds: result?.retry_after_seconds ?? null,
     });
 
     return NextResponse.json({
@@ -211,12 +308,30 @@ export async function POST(request) {
       result,
     });
   } catch (error) {
-    logger.error("autopilot_run.failed", { error });
+    const diagnostics = serializePodioError(error);
+
+    logger.error("autopilot_run.failed", {
+      method: "POST",
+      error: diagnostics,
+    });
+
+    if (isPodioRateLimitError(error)) {
+      const result = await buildPodioCooldownSkipResult({
+        ...request_meta,
+      });
+
+      return NextResponse.json({
+        ok: true,
+        route: "internal/autopilot/run",
+        result,
+      });
+    }
 
     return NextResponse.json(
       {
         ok: false,
         error: "autopilot_run_failed",
+        message: diagnostics.message,
       },
       { status: 500 }
     );

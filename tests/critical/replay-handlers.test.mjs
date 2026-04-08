@@ -511,6 +511,135 @@ test("delivery webhook updates verification send events without queue correlatio
   assert.equal(eventStatusUpdateCount, 1);
 });
 
+test("delivery webhook normalizes raw TextGrid sent callbacks and updates queue state", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const queueUpdates = [];
+
+  const outboundEvent = createPodioItem(821, {
+    "trigger-name": textField("queue-send:123"),
+    "message-id": textField("provider-sent-1"),
+    "ai-output": textField(
+      JSON.stringify({
+        queue_item_id: 123,
+        client_reference_id: "queue-123",
+        provider_message_id: "provider-sent-1",
+      })
+    ),
+    "master-owner": appRefField(201),
+    "linked-seller": appRefField(301),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  const queueItem = createPodioItem(123, {
+    "master-owner": appRefField(201),
+    "prospects": appRefField(301),
+    "properties": appRefField(601),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  __setTextgridDeliveryTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    info: () => {},
+    warn: () => {},
+    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
+    fetchAllItems: async () => [],
+    updateItem: async (item_id, payload) => {
+      queueUpdates.push({ item_id, payload });
+    },
+    logDeliveryEvent: async () => {},
+    updateMessageEventStatus: async () => {},
+    findLatestBrainByProspectId: async () => null,
+    findLatestBrainByMasterOwnerId: async () => null,
+    updatePhoneNumberItem: async () => null,
+    updateBrainAfterDelivery: async () => null,
+    mapTextgridFailureBucket: () => "Other",
+  });
+
+  const result = await handleTextgridDeliveryWebhook({
+    SmsSid: "provider-sent-1",
+    SmsStatus: "sent",
+    From: "+15550000002",
+    To: "+15550000001",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.normalized_state, "Sent");
+  assert.equal(queueUpdates.length, 1);
+  assert.equal(queueUpdates[0].item_id, 123);
+  assert.equal(queueUpdates[0].payload["delivery-confirmed"], "⏳ Pending");
+});
+
+test("delivery webhook normalizes raw TextGrid delivered callbacks and confirms delivery", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const queueUpdates = [];
+
+  const outboundEvent = createPodioItem(822, {
+    "trigger-name": textField("queue-send:123"),
+    "message-id": textField("provider-delivered-1"),
+    "ai-output": textField(
+      JSON.stringify({
+        queue_item_id: 123,
+        client_reference_id: "queue-123",
+        provider_message_id: "provider-delivered-1",
+      })
+    ),
+    "master-owner": appRefField(201),
+    "linked-seller": appRefField(301),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  const queueItem = createPodioItem(123, {
+    "master-owner": appRefField(201),
+    "prospects": appRefField(301),
+    "properties": appRefField(601),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  __setTextgridDeliveryTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    info: () => {},
+    warn: () => {},
+    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
+    fetchAllItems: async () => [],
+    updateItem: async (item_id, payload) => {
+      queueUpdates.push({ item_id, payload });
+    },
+    logDeliveryEvent: async () => {},
+    updateMessageEventStatus: async () => {},
+    findLatestBrainByProspectId: async () => null,
+    findLatestBrainByMasterOwnerId: async () => null,
+    updatePhoneNumberItem: async () => null,
+    updateBrainAfterDelivery: async () => null,
+    mapTextgridFailureBucket: () => "Other",
+  });
+
+  const result = await handleTextgridDeliveryWebhook({
+    MessageSid: "provider-delivered-1",
+    MessageStatus: "delivered",
+    From: "+15550000002",
+    To: "+15550000001",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.normalized_state, "Delivered");
+  assert.equal(queueUpdates.length, 1);
+  assert.equal(queueUpdates[0].item_id, 123);
+  assert.equal(queueUpdates[0].payload["delivery-confirmed"], "✅ Confirmed");
+  assert.equal(queueUpdates[0].payload["queue-status"], "Sent");
+});
+
 test("DocuSign webhook ignores replay after first contract mutation", async () => {
   const ledger = createInMemoryIdempotencyLedger();
   let contractUpdateCount = 0;

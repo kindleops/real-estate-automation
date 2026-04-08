@@ -51,10 +51,20 @@ test("handleQueueRunRequest calls runSendQueue and emits route_enter, before_run
     ok: true,
     dry_run: false,
     skipped: false,
+    attempted_count: 2,
+    claimed_count: 2,
+    started_count: 2,
     processed_count: 2,
     sent_count: 2,
     failed_count: 0,
+    blocked_count: 0,
     skipped_count: 0,
+    duplicate_locked_count: 0,
+    first_failing_queue_item_id: null,
+    first_failing_reason: null,
+    first_failure_queue_item_id: null,
+    first_failure_reason: null,
+    batch_duration_ms: 1234,
     due_rows: 2,
     future_rows: 0,
     total_rows_loaded: 2,
@@ -102,8 +112,14 @@ test("handleQueueRunRequest calls runSendQueue and emits route_enter, before_run
   assert.ok(after, "after_run_send_queue log payload is present");
   assert.equal(after.ok, true);
   assert.equal(after.skipped, false);
+  assert.equal(after.attempted_count, 2);
+  assert.equal(after.claimed_count, 2);
+  assert.equal(after.started_count, 2);
   assert.equal(after.processed_count, 2);
   assert.equal(after.sent_count, 2);
+  assert.equal(after.blocked_count, 0);
+  assert.equal(after.duplicate_locked_count, 0);
+  assert.equal(after.batch_duration_ms, 1234);
   assert.equal(after.total_rows_loaded, 2);
 
   // No early_return warn when run is not skipped
@@ -159,6 +175,59 @@ test("handleQueueRunRequest emits queue_run.early_return warn when runSendQueue 
   assert.equal(after.meta.reason, "queue_runner_lock_active");
 });
 
+test("handleQueueRunRequest returns 200 and logs first failure details when the batch is partial", async () => {
+  const { calls, logger } = makeLogger();
+  const { responses, fn } = makeJsonResponse();
+
+  await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: makeAuth(true),
+    runSendQueue: async () => ({
+      ok: true,
+      partial: true,
+      dry_run: false,
+      skipped: false,
+      attempted_count: 3,
+      claimed_count: 2,
+      started_count: 3,
+      processed_count: 3,
+      sent_count: 2,
+      failed_count: 1,
+      blocked_count: 0,
+      skipped_count: 0,
+      duplicate_locked_count: 1,
+      first_failing_queue_item_id: 9002,
+      first_failing_reason: "queue_processing_exception",
+      first_failure_queue_item_id: 9002,
+      first_failure_reason: "queue_processing_exception",
+      batch_duration_ms: 987,
+      due_rows: 3,
+      future_rows: 0,
+      total_rows_loaded: 3,
+      results: [],
+    }),
+    logger,
+    jsonResponse: fn,
+  });
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].status, 200);
+  assert.equal(responses[0].body.ok, true);
+
+  const after = calls.find((c) => c.event === "queue_run.after_run_send_queue")?.meta;
+  assert.ok(after, "after_run_send_queue log payload is present");
+  assert.equal(after.partial, true);
+  assert.equal(after.attempted_count, 3);
+  assert.equal(after.claimed_count, 2);
+  assert.equal(after.started_count, 3);
+  assert.equal(after.failed_count, 1);
+  assert.equal(after.duplicate_locked_count, 1);
+  assert.equal(after.first_failing_queue_item_id, 9002);
+  assert.equal(after.first_failing_reason, "queue_processing_exception");
+  assert.equal(after.first_failure_queue_item_id, 9002);
+  assert.equal(after.first_failure_reason, "queue_processing_exception");
+  assert.equal(after.batch_duration_ms, 987);
+});
+
 // ─── test: unauthorized returns early without calling runSendQueue ─────────────
 
 test("handleQueueRunRequest returns early without calling runSendQueue when auth fails", async () => {
@@ -194,4 +263,63 @@ test("statusForResult returns 400 for ok=false and 200 otherwise", () => {
   assert.equal(statusForResult({ ok: true, skipped: true }), 200);
   assert.equal(statusForResult(null), 200);
   assert.equal(statusForResult(undefined), 200);
+});
+
+test("handleQueueRunRequest converts Podio cooldown errors into a safe skipped response", async () => {
+  const { calls, logger } = makeLogger();
+  const { responses, fn } = makeJsonResponse();
+
+  await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: makeAuth(true),
+    runSendQueue: async () => {
+      throw {
+        name: "PodioError",
+        status: 420,
+        path: "/item/app/30541680/filter/",
+        method: "post",
+        operation: "filter_items",
+        retry_after_seconds: 3600,
+        rate_limit_remaining: 0,
+        message:
+          "You have hit the rate limit. Please wait 3600 seconds before trying again.",
+      };
+    },
+    buildPodioCooldownSkipResult: async () => ({
+      ok: true,
+      skipped: true,
+      reason: "podio_rate_limit_cooldown_active",
+      retry_after_seconds: 3600,
+      retry_after_at: "2026-04-08T20:20:25.000Z",
+      podio_cooldown: {
+        active: true,
+        status: 420,
+        path: "/item/app/30541680/filter/",
+        operation: "filter_items",
+        rate_limit_remaining: 0,
+      },
+      results: [],
+      processed_count: 0,
+      sent_count: 0,
+      failed_count: 0,
+      skipped_count: 0,
+    }),
+    logger,
+    jsonResponse: fn,
+  });
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].status, 200);
+  assert.equal(responses[0].body.ok, true);
+  assert.equal(responses[0].body.result.skipped, true);
+  assert.equal(responses[0].body.result.reason, "podio_rate_limit_cooldown_active");
+  assert.equal(responses[0].body.result.retry_after_seconds, 3600);
+
+  const failure = calls.find((entry) => entry.event === "queue_run.failed");
+  assert.ok(failure, "queue_run.failed should be logged");
+  assert.equal(failure.level, "error");
+  assert.equal(failure.meta.error.status, 420);
+  assert.equal(failure.meta.error.path, "/item/app/30541680/filter/");
+  assert.equal(failure.meta.error.operation, "filter_items");
+  assert.equal(failure.meta.error.retry_after_seconds, 3600);
+  assert.equal(failure.meta.error.rate_limit_remaining, 0);
 });

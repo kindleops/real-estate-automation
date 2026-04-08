@@ -100,3 +100,51 @@ test("queueOutboundMessage uses explicit message_text override without forcing t
     "Got it Jose, thanks. Would you be open to an offer on 5521 Laster Ln?"
   );
 });
+
+test("queueOutboundMessage enables stage-based Podio template fallback for live selection", async () => {
+  let load_template_args = null;
+
+  const result = await queueOutboundMessage(
+    {
+      phone: "12087034955",
+    },
+    {
+      loadContextImpl: async () => buildContext(),
+      resolveRouteImpl: () => ({
+        use_case: "ownership_check",
+        variant_group: "Stage 1 — Ownership Confirmation",
+        tone: "Warm",
+        stage: "Ownership",
+        lifecycle_stage: null,
+        template_filters: {},
+        persona: "Warm Professional",
+      }),
+      loadTemplateImpl: async (args) => {
+        load_template_args = args;
+        return {
+          item_id: 9992,
+          source: "podio",
+          template_resolution_source: "podio_template",
+          use_case: "ownership_check",
+          variant_group: "Stage 1 — Ownership Confirmation",
+          text: "Hi {{seller_first_name}}, are you the owner of {{property_address}}?",
+        };
+      },
+      renderTemplateImpl: () => ({
+        rendered_text: "Hi Sam, are you the owner of 5521 Laster Ln?",
+        used_placeholders: ["{{seller_first_name}}", "{{property_address}}"],
+      }),
+      chooseTextgridNumberImpl: async () => ({ item_id: 701 }),
+      findQueueItemsImpl: async () => [],
+      buildSendQueueItemImpl: async () => ({
+        ok: true,
+        queue_item_id: 7772,
+        template_relation_id: 9992,
+        template_app_field_written: true,
+      }),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(load_template_args?.allow_variant_group_fallback, true);
+});
