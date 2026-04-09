@@ -79,7 +79,8 @@ function deriveQueueStatus(value = null) {
   if (raw === "blocked") return "Blocked";
   if (raw === "failed") return "Failed";
   if (raw === "sent") return "Sent";
-  if (raw === "delivered") return "Sent";
+  // "Delivered" is a distinct terminal state — do not collapse to "Sent".
+  if (raw === "delivered") return "Delivered";
 
   return "Queued";
 }
@@ -89,16 +90,22 @@ function deriveSendPriority({
   classification = null,
   route = null,
 }) {
+  // Caller-supplied priority always wins — allows per-flow overrides.
   if (explicit_send_priority) return explicit_send_priority;
 
-  const emotion = classification?.emotion || null;
   const objection = classification?.objection || null;
   const use_case = route?.use_case || null;
+  const stage = route?.stage || null;
+  const lifecycle_stage = route?.lifecycle_stage || null;
 
+  // ── Urgent ──────────────────────────────────────────────────────────────
+  // Inbound-driven objections that need immediate human or AI response.
+  if (objection === "financial_distress" || objection === "send_offer_first") {
+    return "_ Urgent";
+  }
+
+  // Active offer/closing use-cases where delays cost deals.
   if (
-    objection === "financial_distress" ||
-    objection === "send_offer_first" ||
-    emotion === "motivated" ||
     [
       "offer_reveal",
       "offer_reveal_cash",
@@ -106,7 +113,13 @@ function deriveSendPriority({
       "offer_reveal_subject_to",
       "offer_reveal_novation",
       "mf_offer_reveal",
-    ].includes(use_case) ||
+    ].includes(use_case)
+  ) {
+    return "_ Urgent";
+  }
+
+  // Time-critical transactional touches (closing docs, title deadlines).
+  if (
     ["clear_to_close", "day_before_close", "seller_docs_needed", "probate_doc_needed"].includes(
       use_case
     )
@@ -114,18 +127,22 @@ function deriveSendPriority({
     return "_ Urgent";
   }
 
-  if (["Title", "Closing"].includes(route?.lifecycle_stage || null)) {
-    return "_ Normal";
-  }
-
-  if ((route?.lifecycle_stage || null) === "Post-Close") {
+  // ── Low ─────────────────────────────────────────────────────────────────
+  if (lifecycle_stage === "Post-Close") {
     return "_ Low";
   }
 
-  if (route?.stage === "Follow-Up") {
+  if (stage === "Follow-Up") {
     return "_ Low";
   }
 
+  // ── Normal ───────────────────────────────────────────────────────────────
+  // Standard first touches, Title/Closing lifecycle outbound, everything else.
+  // NOTE: emotion === "motivated" was previously a blanket Urgent trigger but
+  // produced Urgent priority for nearly all cold-outbound distressed-list sends
+  // because many properties have tax delinquency or liens.  Motivation is now
+  // handled through use_case routing (offer_reveal etc.) rather than a score
+  // threshold, so routine sends stay Normal and don't crowd out true Urgents.
   return "_ Normal";
 }
 

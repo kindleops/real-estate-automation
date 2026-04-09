@@ -219,7 +219,10 @@ function normalizeQueueStatus(value = "Queued") {
   if (raw === "processing") return "Sending";
   if (raw === "sending") return "Sending";
   if (raw === "sent") return "Sent";
-  if (raw === "delivered") return "Sent";
+  // "Delivered" is a distinct terminal state — do not collapse it to "Sent".
+  // Requires the "Delivered" option to be added to the Send Queue::queue-status
+  // Podio field and the supplement updated with the correct option id.
+  if (raw === "delivered") return "Delivered";
   if (raw === "failed") return "Failed";
   if (raw === "blocked") return "Blocked";
   return "Queued";
@@ -612,6 +615,26 @@ export async function buildSendQueueItem({
         market_name,
       });
 
+  // Warn when multiple tags are detected but the Podio field is still
+  // single-select (multiple:false).  normalizeCategoryValue will silently
+  // persist only the first tag.  Requires the field to be changed to
+  // multi-select in Podio — until then, only the first tag is stored.
+  if (personalization_tags_used.length > 1) {
+    const tags_field_schema = getAttachedFieldSchema(
+      APP_IDS.send_queue,
+      QUEUE_FIELDS.personalization_tags_used
+    );
+    if (tags_field_schema && !tags_field_schema.multiple) {
+      warn("queue.personalization_tags_field_single_select", {
+        field: QUEUE_FIELDS.personalization_tags_used,
+        detected_tags: personalization_tags_used,
+        tags_will_persist: personalization_tags_used[0] || null,
+        tags_lost: personalization_tags_used.slice(1),
+        note: "Change Send Queue::personalization-tags-used to multi-select in Podio to persist all tags.",
+      });
+    }
+  }
+
   const next_touch_number =
     touch_number ??
     ((context.recent?.touch_count || context.summary?.total_messages_sent || 0) + 1);
@@ -688,6 +711,22 @@ export async function buildSendQueueItem({
         reason: resolved.reason,
       });
     }
+  }
+
+  // Specific structured warning when owner-type cannot be resolved.
+  // The Send Queue field external id is "owner-type".  If the Podio schema
+  // does not have a matching option for the resolved value, the field is omitted
+  // and ops will see a blank Owner Type on the queue row.
+  if (owner_type_field.omitted && (property_owner_type || owner_type_raw)) {
+    warn("queue.owner_type_write_failed", {
+      field: QUEUE_FIELDS.owner_type,
+      expected_external_id: "owner-type",
+      property_owner_type: property_owner_type ?? null,
+      master_owner_raw: owner_type_raw ?? null,
+      resolved_value: resolved_owner_type ?? null,
+      omit_reason: owner_type_field.reason,
+      note: "Ensure Send Queue::owner-type Podio field exists and its options match the values returned by mapOwnerTypeToQueueCategory.",
+    });
   }
 
   const template_reference = resolveTemplateFieldReference({

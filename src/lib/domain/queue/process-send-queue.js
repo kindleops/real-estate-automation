@@ -117,6 +117,25 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago for
+// operational Podio date fields (Sent At).  Podio stores the string as-is so
+// ops sees Central hours rather than UTC.
+function nowPodioDateTimeCentral() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+}
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -1174,10 +1193,22 @@ export async function finalizeSuccessfulQueueSend({
 
   const bookkeeping_errors = [];
 
+  // Sent At is written in America/Chicago so ops sees Central time in Podio.
+  // `now` (UTC ISO) is kept for master-owner bookkeeping; the queue field gets
+  // the Central-formatted string so Podio displays it without re-conversion.
+  const sent_at_central = nowPodioDateTimeCentral();
+
+  info("queue.sent_at_timezone_conversion", {
+    queue_item_id,
+    sent_at_utc: now,
+    sent_at_central,
+    timezone: "America/Chicago",
+  });
+
   try {
     await update(queue_item_id, {
       [QUEUE_FIELDS.queue_status]: "Sent",
-      [QUEUE_FIELDS.sent_at]: { start: now },
+      [QUEUE_FIELDS.sent_at]: { start: sent_at_central },
       [QUEUE_FIELDS.delivery_confirmed]: "⏳ Pending",
     });
   } catch (error) {

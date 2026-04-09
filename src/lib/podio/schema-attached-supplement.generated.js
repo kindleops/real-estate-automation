@@ -8,20 +8,43 @@ const BASE_SEND_QUEUE_SCHEMA =
   PODIO_ATTACHED_BASE_SCHEMA[String(APP_IDS.send_queue)] || null;
 
 export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
-  // Send Queue — extends base schema with enrichment fields added to the Podio
-  // app after the initial schema snapshot.
+  // Send Queue — extends base schema with enrichment fields added after the
+  // initial schema snapshot, plus corrected/annotated overrides for existing
+  // fields whose snapshot data is stale or wrong.
   //
-  // Category fields (property-type, owner-type, category, use-case-template) have options: []
-  // because the real Podio option IDs were created after this snapshot.
-  // resolveQueueCategoryField will safely omit them (reason: stale_empty_schema_options)
-  // until the schema is refreshed.  Run to populate:
+  // ── Template field mismatch (REQUIRES PODIO SCHEMA CHANGE) ────────────────
+  // The base snapshot records Send Queue.template.referenced_app_ids = [29488989]
+  // (an old, inactive Templates app).  The active Templates app is
+  // APP_IDS.templates = 30647181.  Until the Podio relationship field is updated
+  // to reference 30647181, every attempt to attach a template item will be
+  // rejected by Podio with 400.  The code correctly retries without template on
+  // 400, but the template is never linked.
+  // PODIO ACTION: In the Send Queue app settings, open the "Template" relationship
+  // field and change its referenced app from 29488989 to 30647181.
+  // CODE ACTION: The supplement below already declares the correct app ID so that
+  // once Podio is updated the code path works without further changes.
+  //
+  // ── Queue Status — Delivered option (REQUIRES PODIO SCHEMA CHANGE) ────────
+  // "Delivered" is added here so the schema check in handle-textgrid-delivery.js
+  // can detect the option.  The placeholder id:7 MUST match the actual Podio
+  // option id once the option is added.  Run the schema refresh script after
+  // adding the Podio option to obtain the correct id.
   //   node --import ./tests/register-aliases.mjs scripts/refresh-send-queue-schema.mjs
   //
-  // property-address: declared as type "text" here.  If the Podio field was
-  // created as type "location", run the refresh script — it will flag the
-  // mismatch.  Plain-string writes are accepted by Podio location fields via
-  // geocoding, so queue creation succeeds either way, but the supplement type
-  // should match the actual Podio field type.
+  // ── Failed Reason — missing options (REQUIRES PODIO SCHEMA CHANGE) ────────
+  // "Content Filter", "Destination Unreachable", "Unknown Error", and
+  // "Delivery Rejected" are used in code but absent from the snapshot.
+  // Placeholder ids 6–9 must be confirmed after adding them to Podio.
+  //
+  // ── Personalization Tags Used — single-select (REQUIRES PODIO SCHEMA CHANGE) ─
+  // The field is declared multiple:true below to reflect intent.  Until the
+  // Podio field is changed from single-select to multi-select, the write path
+  // will only persist the first tag.  Code logs a warning when multiple tags
+  // are detected.
+  //
+  // ── property-address: declared as type "location" (updated from "text"). ──
+  // ── property-type/owner-type/category/use-case-template: see options below. ─
+  //   Run the schema refresh script if option ids ever diverge from Podio.
   [String(APP_IDS.send_queue)]: {
     ...(BASE_SEND_QUEUE_SCHEMA || {
       app_id: APP_IDS.send_queue,
@@ -31,6 +54,51 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
     }),
     fields: {
       ...(BASE_SEND_QUEUE_SCHEMA?.fields || {}),
+      // ── Template relationship — correct referenced app id ─────────────────
+      // Base snapshot has referenced_app_ids: [29488989] (stale inactive app).
+      // This override declares the active Templates app so resolveTemplateFieldReference
+      // correctly identifies direct-attachment candidates.  The write will still
+      // fail with Podio 400 until the Podio field itself is pointed at 30647181.
+      "template": {
+        ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["template"] || {}),
+        referenced_app_ids: [APP_IDS.templates],
+      },
+
+      // ── Queue Status — adds "Delivered" option ─────────────────────────────
+      // Placeholder id:7 — verify against actual Podio option id after adding
+      // the option via the Podio admin UI.
+      "queue-status": {
+        ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["queue-status"] || {}),
+        options: [
+          ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["queue-status"]?.options || []),
+          { id: 7, text: "Delivered" },
+        ],
+      },
+
+      // ── Failed Reason — adds missing options used in code ─────────────────
+      // Placeholder ids 6–9 — verify against Podio after adding.
+      "failed-reason": {
+        ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["failed-reason"] || {}),
+        options: [
+          ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["failed-reason"]?.options || []),
+          { id: 6, text: "Content Filter" },
+          { id: 7, text: "Destination Unreachable" },
+          { id: 8, text: "Unknown Error" },
+          { id: 9, text: "Delivery Rejected" },
+        ],
+      },
+
+      // ── Personalization Tags Used — multi-select intent ───────────────────
+      // The Podio field is currently single-select (multiple:false).  This
+      // override reflects the intended post-schema-change behaviour.  Until
+      // Podio is updated, normalizeCategoryValue will only persist the first
+      // tag.  Code in build-send-queue-item.js logs a warning when > 1 tag is
+      // detected but the field is still single-select.
+      "personalization-tags-used": {
+        ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["personalization-tags-used"] || {}),
+        multiple: true,
+      },
+
       "queue-id-2": {
         label: "Queue ID",
         type: "text",

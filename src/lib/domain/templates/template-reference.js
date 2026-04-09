@@ -1,5 +1,6 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 import { getAttachedFieldSchema } from "@/lib/podio/schema.js";
+import { warn } from "@/lib/logging/logger.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -128,6 +129,29 @@ export function resolveTemplateFieldReference({
   });
   const field_schema = getAttachedFieldSchema(host_app_id, host_field_external_id);
   const target_app_ids = uniqueItemIds(field_schema?.referenced_app_ids || []);
+
+  // Detect template app ID mismatch: the relationship field's referenced app
+  // must include the active templates app (APP_IDS.templates = 30647181) for
+  // template linking to succeed.  If the schema shows a different app (e.g.
+  // the stale 29488989), every attachment attempt will be rejected by Podio
+  // with 400 and the code will fall back to creating the queue item without a
+  // template link.
+  if (
+    selected.selected_template_id &&
+    target_app_ids.length > 0 &&
+    !target_app_ids.includes(APP_IDS.templates)
+  ) {
+    warn("template.field_app_id_mismatch", {
+      host_app_id,
+      host_field_external_id,
+      schema_referenced_app_ids: target_app_ids,
+      active_templates_app_id: APP_IDS.templates,
+      selected_template_id: selected.selected_template_id,
+      selected_template_app_id: selected.selected_template_app_id,
+      impact: "template_attachment_will_fail_until_podio_field_updated",
+      podio_action: `In the Send Queue app, change the '${host_field_external_id}' relationship field to reference app ${APP_IDS.templates} instead of ${target_app_ids.join(", ")}.`,
+    });
+  }
 
   if (!selected.selected_template_id) {
     return {

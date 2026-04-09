@@ -8,6 +8,7 @@ import {
   getCategoryValue,
   updateItem,
 } from "@/lib/providers/podio.js";
+import { getCategoryOptionId } from "@/lib/podio/schema.js";
 import {
   findLatestBrainByMasterOwnerId,
   findLatestBrainByProspectId,
@@ -91,6 +92,25 @@ export function __resetTextgridDeliveryTestDeps() {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+// Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago so that
+// operational Podio date fields (Delivered At) display Central time to ops
+// instead of the UTC hours that toISOString() would produce.
+function nowPodioDateTimeCentral() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 function clean(value) {
@@ -307,6 +327,35 @@ async function updateQueueCandidates(candidates, normalized_state, extracted) {
         })
       : null;
 
+  // Determine if the Podio queue-status field has a "Delivered" option.
+  // The supplement adds this option (id:7 placeholder) once the Podio field is
+  // updated.  When the option is absent, fall back to "Sent" so the write
+  // succeeds and we don't lose the confirmed delivery state.
+  const delivered_option_id = getCategoryOptionId(
+    APP_IDS.send_queue,
+    QUEUE_FIELDS.queue_status,
+    "Delivered"
+  );
+  const effective_delivered_status = delivered_option_id !== null ? "Delivered" : "Sent";
+
+  const central_now = nowPodioDateTimeCentral();
+
+  runtimeDeps.info("textgrid.delivery_queue_update_start", {
+    normalized_state,
+    candidate_count: candidates.length,
+    effective_delivered_status,
+    delivered_option_available: delivered_option_id !== null,
+    central_timestamp: central_now,
+  });
+
+  if (normalized_state === "Delivered" && delivered_option_id === null) {
+    runtimeDeps.warn("queue.delivery_status_option_missing", {
+      desired_status: "Delivered",
+      fallback_status: "Sent",
+      note: "Add 'Delivered' option to Send Queue::queue-status in Podio, then run the schema refresh script.",
+    });
+  }
+
   const results = [];
 
   for (const queue_item of candidates) {
@@ -314,15 +363,25 @@ async function updateQueueCandidates(candidates, normalized_state, extracted) {
 
     if (normalized_state === "Delivered") {
       await runtimeDeps.updateItem(queue_item_id, {
-        [QUEUE_FIELDS.delivered_at]: { start: nowIso() },
+        // Delivered At — written in Central time so ops sees local hours.
+        [QUEUE_FIELDS.delivered_at]: { start: central_now },
         [QUEUE_FIELDS.delivery_confirmed]: "✅ Confirmed",
-        [QUEUE_FIELDS.queue_status]: "Sent",
+        [QUEUE_FIELDS.queue_status]: effective_delivered_status,
+      });
+
+      runtimeDeps.info("queue.delivery_lifecycle_transition", {
+        queue_item_id,
+        transition: "delivered",
+        delivery_confirmed: "✅ Confirmed",
+        queue_status: effective_delivered_status,
+        delivered_at_central: central_now,
       });
 
       results.push({
         ok: true,
         queue_item_id,
         updated_state: "delivered",
+        queue_status: effective_delivered_status,
       });
       continue;
     }
@@ -334,10 +393,21 @@ async function updateQueueCandidates(candidates, normalized_state, extracted) {
         [QUEUE_FIELDS.failed_reason]: failed_reason,
       });
 
+      runtimeDeps.info("queue.delivery_lifecycle_transition", {
+        queue_item_id,
+        transition: "failed",
+        delivery_confirmed: "❌ Failed",
+        queue_status: "Failed",
+        failed_reason,
+        error_message: extracted.error_message || null,
+        error_status: extracted.error_status || null,
+      });
+
       results.push({
         ok: true,
         queue_item_id,
         updated_state: "failed",
+        failed_reason,
       });
       continue;
     }
@@ -533,9 +603,14 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
 
   runtimeDeps.info("textgrid.delivery_received", {
     message_id: extracted.message_id,
+    from: extracted.from || null,
+    to: extracted.to || null,
     status: extracted.status,
     normalized_state,
+    error_code: extracted.error_status || null,
+    error_message: extracted.error_message || null,
     client_reference_id: extracted.client_reference_id,
+    delivered_at_raw: extracted.delivered_at || null,
   });
 
   if (!extracted.message_id && !queue_item_id_from_client_reference) {

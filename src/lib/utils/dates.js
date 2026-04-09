@@ -2,6 +2,28 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+// Returns the current time formatted as "YYYY-MM-DD HH:MM:SS" in America/Chicago.
+// Used for operational Podio date fields (Sent At, Delivered At) where ops expects
+// Central time display.  Podio stores date strings as-is without timezone conversion,
+// so writing UTC ISO strings (the nowIso() default) causes UTC hours to appear in
+// the ops UI.  Writing a Central time string solves this without requiring workspace
+// timezone reconfiguration.
+export function nowPodioDateTimeCentral() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+}
+
 function pad2(value) {
   return String(value).padStart(2, "0");
 }
@@ -71,6 +93,7 @@ export function toPodioDateField(value) {
 
 export default {
   nowIso,
+  nowPodioDateTimeCentral,
   toIso,
   toPodioDateTimeString,
   nowPodioDateTime,
