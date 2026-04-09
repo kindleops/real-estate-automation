@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { maybeHandleBuyerTextgridInbound } from "@/lib/domain/buyers/handle-buyer-response-webhook.js";
 import { child } from "@/lib/logging/logger.js";
 import { handleTextgridInbound } from "@/lib/flows/handle-textgrid-inbound.js";
-import { verifyTextgridWebhookSignature } from "@/lib/providers/textgrid.js";
+import { verifyTextgridWebhookRequest } from "@/lib/webhooks/textgrid-verify-webhook.js";
 import { normalizeTextgridInboundPayload } from "@/lib/webhooks/textgrid-inbound-normalize.js";
 
 export const runtime = "nodejs";
@@ -49,11 +49,22 @@ export async function GET() {
 export async function POST(request) {
   try {
     const raw_body = await request.clone().text().catch(() => "");
+    const content_type = clean(request.headers.get("content-type"));
     const body = await parseRequestBody(request);
+
+    // form_params is the decoded key/value object when the body is form-encoded.
+    // The Twilio signing algorithm needs these (sorted) to reproduce the digest.
+    const is_form_encoded = content_type.toLowerCase().includes("application/x-www-form-urlencoded");
+    const form_params = is_form_encoded && body && !body.raw_text ? body : null;
+
     const payload = normalizeTextgridInboundPayload(body, request.headers);
-    const verification = verifyTextgridWebhookSignature({
+    const verification = verifyTextgridWebhookRequest({
+      request_url: request.url,
       raw_body,
+      form_params,
+      content_type,
       signature: payload.header_signature,
+      signature_header_name: payload.header_signature_name,
     });
 
     if (!payload.from || !payload.message) {
@@ -76,6 +87,7 @@ export async function POST(request) {
         from: payload.from || null,
         to: payload.to || null,
         reason: verification.reason,
+        ...verification.diagnostics,
       });
 
       return NextResponse.json(

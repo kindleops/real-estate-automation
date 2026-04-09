@@ -158,6 +158,12 @@ export function normalizeTextgridDeliveryPayload(
         headers.get("x-signature") ||
         ""
     ),
+    header_signature_name: (
+      headers.get("x-textgrid-signature") ? "x-textgrid-signature" :
+      headers.get("x-twilio-signature")   ? "x-twilio-signature"   :
+      headers.get("x-signature")          ? "x-signature"          :
+      null
+    ),
     header_event: clean(
       headers.get("x-textgrid-event") ||
         headers.get("x-event-type") ||

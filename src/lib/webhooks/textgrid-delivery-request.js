@@ -1,6 +1,6 @@
 import { handleTextgridDelivery } from "@/lib/flows/handle-textgrid-delivery.js";
 import { child } from "@/lib/logging/logger.js";
-import { verifyTextgridWebhookSignature } from "@/lib/providers/textgrid.js";
+import { verifyTextgridWebhookRequest } from "@/lib/webhooks/textgrid-verify-webhook.js";
 import { normalizeTextgridDeliveryPayload } from "@/lib/webhooks/textgrid-delivery-normalize.js";
 
 const defaultLogger = child({
@@ -56,11 +56,12 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
   const {
     logger = defaultLogger,
     handleTextgridDeliveryImpl = handleTextgridDelivery,
-    verifyTextgridWebhookSignatureImpl = verifyTextgridWebhookSignature,
+    verifyTextgridWebhookSignatureImpl = verifyTextgridWebhookRequest,
   } = deps;
 
   try {
     const raw_body = await request.clone().text().catch(() => "");
+    const content_type = clean(request?.headers?.get("content-type"));
     let body = await parseTextgridDeliveryRequestBody(request);
     if (!Object.keys(body || {}).length || body?.raw_text) {
       const reparsed = parseLooseTextBody(raw_body);
@@ -68,10 +69,19 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
         body = reparsed;
       }
     }
+
+    // form_params: the decoded key/value pairs needed by the Twilio signing algorithm.
+    const is_form_encoded = content_type.toLowerCase().includes("application/x-www-form-urlencoded");
+    const form_params = is_form_encoded && body && !body.raw_text ? body : null;
+
     const payload = normalizeTextgridDeliveryPayload(body, request.headers);
     const verification = verifyTextgridWebhookSignatureImpl({
+      request_url: request.url,
       raw_body,
+      form_params,
+      content_type,
       signature: payload.header_signature,
+      signature_header_name: payload.header_signature_name,
     });
 
     if (!payload.message_id && !payload.status) {
@@ -95,6 +105,7 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
         message_id: payload.message_id || null,
         status: payload.status || null,
         reason: verification.reason,
+        ...verification.diagnostics,
       });
 
       return {
