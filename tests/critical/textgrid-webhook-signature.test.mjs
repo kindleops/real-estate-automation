@@ -22,7 +22,12 @@
  * 11.  Failure diagnostics include required fields, no secrets
  * 12.  Twilio signing sorts params regardless of raw body order
  * 13.  handleTextgridDeliveryRequest: valid Twilio sig → 200
- * 14.  handleTextgridDeliveryRequest: invalid sig → 401 + diagnostics in log
+ * 14.  handleTextgridDeliveryRequest: strict invalid sig → 401 + diagnostics in log
+ * 15.  handleTextgridDeliveryRequest: observe invalid sig → 200 + continues
+ * 16.  handleTextgridDeliveryRequest: off mode skips verification and continues
+ * 17.  inbound route: strict invalid sig → 401
+ * 18.  inbound route: observe invalid sig → 200 + continues
+ * 19.  inbound route: off mode skips verification and continues
  */
 
 import test from "node:test";
@@ -34,6 +39,11 @@ import {
   buildCanonicalWebhookUrl,
 } from "@/lib/webhooks/textgrid-verify-webhook.js";
 
+import {
+  POST as postTextgridInbound,
+  __resetTextgridInboundRouteTestDeps,
+  __setTextgridInboundRouteTestDeps,
+} from "@/app/api/webhooks/textgrid/inbound/route.js";
 import { handleTextgridDeliveryRequest } from "@/lib/webhooks/textgrid-delivery-request.js";
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -84,6 +94,24 @@ const FORM_PARAMS = {
   Body: "Hello world",
 };
 const RAW_BODY = new URLSearchParams(FORM_PARAMS).toString();
+
+function setSignatureMode(t, mode) {
+  const previous = process.env.TEXTGRID_WEBHOOK_SIGNATURE_MODE;
+
+  if (mode === undefined || mode === null) {
+    delete process.env.TEXTGRID_WEBHOOK_SIGNATURE_MODE;
+  } else {
+    process.env.TEXTGRID_WEBHOOK_SIGNATURE_MODE = mode;
+  }
+
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.TEXTGRID_WEBHOOK_SIGNATURE_MODE;
+    } else {
+      process.env.TEXTGRID_WEBHOOK_SIGNATURE_MODE = previous;
+    }
+  });
+}
 
 // ── 1. Valid Twilio-style signature (auth_token) ─────────────────────────
 
@@ -290,13 +318,24 @@ test("verifyTextgridWebhookRequest: diagnostics include required fields, no secr
 
   // Required fields
   assert.equal(d.signature_header, "x-twilio-signature", "signature_header");
+  assert.equal(d.signature_header_name, "x-twilio-signature", "signature_header_name");
+  assert.equal(d.signature_header_present, true, "signature_header_present");
+  assert.equal(d.signature_header_length, "bad-sig".length, "signature_header_length");
   assert.ok(d.content_type?.includes("form-urlencoded"), "content_type");
   assert.ok(typeof d.request_path === "string", "request_path");
+  assert.equal(d.request_url, INBOUND_URL, "request_url");
   assert.equal(d.raw_body_present, true, "raw_body_present");
+  assert.equal(d.raw_body_length, RAW_BODY.length, "raw_body_length");
   assert.equal(d.auth_token_configured, true, "auth_token_configured");
   assert.equal(d.webhook_secret_configured, true, "webhook_secret_configured");
+  assert.deepEqual(
+    d.parsed_form_param_keys,
+    ["Body", "From", "SmsSid", "SmsStatus", "To"],
+    "parsed_form_param_keys"
+  );
   assert.ok(typeof d.canonical_url_base === "string", "canonical_url_base");
   assert.ok(Array.isArray(d.modes_tried), "modes_tried is array");
+  assert.equal(d.failure_reason, "no_mode_produced_matching_digest", "failure_reason");
 
   // Secrets must NOT appear in diagnostics
   const d_str = JSON.stringify(d);
@@ -383,7 +422,9 @@ test("handleTextgridDeliveryRequest: valid Twilio signature accepted → 200", a
 
 // ── 14. Delivery handler: invalid signature → 401 + diagnostics ──────────
 
-test("handleTextgridDeliveryRequest: invalid signature → 401 with diagnostics in log", async () => {
+test("handleTextgridDeliveryRequest: strict mode invalid signature → 401 with diagnostics in log", async (t) => {
+  setSignatureMode(t, "strict");
+
   const form_params = {
     SmsSid: "SM-delivery-000",
     MessageStatus: "delivered",
@@ -418,15 +459,319 @@ test("handleTextgridDeliveryRequest: invalid signature → 401 with diagnostics 
   assert.equal(response.status, 401, `Expected 401, got ${response.status}`);
   assert.equal(response.payload.ok, false);
   assert.equal(response.payload.error, "invalid_textgrid_signature");
+  assert.equal(response.payload.verification.signature_verification_mode, "strict");
+  assert.equal(response.payload.verification.signature_bypassed, false);
+  assert.equal(
+    response.payload.verification.signature_failure_reason,
+    "no_mode_produced_matching_digest"
+  );
 
   const warn = entries.find((e) => e.event === "textgrid_delivery.invalid_signature");
   assert.ok(warn, "Should log textgrid_delivery.invalid_signature warning");
   assert.ok(Array.isArray(warn.meta.modes_tried), "Log should include modes_tried");
   assert.equal(warn.meta.auth_token_configured, true, "Log should show auth_token configured");
   assert.equal(warn.meta.webhook_secret_configured, true, "Log should show webhook_secret configured");
+  assert.equal(warn.meta.signature_verification_mode, "strict");
+  assert.equal(warn.meta.signature_header_name, "x-twilio-signature");
 
   // Secrets must NOT appear in the log entry
   const log_str = JSON.stringify(warn.meta);
   assert.ok(!log_str.includes(TEST_AUTH_TOKEN), "Auth token must not appear in log");
   assert.ok(!log_str.includes(TEST_WEBHOOK_SECRET), "Webhook secret must not appear in log");
+});
+
+test("handleTextgridDeliveryRequest: observe mode accepts invalid signature and continues", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const form_params = {
+    SmsSid: "SM-delivery-observe-1",
+    MessageStatus: "delivered",
+    From: "+12085550111",
+    To: "+12085550222",
+  };
+  const raw_body = new URLSearchParams(form_params).toString();
+  const { entries, logger } = makeLogger();
+  let handled_payload = null;
+
+  const response = await handleTextgridDeliveryRequest(
+    new Request(DELIVERY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-signature",
+      },
+      body: raw_body,
+    }),
+    {
+      logger,
+      verifyTextgridWebhookSignatureImpl: (opts) =>
+        verifyTextgridWebhookRequest({
+          ...opts,
+          auth_token: TEST_AUTH_TOKEN,
+          webhook_secret: TEST_WEBHOOK_SECRET,
+        }),
+      handleTextgridDeliveryImpl: async (payload) => {
+        handled_payload = payload;
+        return { ok: true, normalized_state: "Delivered" };
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.ok, true);
+  assert.equal(handled_payload?.message_id, "SM-delivery-observe-1");
+  assert.equal(handled_payload?.signature_verification_mode, "observe");
+  assert.equal(handled_payload?.signature_verified, false);
+  assert.equal(handled_payload?.signature_bypassed, true);
+  assert.equal(
+    handled_payload?.signature_failure_reason,
+    "no_mode_produced_matching_digest"
+  );
+  assert.equal(handled_payload?.signature_header_name, "x-textgrid-signature");
+  assert.equal(handled_payload?.signature_unverified_observe_mode, true);
+  assert.equal(
+    response.payload.verification.signature_unverified_observe_mode,
+    true
+  );
+
+  const warn = entries.find((entry) => entry.event === "textgrid_delivery.invalid_signature");
+  assert.ok(warn, "observe mode should still log invalid signature");
+  assert.equal(warn.meta.signature_verification_mode, "observe");
+  assert.equal(warn.meta.signature_bypassed, true);
+  assert.equal(warn.meta.signature_unverified_observe_mode, true);
+  assert.equal(warn.meta.request_path, "/api/webhooks/textgrid/delivery");
+});
+
+test("handleTextgridDeliveryRequest: off mode accepts request and skips verification", async (t) => {
+  setSignatureMode(t, "off");
+
+  const form_params = {
+    SmsSid: "SM-delivery-off-1",
+    MessageStatus: "sent",
+    From: "+12085550111",
+    To: "+12085550222",
+  };
+  const raw_body = new URLSearchParams(form_params).toString();
+  const { entries, logger } = makeLogger();
+  let handled_payload = null;
+
+  const response = await handleTextgridDeliveryRequest(
+    new Request(DELIVERY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "off-mode-signature",
+      },
+      body: raw_body,
+    }),
+    {
+      logger,
+      verifyTextgridWebhookSignatureImpl: () => {
+        throw new Error("verify should not run in off mode");
+      },
+      handleTextgridDeliveryImpl: async (payload) => {
+        handled_payload = payload;
+        return { ok: true, normalized_state: "Sent" };
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.ok, true);
+  assert.equal(handled_payload?.signature_verification_mode, "off");
+  assert.equal(handled_payload?.signature_verified, false);
+  assert.equal(handled_payload?.signature_bypassed, true);
+  assert.equal(handled_payload?.signature_failure_reason, "signature_verification_disabled");
+  assert.equal(handled_payload?.signature_header_name, "x-textgrid-signature");
+  assert.equal(handled_payload?.signature_unverified_observe_mode, false);
+
+  const warn = entries.find(
+    (entry) => entry.event === "textgrid_delivery.signature_verification_disabled"
+  );
+  assert.ok(warn, "off mode should log disabled verification");
+  assert.equal(warn.meta.signature_verification_disabled, true);
+  assert.equal(warn.meta.signature_verification_mode, "off");
+  assert.equal(warn.meta.signature_bypassed, true);
+});
+
+test("textgrid inbound route: strict mode rejects invalid signature with 401", async (t) => {
+  setSignatureMode(t, "strict");
+
+  const { entries, logger } = makeLogger();
+  let handled_payload = null;
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => ({ ok: true, matched: false }),
+    handleTextgridInboundImpl: async (payload) => {
+      handled_payload = payload;
+      return { ok: true };
+    },
+    verifyTextgridWebhookRequestImpl: (opts) =>
+      verifyTextgridWebhookRequest({
+        ...opts,
+        auth_token: TEST_AUTH_TOKEN,
+        webhook_secret: TEST_WEBHOOK_SECRET,
+      }),
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "strict-mode-invalid-signature",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-strict-1",
+        From: "+15550001234",
+        To: "+15559876543",
+        Body: "Hello inbound strict",
+        SmsStatus: "received",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 401);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error, "invalid_textgrid_signature");
+  assert.equal(payload.verification.signature_verification_mode, "strict");
+  assert.equal(payload.verification.signature_bypassed, false);
+  assert.equal(handled_payload, null);
+
+  const warn = entries.find((entry) => entry.event === "textgrid_inbound.invalid_signature");
+  assert.ok(warn, "strict mode should log invalid signature");
+  assert.equal(warn.meta.signature_verification_mode, "strict");
+  assert.equal(warn.meta.signature_header_name, "x-textgrid-signature");
+  assert.equal(warn.meta.request_path, "/api/webhooks/textgrid/inbound");
+});
+
+test("textgrid inbound route: observe mode accepts invalid signature and continues", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const { entries, logger } = makeLogger();
+  let handled_payload = null;
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => ({ ok: true, matched: false }),
+    handleTextgridInboundImpl: async (payload) => {
+      handled_payload = payload;
+      return { ok: true, message_id: payload.message_id };
+    },
+    verifyTextgridWebhookRequestImpl: (opts) =>
+      verifyTextgridWebhookRequest({
+        ...opts,
+        auth_token: TEST_AUTH_TOKEN,
+        webhook_secret: TEST_WEBHOOK_SECRET,
+      }),
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-signature",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-observe-1",
+        From: "+15550001234",
+        To: "+15559876543",
+        Body: "Hello inbound observe",
+        SmsStatus: "received",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(handled_payload?.message_id, "SM-inbound-observe-1");
+  assert.equal(handled_payload?.signature_verification_mode, "observe");
+  assert.equal(handled_payload?.signature_verified, false);
+  assert.equal(handled_payload?.signature_bypassed, true);
+  assert.equal(
+    handled_payload?.signature_failure_reason,
+    "no_mode_produced_matching_digest"
+  );
+  assert.equal(handled_payload?.signature_header_name, "x-textgrid-signature");
+  assert.equal(handled_payload?.signature_unverified_observe_mode, true);
+  assert.equal(
+    payload.verification.signature_unverified_observe_mode,
+    true
+  );
+
+  const warn = entries.find((entry) => entry.event === "textgrid_inbound.invalid_signature");
+  assert.ok(warn, "observe mode should log invalid signature");
+  assert.equal(warn.meta.signature_verification_mode, "observe");
+  assert.equal(warn.meta.signature_bypassed, true);
+  assert.equal(warn.meta.signature_unverified_observe_mode, true);
+});
+
+test("textgrid inbound route: off mode accepts request and skips verification", async (t) => {
+  setSignatureMode(t, "off");
+
+  const { entries, logger } = makeLogger();
+  let handled_payload = null;
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => ({ ok: true, matched: false }),
+    handleTextgridInboundImpl: async (payload) => {
+      handled_payload = payload;
+      return { ok: true, message_id: payload.message_id };
+    },
+    verifyTextgridWebhookRequestImpl: () => {
+      throw new Error("verify should not run in off mode");
+    },
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "off-mode-signature",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-off-1",
+        From: "+15550001234",
+        To: "+15559876543",
+        Body: "Hello inbound off",
+        SmsStatus: "received",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(handled_payload?.signature_verification_mode, "off");
+  assert.equal(handled_payload?.signature_verified, false);
+  assert.equal(handled_payload?.signature_bypassed, true);
+  assert.equal(handled_payload?.signature_failure_reason, "signature_verification_disabled");
+  assert.equal(handled_payload?.signature_header_name, "x-textgrid-signature");
+  assert.equal(handled_payload?.signature_unverified_observe_mode, false);
+
+  const warn = entries.find(
+    (entry) => entry.event === "textgrid_inbound.signature_verification_disabled"
+  );
+  assert.ok(warn, "off mode should log disabled verification");
+  assert.equal(warn.meta.signature_verification_disabled, true);
+  assert.equal(warn.meta.signature_verification_mode, "off");
+  assert.equal(warn.meta.signature_bypassed, true);
 });

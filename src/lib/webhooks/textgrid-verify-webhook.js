@@ -45,6 +45,20 @@ function getWebhookSecret() {
   return clean(ENV.TEXTGRID_WEBHOOK_SECRET || process.env.TEXTGRID_WEBHOOK_SECRET);
 }
 
+export function getTextgridWebhookSignatureMode(override = null) {
+  const normalized = clean(
+    override ||
+      process.env.TEXTGRID_WEBHOOK_SIGNATURE_MODE ||
+      ENV.TEXTGRID_WEBHOOK_SIGNATURE_MODE
+  ).toLowerCase();
+
+  if (["strict", "observe", "off"].includes(normalized)) {
+    return normalized;
+  }
+
+  return "strict";
+}
+
 // ── URL canonicalization ───────────────────────────────────────────────────
 //
 // Next.js on Vercel may surface an internal hostname in request.url.
@@ -68,6 +82,120 @@ export function buildCanonicalWebhookUrl(request_url, override_base = null) {
   } catch {
     return request_url;
   }
+}
+
+function getRequestPath(request_url = "") {
+  try {
+    return new URL(request_url).pathname;
+  } catch {
+    return request_url || "unknown";
+  }
+}
+
+function getParsedFormParamKeys(form_params = null) {
+  if (!form_params || typeof form_params !== "object") return [];
+  return Object.keys(form_params).sort();
+}
+
+export function buildTextgridWebhookDiagnostics({
+  request_url = "",
+  raw_body = "",
+  form_params = null,
+  content_type = "",
+  signature = "",
+  signature_header_name = null,
+  auth_token = getAuthToken(),
+  webhook_secret = getWebhookSecret(),
+  canonical_url = "",
+  modes_tried = [],
+  failure_reason = null,
+} = {}) {
+  const normalized_sig = clean(signature);
+  const normalized_ct = clean(content_type).toLowerCase();
+  const parsed_form_param_keys = getParsedFormParamKeys(form_params);
+  const resolved_canonical_url = clean(canonical_url) || buildCanonicalWebhookUrl(request_url);
+
+  return {
+    signature_header:
+      signature_header_name || (normalized_sig ? "present_unknown_header" : "missing"),
+    signature_header_name: signature_header_name || null,
+    signature_header_present: Boolean(signature_header_name || normalized_sig),
+    signature_header_length: normalized_sig.length,
+    content_type: normalized_ct || "unknown",
+    request_path: getRequestPath(request_url),
+    request_url: request_url || "unknown",
+    raw_body_present: Boolean(raw_body),
+    raw_body_length: String(raw_body ?? "").length,
+    auth_token_configured: Boolean(auth_token),
+    webhook_secret_configured: Boolean(webhook_secret),
+    is_form_encoded: normalized_ct.includes("application/x-www-form-urlencoded"),
+    parsed_form_param_keys,
+    form_params_count: parsed_form_param_keys.length,
+    canonical_url_base: clean(resolved_canonical_url).split("?")[0] || null,
+    modes_tried: Array.isArray(modes_tried) ? [...modes_tried] : [],
+    failure_reason: clean(failure_reason) || null,
+  };
+}
+
+export function buildTextgridWebhookBypassResult({
+  request_url = "",
+  raw_body = "",
+  form_params = null,
+  content_type = "",
+  signature = "",
+  signature_header_name = null,
+  reason = "signature_verification_disabled",
+  auth_token = getAuthToken(),
+  webhook_secret = getWebhookSecret(),
+} = {}) {
+  return {
+    ok: true,
+    verified: false,
+    required: false,
+    algorithm: null,
+    reason,
+    signature_present: Boolean(clean(signature)),
+    bypassed: true,
+    diagnostics: buildTextgridWebhookDiagnostics({
+      request_url,
+      raw_body,
+      form_params,
+      content_type,
+      signature,
+      signature_header_name,
+      auth_token,
+      webhook_secret,
+      failure_reason: reason,
+    }),
+  };
+}
+
+export function buildTextgridWebhookVerificationMeta({
+  verification = {},
+  mode = null,
+  signature_header_name = null,
+} = {}) {
+  const signature_verification_mode = getTextgridWebhookSignatureMode(mode);
+  const invalid_signature = Boolean(verification?.required && !verification?.ok);
+  const signature_failure_reason =
+    clean(
+      verification?.diagnostics?.failure_reason ||
+        (verification?.reason !== "verified" ? verification?.reason : "")
+    ) || null;
+
+  return {
+    signature_verification_mode,
+    signature_verified: Boolean(verification?.verified),
+    signature_bypassed:
+      Boolean(verification?.bypassed) ||
+      signature_verification_mode === "off" ||
+      (signature_verification_mode === "observe" && invalid_signature),
+    signature_failure_reason,
+    signature_header_name:
+      signature_header_name || verification?.diagnostics?.signature_header_name || null,
+    signature_unverified_observe_mode:
+      signature_verification_mode === "observe" && invalid_signature,
+  };
 }
 
 // ── signing algorithms ─────────────────────────────────────────────────────
@@ -134,25 +262,16 @@ export function verifyTextgridWebhookRequest({
   const normalized_ct = clean(content_type).toLowerCase();
   const is_form_encoded = normalized_ct.includes("application/x-www-form-urlencoded");
   const canonical_url = buildCanonicalWebhookUrl(request_url);
-
-  // ── diagnostics (safe to log — no secrets) ────────────────────────────
-  const diagnostics = {
-    signature_header: signature_header_name || (normalized_sig ? "present_unknown_header" : "missing"),
-    content_type: normalized_ct || "unknown",
-    request_path: (() => {
-      try {
-        return new URL(request_url).pathname;
-      } catch {
-        return request_url || "unknown";
-      }
-    })(),
-    raw_body_present: Boolean(raw_body),
-    raw_body_length: String(raw_body ?? "").length,
-    auth_token_configured: Boolean(auth_token),
-    webhook_secret_configured: Boolean(webhook_secret),
-    is_form_encoded,
-    form_params_count: form_params ? Object.keys(form_params).length : 0,
-    canonical_url_base: canonical_url.split("?")[0],
+  const diagnostics_input = {
+    request_url,
+    raw_body,
+    form_params,
+    content_type: normalized_ct,
+    signature: normalized_sig,
+    signature_header_name,
+    auth_token,
+    webhook_secret,
+    canonical_url,
   };
 
   const has_any_secret = Boolean(auth_token || webhook_secret);
@@ -165,7 +284,10 @@ export function verifyTextgridWebhookRequest({
       algorithm: null,
       reason: "no_secrets_configured",
       signature_present: Boolean(normalized_sig),
-      diagnostics,
+      diagnostics: buildTextgridWebhookDiagnostics({
+        ...diagnostics_input,
+        failure_reason: "no_secrets_configured",
+      }),
     };
   }
 
@@ -177,7 +299,10 @@ export function verifyTextgridWebhookRequest({
       algorithm: null,
       reason: "missing_signature",
       signature_present: false,
-      diagnostics,
+      diagnostics: buildTextgridWebhookDiagnostics({
+        ...diagnostics_input,
+        failure_reason: "missing_signature",
+      }),
     };
   }
 
@@ -199,7 +324,13 @@ export function verifyTextgridWebhookRequest({
         algorithm: "HMAC-SHA1-Twilio",
         reason: "verified",
         signature_present: true,
-        diagnostics: { ...diagnostics, mode: "twilio+auth_token" },
+        diagnostics: {
+          ...buildTextgridWebhookDiagnostics({
+            ...diagnostics_input,
+            modes_tried,
+          }),
+          mode: "twilio+auth_token",
+        },
       };
     }
   }
@@ -216,7 +347,13 @@ export function verifyTextgridWebhookRequest({
         algorithm: "HMAC-SHA1-Twilio",
         reason: "verified",
         signature_present: true,
-        diagnostics: { ...diagnostics, mode: "twilio+webhook_secret" },
+        diagnostics: {
+          ...buildTextgridWebhookDiagnostics({
+            ...diagnostics_input,
+            modes_tried,
+          }),
+          mode: "twilio+webhook_secret",
+        },
       };
     }
   }
@@ -233,7 +370,13 @@ export function verifyTextgridWebhookRequest({
         algorithm: "HMAC-SHA1-Raw",
         reason: "verified",
         signature_present: true,
-        diagnostics: { ...diagnostics, mode: "raw_body+auth_token" },
+        diagnostics: {
+          ...buildTextgridWebhookDiagnostics({
+            ...diagnostics_input,
+            modes_tried,
+          }),
+          mode: "raw_body+auth_token",
+        },
       };
     }
   }
@@ -250,7 +393,13 @@ export function verifyTextgridWebhookRequest({
         algorithm: "HMAC-SHA1-Raw",
         reason: "verified",
         signature_present: true,
-        diagnostics: { ...diagnostics, mode: "raw_body+webhook_secret" },
+        diagnostics: {
+          ...buildTextgridWebhookDiagnostics({
+            ...diagnostics_input,
+            modes_tried,
+          }),
+          mode: "raw_body+webhook_secret",
+        },
       };
     }
   }
@@ -262,10 +411,10 @@ export function verifyTextgridWebhookRequest({
     algorithm: "HMAC-SHA1",
     reason: "invalid_signature",
     signature_present: true,
-    diagnostics: {
-      ...diagnostics,
+    diagnostics: buildTextgridWebhookDiagnostics({
+      ...diagnostics_input,
       modes_tried,
       failure_reason: "no_mode_produced_matching_digest",
-    },
+    }),
   };
 }
