@@ -50,17 +50,6 @@ function serializeForConsole(value) {
   }
 }
 
-function emitConsoleError(event, meta = {}) {
-  console.error(
-    serializeForConsole({
-      timestamp: new Date().toISOString(),
-      level: "ERROR",
-      event,
-      meta,
-    })
-  );
-}
-
 function safeRouteLog(level, event, meta = {}) {
   try {
     const logFn = runtimeDeps?.logger?.[level];
@@ -68,12 +57,15 @@ function safeRouteLog(level, event, meta = {}) {
       logFn(event, meta);
     }
   } catch (log_error) {
-    emitConsoleError(`${event}.logger_failed`, {
-      log_error_message: log_error?.message || "unknown_logger_error",
-      log_error_stack: log_error?.stack || null,
-      original_event: event,
-      original_level: level,
-    });
+    console.error(
+      serializeForConsole({
+        event: `${event}.logger_failed`,
+        log_error_message: log_error?.message || "unknown_logger_error",
+        log_error_stack: log_error?.stack || null,
+        original_event: event,
+        original_level: level,
+      })
+    );
   }
 }
 
@@ -115,12 +107,20 @@ export async function GET() {
 }
 
 export async function POST(request) {
-  let log_payload = null;
-  let log_webhook_verification = null;
   let accepted_logged = false;
   let downstream_handler_invoked = false;
   let podio_persistence_attempted = false;
   let parsed_body_keys = [];
+  let safe_message_id = null;
+  let safe_from = null;
+  let safe_to = null;
+  let safe_status = null;
+  let safe_signature_header_name = null;
+  let safe_signature_verification_mode = null;
+  let safe_signature_verified = false;
+  let safe_signature_bypassed = false;
+  let safe_signature_failure_reason = null;
+  let safe_signature_unverified_observe_mode = false;
 
   try {
     const raw_body = await request.clone().text().catch(() => "");
@@ -162,8 +162,29 @@ export async function POST(request) {
       ...verification,
       ...signature_meta,
     };
-    log_payload = payload;
-    log_webhook_verification = webhook_verification;
+    safe_signature_verification_mode =
+      webhook_verification?.signature_verification_mode || signature_verification_mode;
+    safe_signature_verified = Boolean(webhook_verification?.signature_verified);
+    safe_signature_bypassed = Boolean(webhook_verification?.signature_bypassed);
+    safe_signature_failure_reason = webhook_verification?.signature_failure_reason || null;
+    safe_signature_unverified_observe_mode = Boolean(
+      webhook_verification?.signature_unverified_observe_mode
+    );
+    safe_signature_header_name =
+      webhook_verification?.signature_header_name || payload?.header_signature_name || null;
+
+    try {
+      safe_message_id = payload?.message_id || null;
+    } catch {}
+    try {
+      safe_from = payload?.from || null;
+    } catch {}
+    try {
+      safe_to = payload?.to || null;
+    } catch {}
+    try {
+      safe_status = clean(payload?.status) || null;
+    } catch {}
 
     safeRouteLog(
       "info",
@@ -179,68 +200,209 @@ export async function POST(request) {
     );
 
     try {
-      safeRouteLog(
-        "info",
-        "textgrid_inbound.pre_accept_checkpoint_1",
-        buildTextgridWebhookLogMeta({
-          payload,
-          webhook_verification,
-          extra: {
-            parsed_body_keys,
-            checkpoint_target: "signature_branch_selected",
-          },
+      console.log(
+        "INBOUND_CHECKPOINT_1",
+        serializeForConsole({
+          message_id: safe_message_id,
+          from: safe_from,
+          to: safe_to,
+          parsed_body_keys,
+          signature_verification_mode: safe_signature_verification_mode,
+          next_statement: "build_checkpoint_base",
         })
       );
-
-      safeRouteLog(
-        "info",
-        "textgrid_inbound.signature_branch_selected",
-        buildTextgridWebhookLogMeta({
-          payload,
-          webhook_verification,
-          extra: {
-            parsed_body_keys,
-            signature_invalid: Boolean(verification.required && !verification.ok),
-            will_continue_after_signature_check: !(
-              verification.required &&
-              !verification.ok &&
-              signature_verification_mode === "strict"
-            ),
-          },
-        })
-      );
-
-      safeRouteLog(
-        "info",
-        "textgrid_inbound.pre_accept_checkpoint_2",
-        buildTextgridWebhookLogMeta({
-          payload,
-          webhook_verification,
-          extra: {
-            parsed_body_keys,
-            checkpoint_target: "validation_and_signature_guards",
-          },
-        })
-      );
-
-      if (!payload.from || !payload.message) {
-        safeRouteLog("warn", "textgrid_inbound.invalid_payload", {
-          payload,
+      try {
+        runtimeDeps.logger.info("INBOUND_CHECKPOINT_1", {
+          message_id: safe_message_id,
+          from: safe_from,
+          to: safe_to,
+          parsed_body_keys,
+          signature_verification_mode: safe_signature_verification_mode,
+          next_statement: "build_checkpoint_base",
         });
-
-        safeRouteLog(
-          "info",
-          "textgrid_inbound.response_sent",
-          buildTextgridWebhookLogMeta({
-            payload,
-            webhook_verification,
-            final_response_status: 400,
-            extra: {
-              parsed_body_keys,
-              response_error: "invalid_textgrid_inbound_payload",
-            },
+      } catch (log_error) {
+        console.error(
+          "INBOUND_CHECKPOINT_1_LOGGER_FAILED",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
           })
         );
+      }
+
+      const checkpoint_base = {
+        message_id: safe_message_id,
+        from: safe_from,
+        to: safe_to,
+        parsed_body_keys,
+        signature_verification_mode: safe_signature_verification_mode,
+      };
+
+      console.log(
+        "INBOUND_CHECKPOINT_2",
+        serializeForConsole({
+          ...checkpoint_base,
+          next_statement: "compute_signature_invalid",
+        })
+      );
+      try {
+        runtimeDeps.logger.info("INBOUND_CHECKPOINT_2", {
+          ...checkpoint_base,
+          next_statement: "compute_signature_invalid",
+        });
+      } catch (log_error) {
+        console.error(
+          "INBOUND_CHECKPOINT_2_LOGGER_FAILED",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+
+      const signature_invalid = Boolean(verification.required && !verification.ok);
+
+      console.log(
+        "INBOUND_CHECKPOINT_3",
+        serializeForConsole({
+          ...checkpoint_base,
+          signature_invalid,
+          next_statement: "compute_signature_continuation",
+        })
+      );
+      try {
+        runtimeDeps.logger.info("INBOUND_CHECKPOINT_3", {
+          ...checkpoint_base,
+          signature_invalid,
+          next_statement: "compute_signature_continuation",
+        });
+      } catch (log_error) {
+        console.error(
+          "INBOUND_CHECKPOINT_3_LOGGER_FAILED",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+
+      const will_continue_after_signature_check = !(
+        verification.required &&
+        !verification.ok &&
+        safe_signature_verification_mode === "strict"
+      );
+
+      console.log(
+        "INBOUND_CHECKPOINT_4",
+        serializeForConsole({
+          ...checkpoint_base,
+          signature_invalid,
+          will_continue_after_signature_check,
+          next_statement: "log_signature_branch_selected",
+        })
+      );
+      try {
+        runtimeDeps.logger.info("INBOUND_CHECKPOINT_4", {
+          ...checkpoint_base,
+          signature_invalid,
+          will_continue_after_signature_check,
+          next_statement: "log_signature_branch_selected",
+        });
+      } catch (log_error) {
+        console.error(
+          "INBOUND_CHECKPOINT_4_LOGGER_FAILED",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+
+      const branch_meta = {
+        message_id: safe_message_id,
+        from: safe_from,
+        to: safe_to,
+        status: safe_status,
+        signature_verification_mode: safe_signature_verification_mode,
+        signature_verified: safe_signature_verified,
+        signature_bypassed: safe_signature_bypassed,
+        signature_failure_reason: safe_signature_failure_reason,
+        signature_header_name: safe_signature_header_name,
+        signature_unverified_observe_mode: safe_signature_unverified_observe_mode,
+        downstream_handler_invoked: false,
+        podio_persistence_attempted: false,
+        final_response_status: null,
+        ...webhook_verification?.diagnostics,
+        parsed_body_keys,
+        signature_invalid,
+        will_continue_after_signature_check,
+      };
+
+      console.log(
+        "textgrid_inbound.signature_branch_selected",
+        serializeForConsole(branch_meta)
+      );
+      try {
+        runtimeDeps.logger.info("textgrid_inbound.signature_branch_selected", branch_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.signature_branch_selected.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+
+      if (!payload.from || !payload.message) {
+        const invalid_payload_meta = {
+          ...branch_meta,
+          response_error: "invalid_textgrid_inbound_payload",
+        };
+        console.error(
+          "textgrid_inbound.invalid_payload",
+          serializeForConsole(invalid_payload_meta)
+        );
+        try {
+          runtimeDeps.logger.warn("textgrid_inbound.invalid_payload", invalid_payload_meta);
+        } catch (log_error) {
+          console.error(
+            "textgrid_inbound.invalid_payload.logger_failed",
+            serializeForConsole({
+              log_error_message: log_error?.message || "unknown_logger_error",
+              log_error_stack: log_error?.stack || null,
+            })
+          );
+        }
+
+        const invalid_payload_log_meta = {
+          ...invalid_payload_meta,
+          payload,
+        };
+        try {
+          runtimeDeps.logger.warn("textgrid_inbound.invalid_payload.details", invalid_payload_log_meta);
+        } catch {}
+
+        const invalid_payload_response_meta = {
+          ...branch_meta,
+          final_response_status: 400,
+          response_error: "invalid_textgrid_inbound_payload",
+        };
+        console.log(
+          "textgrid_inbound.response_sent",
+          serializeForConsole(invalid_payload_response_meta)
+        );
+        try {
+          runtimeDeps.logger.info("textgrid_inbound.response_sent", invalid_payload_response_meta);
+        } catch (log_error) {
+          console.error(
+            "textgrid_inbound.response_sent.logger_failed",
+            serializeForConsole({
+              log_error_message: log_error?.message || "unknown_logger_error",
+              log_error_stack: log_error?.stack || null,
+            })
+          );
+        }
 
         return NextResponse.json(
           {
@@ -252,32 +414,46 @@ export async function POST(request) {
       }
 
       if (verification.required && !verification.ok) {
-        safeRouteLog(
-          "warn",
+        const invalid_signature_meta = {
+          ...branch_meta,
+        };
+        console.error(
           "textgrid_inbound.invalid_signature",
-          buildTextgridWebhookLogMeta({
-            payload,
-            webhook_verification,
-            extra: {
-              parsed_body_keys,
-            },
-          })
+          serializeForConsole(invalid_signature_meta)
         );
-
-        if (signature_verification_mode === "strict") {
-          safeRouteLog(
-            "info",
-            "textgrid_inbound.response_sent",
-            buildTextgridWebhookLogMeta({
-              payload,
-              webhook_verification,
-              final_response_status: 401,
-              extra: {
-                parsed_body_keys,
-                response_error: "invalid_textgrid_signature",
-              },
+        try {
+          runtimeDeps.logger.warn("textgrid_inbound.invalid_signature", invalid_signature_meta);
+        } catch (log_error) {
+          console.error(
+            "textgrid_inbound.invalid_signature.logger_failed",
+            serializeForConsole({
+              log_error_message: log_error?.message || "unknown_logger_error",
+              log_error_stack: log_error?.stack || null,
             })
           );
+        }
+
+        if (safe_signature_verification_mode === "strict") {
+          const strict_response_meta = {
+            ...branch_meta,
+            final_response_status: 401,
+            response_error: "invalid_textgrid_signature",
+          };
+          console.log(
+            "textgrid_inbound.response_sent",
+            serializeForConsole(strict_response_meta)
+          );
+          try {
+            runtimeDeps.logger.info("textgrid_inbound.response_sent", strict_response_meta);
+          } catch (log_error) {
+            console.error(
+              "textgrid_inbound.response_sent.logger_failed",
+              serializeForConsole({
+                log_error_message: log_error?.message || "unknown_logger_error",
+                log_error_stack: log_error?.stack || null,
+              })
+            );
+          }
 
           return NextResponse.json(
             {
@@ -290,84 +466,114 @@ export async function POST(request) {
         }
       }
 
-      if (signature_verification_mode === "off") {
-        safeRouteLog("warn", "textgrid_inbound.signature_verification_disabled", {
+      if (safe_signature_verification_mode === "off") {
+        const disabled_meta = {
+          ...branch_meta,
           signature_verification_disabled: true,
-          ...buildTextgridWebhookLogMeta({
-            payload,
-            webhook_verification,
-            extra: {
-              parsed_body_keys,
-            },
-          }),
-        });
+        };
+        console.error(
+          "textgrid_inbound.signature_verification_disabled",
+          serializeForConsole(disabled_meta)
+        );
+        try {
+          runtimeDeps.logger.warn("textgrid_inbound.signature_verification_disabled", disabled_meta);
+        } catch (log_error) {
+          console.error(
+            "textgrid_inbound.signature_verification_disabled.logger_failed",
+            serializeForConsole({
+              log_error_message: log_error?.message || "unknown_logger_error",
+              log_error_stack: log_error?.stack || null,
+            })
+          );
+        }
       }
-
-      safeRouteLog(
-        "info",
-        "textgrid_inbound.pre_accept_checkpoint_3",
-        buildTextgridWebhookLogMeta({
-          payload,
-          webhook_verification,
-          extra: {
-            parsed_body_keys,
-            checkpoint_target: "accepted_and_payload_mutation",
-          },
-        })
-      );
 
       payload.webhook_verification = webhook_verification;
       Object.assign(payload, signature_meta);
 
-      safeRouteLog(
-        "info",
-        "textgrid_inbound.accepted",
-        buildTextgridWebhookLogMeta({
-          payload,
-          webhook_verification,
-          extra: {
-            parsed_body_keys,
-          },
-        })
-      );
+      const accepted_meta = {
+        ...branch_meta,
+      };
+      console.log("textgrid_inbound.accepted", serializeForConsole(accepted_meta));
+      try {
+        runtimeDeps.logger.info("textgrid_inbound.accepted", accepted_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.accepted.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
       accepted_logged = true;
     } catch (error) {
-      const error_meta = buildTextgridWebhookLogMeta({
-        payload,
-        webhook_verification,
+      const error_meta = {
+        message_id: safe_message_id,
+        from: safe_from,
+        to: safe_to,
+        status: safe_status,
+        signature_verification_mode: safe_signature_verification_mode,
+        signature_verified: safe_signature_verified,
+        signature_bypassed: safe_signature_bypassed,
+        signature_failure_reason: safe_signature_failure_reason,
+        signature_header_name: safe_signature_header_name,
+        signature_unverified_observe_mode: safe_signature_unverified_observe_mode,
         downstream_handler_invoked,
         podio_persistence_attempted,
         final_response_status: 500,
-        extra: {
-          error_message: error?.message || "Unknown error",
-          error_stack: error?.stack || null,
-          parsed_body_keys,
-        },
-      });
+        parsed_body_keys,
+        error_message: error?.message || "Unknown error",
+        error_stack: error?.stack || null,
+      };
 
-      safeRouteLog("error", "textgrid_inbound.failed_pre_accept", error_meta);
-      safeRouteLog("error", "textgrid_inbound.failed", error_meta);
-      emitConsoleError("textgrid_inbound.failed_pre_accept", error_meta);
-      emitConsoleError("textgrid_inbound.failed", error_meta);
+      console.error("textgrid_inbound.failed_pre_accept", serializeForConsole(error_meta));
+      try {
+        runtimeDeps.logger.error("textgrid_inbound.failed_pre_accept", error_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.failed_pre_accept.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
 
-      const response_meta = buildTextgridWebhookLogMeta({
-        payload,
-        webhook_verification,
-        downstream_handler_invoked,
-        podio_persistence_attempted,
-        final_response_status: 500,
-        extra: {
-          parsed_body_keys,
-          response_error: "textgrid_inbound_failed",
-        },
-      });
-      safeRouteLog("info", "textgrid_inbound.response_sent", response_meta);
-      emitConsoleError("textgrid_inbound.response_sent", response_meta);
+      console.error("textgrid_inbound.failed", serializeForConsole(error_meta));
+      try {
+        runtimeDeps.logger.error("textgrid_inbound.failed", error_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.failed.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+
+      const response_meta = {
+        ...error_meta,
+        response_error: "textgrid_inbound_failed_pre_accept",
+      };
+      console.log("textgrid_inbound.response_sent", serializeForConsole(response_meta));
+      try {
+        runtimeDeps.logger.info("textgrid_inbound.response_sent", response_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.response_sent.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
 
       return NextResponse.json(
         {
           ok: false,
-          error: "textgrid_inbound_failed",
+          error: "textgrid_inbound_failed_pre_accept",
         },
         { status: 500 }
       );
@@ -494,41 +700,70 @@ export async function POST(request) {
       result,
     });
   } catch (error) {
-    const failure_meta = buildTextgridWebhookLogMeta({
-      payload: log_payload,
-      webhook_verification: log_webhook_verification,
+    const failure_meta = {
+      message_id: safe_message_id,
+      from: safe_from,
+      to: safe_to,
+      status: safe_status,
+      signature_verification_mode: safe_signature_verification_mode,
+      signature_verified: safe_signature_verified,
+      signature_bypassed: safe_signature_bypassed,
+      signature_failure_reason: safe_signature_failure_reason,
+      signature_header_name: safe_signature_header_name,
+      signature_unverified_observe_mode: safe_signature_unverified_observe_mode,
       downstream_handler_invoked,
       podio_persistence_attempted,
       final_response_status: 500,
-      extra: {
-        error_message: error?.message || "Unknown error",
-        error_stack: error?.stack || null,
-        parsed_body_keys,
-        accepted_logged,
-      },
-    });
+      parsed_body_keys,
+      accepted_logged,
+      error_message: error?.message || "Unknown error",
+      error_stack: error?.stack || null,
+    };
 
-    safeRouteLog("error", "textgrid_inbound.failed", failure_meta);
-    emitConsoleError("textgrid_inbound.failed", failure_meta);
-
-    if (!accepted_logged) {
-      safeRouteLog("error", "textgrid_inbound.failed_pre_accept", failure_meta);
-      emitConsoleError("textgrid_inbound.failed_pre_accept", failure_meta);
+    console.error("textgrid_inbound.failed", serializeForConsole(failure_meta));
+    try {
+      runtimeDeps.logger.error("textgrid_inbound.failed", failure_meta);
+    } catch (log_error) {
+      console.error(
+        "textgrid_inbound.failed.logger_failed",
+        serializeForConsole({
+          log_error_message: log_error?.message || "unknown_logger_error",
+          log_error_stack: log_error?.stack || null,
+        })
+      );
     }
 
-    const response_meta = buildTextgridWebhookLogMeta({
-      payload: log_payload,
-      webhook_verification: log_webhook_verification,
-      downstream_handler_invoked,
-      podio_persistence_attempted,
-      final_response_status: 500,
-      extra: {
-        parsed_body_keys,
-        response_error: "textgrid_inbound_failed",
-      },
-    });
-    safeRouteLog("info", "textgrid_inbound.response_sent", response_meta);
-    emitConsoleError("textgrid_inbound.response_sent", response_meta);
+    if (!accepted_logged) {
+      console.error("textgrid_inbound.failed_pre_accept", serializeForConsole(failure_meta));
+      try {
+        runtimeDeps.logger.error("textgrid_inbound.failed_pre_accept", failure_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.failed_pre_accept.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+    }
+
+    const response_meta = {
+      ...failure_meta,
+      response_error: "textgrid_inbound_failed",
+    };
+    console.log("textgrid_inbound.response_sent", serializeForConsole(response_meta));
+    try {
+      runtimeDeps.logger.info("textgrid_inbound.response_sent", response_meta);
+    } catch (log_error) {
+      console.error(
+        "textgrid_inbound.response_sent.logger_failed",
+        serializeForConsole({
+          log_error_message: log_error?.message || "unknown_logger_error",
+          log_error_stack: log_error?.stack || null,
+        })
+      );
+    }
 
     return NextResponse.json(
       {

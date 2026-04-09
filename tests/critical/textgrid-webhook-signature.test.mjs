@@ -823,12 +823,14 @@ test("textgrid inbound route: fake minimal form payload in observe mode accepts 
 
   const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
   assert.ok(normalized, "observe mode should log normalized");
-  const checkpoint1 = entries.find((entry) => entry.event === "textgrid_inbound.pre_accept_checkpoint_1");
-  const checkpoint2 = entries.find((entry) => entry.event === "textgrid_inbound.pre_accept_checkpoint_2");
-  const checkpoint3 = entries.find((entry) => entry.event === "textgrid_inbound.pre_accept_checkpoint_3");
-  assert.ok(checkpoint1, "observe mode should log pre_accept_checkpoint_1");
-  assert.ok(checkpoint2, "observe mode should log pre_accept_checkpoint_2");
-  assert.ok(checkpoint3, "observe mode should log pre_accept_checkpoint_3");
+  const checkpoint1 = entries.find((entry) => entry.event === "INBOUND_CHECKPOINT_1");
+  const checkpoint2 = entries.find((entry) => entry.event === "INBOUND_CHECKPOINT_2");
+  const checkpoint3 = entries.find((entry) => entry.event === "INBOUND_CHECKPOINT_3");
+  const checkpoint4 = entries.find((entry) => entry.event === "INBOUND_CHECKPOINT_4");
+  assert.ok(checkpoint1, "observe mode should log INBOUND_CHECKPOINT_1");
+  assert.ok(checkpoint2, "observe mode should log INBOUND_CHECKPOINT_2");
+  assert.ok(checkpoint3, "observe mode should log INBOUND_CHECKPOINT_3");
+  assert.ok(checkpoint4, "observe mode should log INBOUND_CHECKPOINT_4");
   const branch = entries.find((entry) => entry.event === "textgrid_inbound.signature_branch_selected");
   assert.ok(branch, "observe mode should log signature branch");
   assert.equal(branch.meta.signature_verification_mode, "observe");
@@ -863,10 +865,11 @@ test("textgrid inbound route: fake minimal form payload in observe mode accepts 
   assert.equal(responseLog.meta.podio_persistence_attempted, true);
 
   const normalizedIndex = eventIndex(entries, "textgrid_inbound.normalized");
-  const checkpoint1Index = eventIndex(entries, "textgrid_inbound.pre_accept_checkpoint_1");
+  const checkpoint1Index = eventIndex(entries, "INBOUND_CHECKPOINT_1");
+  const checkpoint2Index = eventIndex(entries, "INBOUND_CHECKPOINT_2");
+  const checkpoint3Index = eventIndex(entries, "INBOUND_CHECKPOINT_3");
+  const checkpoint4Index = eventIndex(entries, "INBOUND_CHECKPOINT_4");
   const branchIndex = eventIndex(entries, "textgrid_inbound.signature_branch_selected");
-  const checkpoint2Index = eventIndex(entries, "textgrid_inbound.pre_accept_checkpoint_2");
-  const checkpoint3Index = eventIndex(entries, "textgrid_inbound.pre_accept_checkpoint_3");
   const acceptedIndex = eventIndex(entries, "textgrid_inbound.accepted");
   const startedIndex = eventIndex(
     entries,
@@ -875,9 +878,10 @@ test("textgrid inbound route: fake minimal form payload in observe mode accepts 
   );
   const responseIndex = eventIndex(entries, "textgrid_inbound.response_sent");
   assert.ok(checkpoint1Index > normalizedIndex, "checkpoint_1 should follow normalized");
-  assert.ok(branchIndex > checkpoint1Index, "signature branch should follow checkpoint_1");
-  assert.ok(checkpoint2Index > branchIndex, "checkpoint_2 should follow signature branch");
+  assert.ok(checkpoint2Index > checkpoint1Index, "checkpoint_2 should follow checkpoint_1");
   assert.ok(checkpoint3Index > checkpoint2Index, "checkpoint_3 should follow checkpoint_2");
+  assert.ok(checkpoint4Index > checkpoint3Index, "checkpoint_4 should follow checkpoint_3");
+  assert.ok(branchIndex > checkpoint4Index, "signature branch should follow checkpoint_4");
   assert.ok(normalizedIndex > -1 && acceptedIndex > normalizedIndex, "accepted should follow normalized");
   assert.ok(acceptedIndex > -1 && startedIndex > acceptedIndex, "handler_started should follow accepted");
   assert.ok(responseIndex > startedIndex, "response_sent should follow handler_started");
@@ -1023,6 +1027,10 @@ test("textgrid inbound route: real-style form payload in observe mode reaches ac
   assert.equal(handled_payload?.message_id, "SM-inbound-real-1");
 
   const normalizedIndex = eventIndex(entries, "textgrid_inbound.normalized");
+  const checkpoint1Index = eventIndex(entries, "INBOUND_CHECKPOINT_1");
+  const checkpoint2Index = eventIndex(entries, "INBOUND_CHECKPOINT_2");
+  const checkpoint3Index = eventIndex(entries, "INBOUND_CHECKPOINT_3");
+  const checkpoint4Index = eventIndex(entries, "INBOUND_CHECKPOINT_4");
   const branchIndex = eventIndex(entries, "textgrid_inbound.signature_branch_selected");
   const acceptedIndex = eventIndex(entries, "textgrid_inbound.accepted");
   const startedIndex = eventIndex(
@@ -1033,7 +1041,11 @@ test("textgrid inbound route: real-style form payload in observe mode reaches ac
   const responseIndex = eventIndex(entries, "textgrid_inbound.response_sent");
 
   assert.ok(normalizedIndex > -1, "real-style payload should log normalized");
-  assert.ok(branchIndex > normalizedIndex, "real-style payload should log signature branch");
+  assert.ok(checkpoint1Index > normalizedIndex, "real-style payload should log checkpoint 1");
+  assert.ok(checkpoint2Index > checkpoint1Index, "real-style payload should log checkpoint 2");
+  assert.ok(checkpoint3Index > checkpoint2Index, "real-style payload should log checkpoint 3");
+  assert.ok(checkpoint4Index > checkpoint3Index, "real-style payload should log checkpoint 4");
+  assert.ok(branchIndex > checkpoint4Index, "real-style payload should log signature branch");
   assert.ok(acceptedIndex > branchIndex, "real-style payload should log accepted");
   assert.ok(startedIndex > acceptedIndex, "real-style payload should log handler_started");
   assert.ok(responseIndex > startedIndex, "real-style payload should log response_sent");
@@ -1161,7 +1173,7 @@ test("textgrid inbound route: failure before accepted emits failed_pre_accept", 
   const payload = await response.json();
 
   assert.equal(response.status, 500);
-  assert.equal(payload.error, "textgrid_inbound_failed");
+  assert.equal(payload.error, "textgrid_inbound_failed_pre_accept");
   assert.equal(eventIndex(entries, "textgrid_inbound.accepted"), -1);
 
   const failed = entries.find((entry) => entry.event === "textgrid_inbound.failed_pre_accept");
@@ -1175,8 +1187,12 @@ test("textgrid inbound route: failure before accepted emits failed_pre_accept", 
   assert.equal(responseLog.meta.final_response_status, 500);
 
   const normalizedIndex = eventIndex(entries, "textgrid_inbound.normalized");
-  const checkpoint1Index = eventIndex(entries, "textgrid_inbound.pre_accept_checkpoint_1");
+  const checkpoint1Index = eventIndex(entries, "INBOUND_CHECKPOINT_1");
+  const checkpoint4Index = eventIndex(entries, "INBOUND_CHECKPOINT_4");
+  const branchIndex = eventIndex(entries, "textgrid_inbound.signature_branch_selected");
   const failedIndex = eventIndex(entries, "textgrid_inbound.failed_pre_accept");
   assert.ok(normalizedIndex > -1 && failedIndex > normalizedIndex);
   assert.ok(checkpoint1Index > normalizedIndex && failedIndex > checkpoint1Index);
+  assert.ok(checkpoint4Index > checkpoint1Index && failedIndex > checkpoint4Index);
+  assert.ok(branchIndex > checkpoint4Index && failedIndex > branchIndex);
 });
