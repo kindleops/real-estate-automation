@@ -291,6 +291,10 @@ export async function POST(request) {
         safe_signature_verification_mode === "strict"
       );
 
+      if (inbound_debug_stage === "after_signature_gate") {
+        return NextResponse.json({ ok: true, stage: "after_signature_gate" });
+      }
+
       console.log(
         "INBOUND_CHECKPOINT_4",
         serializeForConsole({
@@ -351,6 +355,10 @@ export async function POST(request) {
             log_error_stack: log_error?.stack || null,
           })
         );
+      }
+
+      if (inbound_debug_stage === "after_signature_branch_selected") {
+        return NextResponse.json({ ok: true, stage: "after_signature_branch_selected" });
       }
 
       if (!payload.from || !payload.message) {
@@ -506,6 +514,10 @@ export async function POST(request) {
         );
       }
       accepted_logged = true;
+
+      if (inbound_debug_stage === "after_accepted") {
+        return NextResponse.json({ ok: true, stage: "after_accepted" });
+      }
     } catch (error) {
       const error_meta = {
         message_id: safe_message_id,
@@ -578,6 +590,10 @@ export async function POST(request) {
       );
     }
 
+    if (inbound_debug_stage === "before_handler") {
+      return NextResponse.json({ ok: true, stage: "before_handler" });
+    }
+
     downstream_handler_invoked = true;
     safeRouteLog(
       "info",
@@ -593,6 +609,10 @@ export async function POST(request) {
     );
 
     const buyer_result = await runtimeDeps.maybeHandleBuyerTextgridInboundImpl(payload);
+
+    if (inbound_debug_stage === "after_handler") {
+      return NextResponse.json({ ok: true, stage: "after_handler", buyer_matched: Boolean(buyer_result?.matched) });
+    }
 
     safeRouteLog(
       "info",
