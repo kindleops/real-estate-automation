@@ -199,34 +199,49 @@ export async function POST(request) {
       })
     );
 
+    console.log("INBOUND_CHECKPOINT_0");
+
     try {
-      console.log(
-        "INBOUND_CHECKPOINT_1",
-        serializeForConsole({
-          message_id: safe_message_id,
-          from: safe_from,
-          to: safe_to,
-          parsed_body_keys,
-          signature_verification_mode: safe_signature_verification_mode,
-          next_statement: "build_checkpoint_base",
-        })
-      );
       try {
-        runtimeDeps.logger.info("INBOUND_CHECKPOINT_1", {
-          message_id: safe_message_id,
-          from: safe_from,
-          to: safe_to,
-          parsed_body_keys,
-          signature_verification_mode: safe_signature_verification_mode,
-          next_statement: "build_checkpoint_base",
-        });
-      } catch (log_error) {
-        console.error(
-          "INBOUND_CHECKPOINT_1_LOGGER_FAILED",
+        console.log("INBOUND_CP_0");
+        console.log("INBOUND_CP_1A");
+        console.log(
+          "INBOUND_CHECKPOINT_1",
           serializeForConsole({
-            log_error_message: log_error?.message || "unknown_logger_error",
-            log_error_stack: log_error?.stack || null,
+            message_id: safe_message_id,
+            from: safe_from,
+            to: safe_to,
+            parsed_body_keys,
+            signature_verification_mode: safe_signature_verification_mode,
+            next_statement: "build_checkpoint_base",
           })
+        );
+        console.log("INBOUND_CP_1B");
+        console.log("INBOUND_CP_2A");
+        try {
+          runtimeDeps.logger.info("INBOUND_CHECKPOINT_1", {
+            message_id: safe_message_id,
+            from: safe_from,
+            to: safe_to,
+            parsed_body_keys,
+            signature_verification_mode: safe_signature_verification_mode,
+            next_statement: "build_checkpoint_base",
+          });
+        } catch (log_error) {
+          console.error(
+            "INBOUND_CHECKPOINT_1_LOGGER_FAILED",
+            serializeForConsole({
+              log_error_message: log_error?.message || "unknown_logger_error",
+              log_error_stack: log_error?.stack || null,
+            })
+          );
+        }
+        console.log("INBOUND_CP_2B");
+      } catch (early_err) {
+        console.error("INBOUND_PRE_ACCEPT_THROW", early_err.message, early_err.stack);
+        return NextResponse.json(
+          { ok: false, error: "textgrid_inbound_failed_pre_accept_early" },
+          { status: 500 }
         );
       }
 
