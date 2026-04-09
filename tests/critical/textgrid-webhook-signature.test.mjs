@@ -466,6 +466,9 @@ test("handleTextgridDeliveryRequest: strict mode invalid signature → 401 with 
     "no_mode_produced_matching_digest"
   );
 
+  const normalized = entries.find((entry) => entry.event === "textgrid_delivery.normalized");
+  assert.ok(normalized, "strict mode should log normalized");
+
   const warn = entries.find((e) => e.event === "textgrid_delivery.invalid_signature");
   assert.ok(warn, "Should log textgrid_delivery.invalid_signature warning");
   assert.ok(Array.isArray(warn.meta.modes_tried), "Log should include modes_tried");
@@ -473,6 +476,19 @@ test("handleTextgridDeliveryRequest: strict mode invalid signature → 401 with 
   assert.equal(warn.meta.webhook_secret_configured, true, "Log should show webhook_secret configured");
   assert.equal(warn.meta.signature_verification_mode, "strict");
   assert.equal(warn.meta.signature_header_name, "x-twilio-signature");
+  assert.equal(warn.meta.downstream_handler_invoked, false);
+  assert.equal(warn.meta.podio_persistence_attempted, false);
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_delivery.response_sent");
+  assert.ok(responseLog, "strict mode should log response_sent");
+  assert.equal(responseLog.meta.final_response_status, 401);
+  assert.equal(responseLog.meta.downstream_handler_invoked, false);
+  assert.equal(responseLog.meta.podio_persistence_attempted, false);
+  assert.equal(
+    entries.some((entry) => entry.event === "textgrid_delivery.handler_started"),
+    false,
+    "strict mode must not invoke delivery handler"
+  );
 
   // Secrets must NOT appear in the log entry
   const log_str = JSON.stringify(warn.meta);
@@ -540,6 +556,30 @@ test("handleTextgridDeliveryRequest: observe mode accepts invalid signature and 
   assert.equal(warn.meta.signature_bypassed, true);
   assert.equal(warn.meta.signature_unverified_observe_mode, true);
   assert.equal(warn.meta.request_path, "/api/webhooks/textgrid/delivery");
+
+  const normalized = entries.find((entry) => entry.event === "textgrid_delivery.normalized");
+  assert.ok(normalized, "observe mode should log normalized");
+
+  const accepted = entries.find((entry) => entry.event === "textgrid_delivery.accepted");
+  assert.ok(accepted, "observe mode should log accepted");
+  assert.equal(accepted.meta.downstream_handler_invoked, false);
+  assert.equal(accepted.meta.final_response_status, null);
+
+  const started = entries.find((entry) => entry.event === "textgrid_delivery.handler_started");
+  assert.ok(started, "observe mode should start delivery handler");
+  assert.equal(started.meta.downstream_handler_invoked, true);
+  assert.equal(started.meta.podio_persistence_attempted, true);
+
+  const completed = entries.find((entry) => entry.event === "textgrid_delivery.handler_completed");
+  assert.ok(completed, "observe mode should complete delivery handler");
+  assert.equal(completed.meta.downstream_handler_invoked, true);
+  assert.equal(completed.meta.podio_persistence_attempted, true);
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_delivery.response_sent");
+  assert.ok(responseLog, "observe mode should log response_sent");
+  assert.equal(responseLog.meta.final_response_status, 200);
+  assert.equal(responseLog.meta.downstream_handler_invoked, true);
+  assert.equal(responseLog.meta.podio_persistence_attempted, true);
 });
 
 test("handleTextgridDeliveryRequest: off mode accepts request and skips verification", async (t) => {
@@ -592,6 +632,25 @@ test("handleTextgridDeliveryRequest: off mode accepts request and skips verifica
   assert.equal(warn.meta.signature_verification_disabled, true);
   assert.equal(warn.meta.signature_verification_mode, "off");
   assert.equal(warn.meta.signature_bypassed, true);
+
+  const normalized = entries.find((entry) => entry.event === "textgrid_delivery.normalized");
+  assert.ok(normalized, "off mode should log normalized");
+
+  const accepted = entries.find((entry) => entry.event === "textgrid_delivery.accepted");
+  assert.ok(accepted, "off mode should log accepted");
+
+  const started = entries.find((entry) => entry.event === "textgrid_delivery.handler_started");
+  assert.ok(started, "off mode should start delivery handler");
+  assert.equal(started.meta.downstream_handler_invoked, true);
+
+  const completed = entries.find((entry) => entry.event === "textgrid_delivery.handler_completed");
+  assert.ok(completed, "off mode should complete delivery handler");
+  assert.equal(completed.meta.downstream_handler_invoked, true);
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_delivery.response_sent");
+  assert.ok(responseLog, "off mode should log response_sent");
+  assert.equal(responseLog.meta.final_response_status, 200);
+  assert.equal(responseLog.meta.downstream_handler_invoked, true);
 });
 
 test("textgrid inbound route: strict mode rejects invalid signature with 401", async (t) => {
@@ -644,11 +703,26 @@ test("textgrid inbound route: strict mode rejects invalid signature with 401", a
   assert.equal(payload.verification.signature_bypassed, false);
   assert.equal(handled_payload, null);
 
+  const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
+  assert.ok(normalized, "strict mode should log normalized");
+
   const warn = entries.find((entry) => entry.event === "textgrid_inbound.invalid_signature");
   assert.ok(warn, "strict mode should log invalid signature");
   assert.equal(warn.meta.signature_verification_mode, "strict");
   assert.equal(warn.meta.signature_header_name, "x-textgrid-signature");
   assert.equal(warn.meta.request_path, "/api/webhooks/textgrid/inbound");
+  assert.equal(warn.meta.downstream_handler_invoked, false);
+  assert.equal(warn.meta.podio_persistence_attempted, false);
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_inbound.response_sent");
+  assert.ok(responseLog, "strict mode should log response_sent");
+  assert.equal(responseLog.meta.final_response_status, 401);
+  assert.equal(responseLog.meta.downstream_handler_invoked, false);
+  assert.equal(
+    entries.some((entry) => entry.event === "textgrid_inbound.handler_started"),
+    false,
+    "strict mode must not invoke inbound handler"
+  );
 });
 
 test("textgrid inbound route: observe mode accepts invalid signature and continues", async (t) => {
@@ -716,6 +790,37 @@ test("textgrid inbound route: observe mode accepts invalid signature and continu
   assert.equal(warn.meta.signature_verification_mode, "observe");
   assert.equal(warn.meta.signature_bypassed, true);
   assert.equal(warn.meta.signature_unverified_observe_mode, true);
+
+  const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
+  assert.ok(normalized, "observe mode should log normalized");
+
+  const accepted = entries.find((entry) => entry.event === "textgrid_inbound.accepted");
+  assert.ok(accepted, "observe mode should log accepted");
+  assert.equal(accepted.meta.downstream_handler_invoked, false);
+
+  const mainHandlerStarted = entries.find(
+    (entry) =>
+      entry.event === "textgrid_inbound.handler_started" &&
+      entry.meta.handler_name === "handleTextgridInbound"
+  );
+  assert.ok(mainHandlerStarted, "observe mode should invoke inbound handler");
+  assert.equal(mainHandlerStarted.meta.downstream_handler_invoked, true);
+  assert.equal(mainHandlerStarted.meta.podio_persistence_attempted, true);
+
+  const mainHandlerCompleted = entries.find(
+    (entry) =>
+      entry.event === "textgrid_inbound.handler_completed" &&
+      entry.meta.handler_name === "handleTextgridInbound"
+  );
+  assert.ok(mainHandlerCompleted, "observe mode should complete inbound handler");
+  assert.equal(mainHandlerCompleted.meta.downstream_handler_invoked, true);
+  assert.equal(mainHandlerCompleted.meta.podio_persistence_attempted, true);
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_inbound.response_sent");
+  assert.ok(responseLog, "observe mode should log response_sent");
+  assert.equal(responseLog.meta.final_response_status, 200);
+  assert.equal(responseLog.meta.downstream_handler_invoked, true);
+  assert.equal(responseLog.meta.podio_persistence_attempted, true);
 });
 
 test("textgrid inbound route: off mode accepts request and skips verification", async (t) => {
@@ -774,4 +879,31 @@ test("textgrid inbound route: off mode accepts request and skips verification", 
   assert.equal(warn.meta.signature_verification_disabled, true);
   assert.equal(warn.meta.signature_verification_mode, "off");
   assert.equal(warn.meta.signature_bypassed, true);
+
+  const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
+  assert.ok(normalized, "off mode should log normalized");
+
+  const accepted = entries.find((entry) => entry.event === "textgrid_inbound.accepted");
+  assert.ok(accepted, "off mode should log accepted");
+
+  const mainHandlerStarted = entries.find(
+    (entry) =>
+      entry.event === "textgrid_inbound.handler_started" &&
+      entry.meta.handler_name === "handleTextgridInbound"
+  );
+  assert.ok(mainHandlerStarted, "off mode should invoke inbound handler");
+  assert.equal(mainHandlerStarted.meta.downstream_handler_invoked, true);
+
+  const mainHandlerCompleted = entries.find(
+    (entry) =>
+      entry.event === "textgrid_inbound.handler_completed" &&
+      entry.meta.handler_name === "handleTextgridInbound"
+  );
+  assert.ok(mainHandlerCompleted, "off mode should complete inbound handler");
+  assert.equal(mainHandlerCompleted.meta.downstream_handler_invoked, true);
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_inbound.response_sent");
+  assert.ok(responseLog, "off mode should log response_sent");
+  assert.equal(responseLog.meta.final_response_status, 200);
+  assert.equal(responseLog.meta.downstream_handler_invoked, true);
 });

@@ -198,6 +198,38 @@ export function buildTextgridWebhookVerificationMeta({
   };
 }
 
+export function buildTextgridWebhookLogMeta({
+  payload = {},
+  webhook_verification = {},
+  downstream_handler_invoked = false,
+  podio_persistence_attempted = false,
+  final_response_status = null,
+  extra = {},
+} = {}) {
+  return {
+    message_id: payload?.message_id || null,
+    from: payload?.from || null,
+    to: payload?.to || null,
+    status: clean(payload?.status) || null,
+    signature_verification_mode: webhook_verification?.signature_verification_mode || null,
+    signature_verified: Boolean(webhook_verification?.signature_verified),
+    signature_bypassed: Boolean(webhook_verification?.signature_bypassed),
+    signature_failure_reason: webhook_verification?.signature_failure_reason || null,
+    signature_header_name: webhook_verification?.signature_header_name || null,
+    signature_unverified_observe_mode: Boolean(
+      webhook_verification?.signature_unverified_observe_mode
+    ),
+    downstream_handler_invoked: Boolean(downstream_handler_invoked),
+    podio_persistence_attempted: Boolean(podio_persistence_attempted),
+    final_response_status:
+      final_response_status === null || final_response_status === undefined
+        ? null
+        : Number(final_response_status),
+    ...webhook_verification?.diagnostics,
+    ...extra,
+  };
+}
+
 // ── signing algorithms ─────────────────────────────────────────────────────
 
 // Twilio/TextGrid standard: HMAC-SHA1(url + sorted_form_params, secret) → base64

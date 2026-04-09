@@ -5,6 +5,7 @@ import { child } from "@/lib/logging/logger.js";
 import { handleTextgridInbound } from "@/lib/flows/handle-textgrid-inbound.js";
 import {
   buildTextgridWebhookBypassResult,
+  buildTextgridWebhookLogMeta,
   buildTextgridWebhookVerificationMeta,
   getTextgridWebhookSignatureMode,
   verifyTextgridWebhookRequest,
@@ -30,24 +31,6 @@ let runtimeDeps = { ...defaultDeps };
 
 function clean(value) {
   return String(value ?? "").trim();
-}
-
-function buildSignatureLogMeta(payload, webhook_verification) {
-  return {
-    message_id: payload.message_id || null,
-    from: payload.from || null,
-    to: payload.to || null,
-    status: payload.status || null,
-    signature_verification_mode: webhook_verification?.signature_verification_mode || null,
-    signature_verified: Boolean(webhook_verification?.signature_verified),
-    signature_bypassed: Boolean(webhook_verification?.signature_bypassed),
-    signature_failure_reason: webhook_verification?.signature_failure_reason || null,
-    signature_header_name: webhook_verification?.signature_header_name || null,
-    signature_unverified_observe_mode: Boolean(
-      webhook_verification?.signature_unverified_observe_mode
-    ),
-    ...webhook_verification?.diagnostics,
-  };
 }
 
 async function parseRequestBody(request) {
@@ -128,10 +111,34 @@ export async function POST(request) {
       ...signature_meta,
     };
 
+    runtimeDeps.logger.info(
+      "textgrid_inbound.normalized",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        extra: {
+          event: payload.header_event || null,
+          parsed_body_keys: Object.keys(body || {}),
+        },
+      })
+    );
+
     if (!payload.from || !payload.message) {
       runtimeDeps.logger.warn("textgrid_inbound.invalid_payload", {
         payload,
       });
+
+      runtimeDeps.logger.info(
+        "textgrid_inbound.response_sent",
+        buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+          final_response_status: 400,
+          extra: {
+            response_error: "invalid_textgrid_inbound_payload",
+          },
+        })
+      );
 
       return NextResponse.json(
         {
@@ -145,10 +152,25 @@ export async function POST(request) {
     if (verification.required && !verification.ok) {
       runtimeDeps.logger.warn(
         "textgrid_inbound.invalid_signature",
-        buildSignatureLogMeta(payload, webhook_verification)
+        buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+        })
       );
 
       if (signature_verification_mode === "strict") {
+        runtimeDeps.logger.info(
+          "textgrid_inbound.response_sent",
+          buildTextgridWebhookLogMeta({
+            payload,
+            webhook_verification,
+            final_response_status: 401,
+            extra: {
+              response_error: "invalid_textgrid_signature",
+            },
+          })
+        );
+
         return NextResponse.json(
           {
             ok: false,
@@ -163,14 +185,52 @@ export async function POST(request) {
     if (signature_verification_mode === "off") {
       runtimeDeps.logger.warn("textgrid_inbound.signature_verification_disabled", {
         signature_verification_disabled: true,
-        ...buildSignatureLogMeta(payload, webhook_verification),
+        ...buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+        }),
       });
     }
 
     payload.webhook_verification = webhook_verification;
     Object.assign(payload, signature_meta);
 
+    runtimeDeps.logger.info(
+      "textgrid_inbound.accepted",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+      })
+    );
+
+    runtimeDeps.logger.info(
+      "textgrid_inbound.handler_started",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        downstream_handler_invoked: true,
+        extra: {
+          handler_name: "maybeHandleBuyerTextgridInbound",
+        },
+      })
+    );
+
     const buyer_result = await runtimeDeps.maybeHandleBuyerTextgridInboundImpl(payload);
+
+    runtimeDeps.logger.info(
+      "textgrid_inbound.handler_completed",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        downstream_handler_invoked: true,
+        podio_persistence_attempted: Boolean(buyer_result?.matched),
+        extra: {
+          handler_name: "maybeHandleBuyerTextgridInbound",
+          buyer_disposition_matched: Boolean(buyer_result?.matched),
+        },
+      })
+    );
+
     if (buyer_result?.matched) {
       runtimeDeps.logger.info("textgrid_inbound.routed_to_buyer_disposition", {
         message_id: payload.message_id || null,
@@ -179,6 +239,21 @@ export async function POST(request) {
         company_item_id: buyer_result?.result?.company_item_id || null,
         correlation_mode: buyer_result?.correlation_mode || null,
       });
+
+      const response_status = buyer_result?.result?.ok === false ? 400 : 200;
+      runtimeDeps.logger.info(
+        "textgrid_inbound.response_sent",
+        buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+          downstream_handler_invoked: true,
+          podio_persistence_attempted: true,
+          final_response_status: response_status,
+          extra: {
+            buyer_disposition: true,
+          },
+        })
+      );
 
       return NextResponse.json(
         {
@@ -192,19 +267,45 @@ export async function POST(request) {
       );
     }
 
-    runtimeDeps.logger.info("textgrid_inbound.received", {
-      message_id: payload.message_id || null,
-      from: payload.from,
-      to: payload.to || null,
-      status: payload.status || null,
-      event: payload.header_event || null,
-      verified: verification.verified,
-      signature_required: verification.required,
-      signature_verification_mode,
-      signature_bypassed: signature_meta.signature_bypassed,
-    });
+    runtimeDeps.logger.info(
+      "textgrid_inbound.handler_started",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        downstream_handler_invoked: true,
+        podio_persistence_attempted: true,
+        extra: {
+          handler_name: "handleTextgridInbound",
+        },
+      })
+    );
 
     const result = await runtimeDeps.handleTextgridInboundImpl(payload);
+
+    runtimeDeps.logger.info(
+      "textgrid_inbound.handler_completed",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        downstream_handler_invoked: true,
+        podio_persistence_attempted: true,
+        extra: {
+          handler_name: "handleTextgridInbound",
+          handler_ok: result?.ok !== false,
+        },
+      })
+    );
+
+    runtimeDeps.logger.info(
+      "textgrid_inbound.response_sent",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        downstream_handler_invoked: true,
+        podio_persistence_attempted: true,
+        final_response_status: 200,
+      })
+    );
 
     return NextResponse.json({
       ok: result?.ok !== false,
