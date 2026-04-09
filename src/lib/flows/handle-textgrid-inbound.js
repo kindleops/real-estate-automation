@@ -144,54 +144,60 @@ function buildInboundIdempotencyKey(extracted = {}) {
 export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
   const { inbound_debug_stage = null } = opts;
 
-  const extracted = extractWebhookPayload(payload);
+  // ── SEGMENT: handler_entry ────────────────────────────────────────────────
+  // Synchronous extraction and phone normalisation — isolated so a throw here
+  // produces a named error rather than a generic 500.
+  let extracted, inbound_from, inbound_to, message_body;
+  try {
+    extracted = extractWebhookPayload(payload);
+    inbound_from = runtimeDeps.normalizeInboundTextgridPhone(extracted.from);
+    inbound_to = runtimeDeps.normalizeInboundTextgridPhone(extracted.to);
+    message_body = extracted.body;
 
-  const inbound_from = runtimeDeps.normalizeInboundTextgridPhone(extracted.from);
-  const inbound_to = runtimeDeps.normalizeInboundTextgridPhone(extracted.to);
-  const message_body = extracted.body;
+    runtimeDeps.info("textgrid.inbound_received", {
+      message_id: extracted.message_id,
+      inbound_from,
+      inbound_to,
+      status: extracted.status,
+    });
+  } catch (err) {
+    return { ok: false, error: "textgrid_inbound_failed_handler_entry", error_message: err?.message || "unknown" };
+  }
 
-  runtimeDeps.info("textgrid.inbound_received", {
-    message_id: extracted.message_id,
-    inbound_from,
-    inbound_to,
-    status: extracted.status,
-  });
+  if (inbound_debug_stage === "handler_entry") {
+    return { ok: true, stage: "handler_entry", inbound_from, inbound_to };
+  }
 
   if (!inbound_from) {
-    runtimeDeps.warn("textgrid.inbound_missing_from", {
-      message_id: extracted.message_id,
-    });
-
-    return {
-      ok: false,
-      reason: "missing_inbound_from",
-    };
+    runtimeDeps.warn("textgrid.inbound_missing_from", { message_id: extracted.message_id });
+    return { ok: false, reason: "missing_inbound_from" };
   }
 
   if (!message_body) {
-    runtimeDeps.warn("textgrid.inbound_empty_body", {
-      message_id: extracted.message_id,
-      inbound_from,
-    });
-
-    return {
-      ok: false,
-      reason: "empty_inbound_body",
-    };
+    runtimeDeps.warn("textgrid.inbound_empty_body", { message_id: extracted.message_id, inbound_from });
+    return { ok: false, reason: "empty_inbound_body" };
   }
 
-  const idempotency_key = buildInboundIdempotencyKey(extracted);
-  const idempotency = await runtimeDeps.beginIdempotentProcessing({
-    scope: "textgrid_inbound",
-    key: idempotency_key,
-    summary: `Processed inbound SMS ${idempotency_key}`,
-    metadata: {
-      provider: "textgrid",
-      provider_message_id: clean(extracted.message_id) || null,
-      inbound_from,
-      inbound_to,
-    },
-  });
+  // ── SEGMENT: message_event_lookup ────────────────────────────────────────
+  // beginIdempotentProcessing checks the ledger for prior processing of this
+  // message ID — this is the "lookup" before we commit to processing.
+  let idempotency_key, idempotency;
+  try {
+    idempotency_key = buildInboundIdempotencyKey(extracted);
+    idempotency = await runtimeDeps.beginIdempotentProcessing({
+      scope: "textgrid_inbound",
+      key: idempotency_key,
+      summary: `Processed inbound SMS ${idempotency_key}`,
+      metadata: {
+        provider: "textgrid",
+        provider_message_id: clean(extracted.message_id) || null,
+        inbound_from,
+        inbound_to,
+      },
+    });
+  } catch (err) {
+    return { ok: false, error: "textgrid_inbound_failed_message_event_lookup", error_message: err?.message || "unknown" };
+  }
 
   if (!idempotency.ok) {
     return {
@@ -209,7 +215,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       reason: idempotency.reason,
       idempotency_key,
     });
-
     return {
       ok: true,
       duplicate: true,
@@ -222,8 +227,14 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     };
   }
 
+  if (inbound_debug_stage === "after_message_event_lookup") {
+    return { ok: true, stage: "after_message_event_lookup", idempotency_key };
+  }
+
+  // From here the idempotency record exists; the outer catch calls
+  // failIdempotentProcessing if anything escapes all inner catches.
   try {
-    // ── SEGMENT: first_lookup ─────────────────────────────────────────────
+    // ── SEGMENT: brain_lookup ───────────────────────────────────────────────
     let context;
     try {
       context = await runtimeDeps.loadContext({
@@ -231,7 +242,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         create_brain_if_missing: true,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_first_lookup", error_message: err?.message || "unknown" };
+      return { ok: false, error: "textgrid_inbound_failed_brain_lookup", error_message: err?.message || "unknown" };
     }
 
     if (!context?.found) {
@@ -241,7 +252,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         reason: context?.reason || "unknown",
       });
 
-      const result = {
+      const not_found_result = {
         ok: false,
         reason: context?.reason || "context_not_found",
         inbound_from,
@@ -252,16 +263,16 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         record_item_id: idempotency.record_item_id,
         scope: "textgrid_inbound",
         key: idempotency_key,
-        summary: `Inbound SMS ignored: ${result.reason}`,
+        summary: `Inbound SMS ignored: ${not_found_result.reason}`,
         metadata: {
           provider_message_id: clean(extracted.message_id) || null,
           inbound_from,
           inbound_to,
-          result_reason: result.reason,
+          result_reason: not_found_result.reason,
         },
       });
 
-      return result;
+      return not_found_result;
     }
 
     const brain_item = context.items?.brain_item || null;
@@ -271,19 +282,53 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     const property_id = context.ids?.property_id || null;
     const phone_item_id = context.ids?.phone_item_id || null;
 
-    if (inbound_debug_stage === "after_first_lookup") {
-      return { ok: true, stage: "after_first_lookup", brain_id, master_owner_id, inbound_from };
+    if (inbound_debug_stage === "after_brain_lookup") {
+      return { ok: true, stage: "after_brain_lookup", brain_id, master_owner_id };
     }
 
-    // ── SEGMENT: brain_lookup ─────────────────────────────────────────────
+    // ── SEGMENT: phone_resolution ────────────────────────────────────────
+    // Phone identity is resolved from context — gate here confirms phone_item_id
+    // is available before downstream steps that depend on it.
+    if (inbound_debug_stage === "after_phone_resolution") {
+      return { ok: true, stage: "after_phone_resolution", phone_item_id, inbound_from };
+    }
+
+    // ── SEGMENT: message_event_create ─────────────────────────────────────
+    // Log the inbound message event to Podio before classification so the
+    // record exists regardless of routing outcome.
+    const inbound_number_item_id = null;
+    try {
+      await runtimeDeps.logInboundMessageEvent({
+        brain_item,
+        conversation_item_id: brain_id,
+        master_owner_id,
+        prospect_id,
+        property_id,
+        phone_item_id,
+        inbound_number_item_id,
+        message_body,
+        provider_message_id: extracted.message_id,
+        raw_carrier_status: extracted.status || "received",
+        received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
+        processed_by: "Inbound Webhook",
+        source_app: "TextGrid",
+        trigger_name: "textgrid-inbound",
+      });
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_message_event_create", error_message: err?.message || "unknown" };
+    }
+
+    if (inbound_debug_stage === "after_message_event_create") {
+      return { ok: true, stage: "after_message_event_create" };
+    }
+
+    // ── SEGMENT: conversation_resolution ─────────────────────────────────
+    // Classify the message body, handle negative-reply cancellations, and
+    // resolve the routing decision.
     let classification, inbound_is_negative, queue_cancellation, route;
     try {
       classification = await runtimeDeps.classify(message_body, brain_item);
 
-      // ── Negative-reply fast-path ─────────────────────────────────────────
-      // When the seller clearly says stop/no/not-interested, immediately cancel
-      // every pending queue item for this owner+phone so no further touches fire
-      // while the brain-stage and phone suppress flags propagate asynchronously.
       inbound_is_negative = runtimeDeps.isNegativeReply(message_body);
       queue_cancellation = null;
 
@@ -311,47 +356,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         message: message_body,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_brain_lookup", error_message: err?.message || "unknown" };
+      return { ok: false, error: "textgrid_inbound_failed_conversation_resolution", error_message: err?.message || "unknown" };
     }
 
-    if (inbound_debug_stage === "after_brain_lookup") {
-      return { ok: true, stage: "after_brain_lookup", route_stage: route?.stage || null, classification_source: classification?.source || null };
-    }
-
-    // ── SEGMENT: message_event_create ─────────────────────────────────────
-    const inbound_number_item_id = null;
-
-    try {
-      await runtimeDeps.logInboundMessageEvent({
-        brain_item,
-        conversation_item_id: brain_id,
-        master_owner_id,
-        prospect_id,
-        property_id,
-        phone_item_id,
-        inbound_number_item_id,
-        message_body,
-        provider_message_id: extracted.message_id,
-        raw_carrier_status: extracted.status || "received",
-        received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
-        processed_by: "Inbound Webhook",
-        source_app: "TextGrid",
-        trigger_name: "textgrid-inbound",
-      });
-    } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_message_event_create", error_message: err?.message || "unknown" };
-    }
-
-    if (inbound_debug_stage === "after_message_event_create") {
-      return { ok: true, stage: "after_message_event_create" };
+    if (inbound_debug_stage === "after_conversation_resolution") {
+      return { ok: true, stage: "after_conversation_resolution", route_stage: route?.stage || null, classification_source: classification?.source || null };
     }
 
     // ── SEGMENT: prospect_resolution ──────────────────────────────────────
+    // Write brain activity, master-owner timestamps, and stage/language/profile
+    // updates in parallel.
     try {
-      await runtimeDeps.updateBrainAfterInbound({
-        brain_id,
-        message_body,
-      });
+      await runtimeDeps.updateBrainAfterInbound({ brain_id, message_body });
 
       await runtimeDeps.updateMasterOwnerAfterInbound({
         master_owner_id,
@@ -360,30 +376,27 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
 
       await Promise.all([
         route?.stage
-          ? runtimeDeps.updateBrainStage({
-              brain_id,
-              stage: route.stage,
-            })
+          ? runtimeDeps.updateBrainStage({ brain_id, stage: route.stage })
           : Promise.resolve({ ok: false, reason: "missing_stage" }),
 
         classification?.language
-          ? runtimeDeps.updateBrainLanguage({
-              brain_id,
-              language: classification.language,
-            })
+          ? runtimeDeps.updateBrainLanguage({ brain_id, language: classification.language })
           : Promise.resolve({ ok: false, reason: "missing_language" }),
 
         route?.seller_profile
-          ? runtimeDeps.updateBrainSellerProfile({
-              brain_id,
-              seller_profile: route.seller_profile,
-            })
+          ? runtimeDeps.updateBrainSellerProfile({ brain_id, seller_profile: route.seller_profile })
           : Promise.resolve({ ok: false, reason: "missing_seller_profile" }),
       ]);
     } catch (err) {
       return { ok: false, error: "textgrid_inbound_failed_prospect_resolution", error_message: err?.message || "unknown" };
     }
 
+    if (inbound_debug_stage === "after_prospect_resolution") {
+      return { ok: true, stage: "after_prospect_resolution", brain_id, master_owner_id };
+    }
+
+    // ── SEGMENT: market_resolution ────────────────────────────────────────
+    // Fetch the latest open offer to determine offer-progression vs. creation.
     let existing_offer;
     try {
       existing_offer = await runtimeDeps.findLatestOpenOffer({
@@ -392,14 +405,15 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         property_id,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_prospect_resolution", error_message: err?.message || "unknown" };
+      return { ok: false, error: "textgrid_inbound_failed_market_resolution", error_message: err?.message || "unknown" };
     }
 
-    if (inbound_debug_stage === "after_prospect_resolution") {
-      return { ok: true, stage: "after_prospect_resolution", existing_offer_item_id: existing_offer?.item_id || null };
+    if (inbound_debug_stage === "after_market_resolution") {
+      return { ok: true, stage: "after_market_resolution", existing_offer_item_id: existing_offer?.item_id || null };
     }
 
-    // ── SEGMENT: podio_persistence ────────────────────────────────────────
+    // ── SEGMENT: podio_write ──────────────────────────────────────────────
+    // All offer, underwriting, contract, and pipeline writes happen here.
     let maybe_offer_progress, initial_offer, underwriting, seller_stage_reply,
         underwriting_follow_up, maybe_offer, active_offer_item_id, contract, pipeline;
 
@@ -411,29 +425,24 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             classification,
             notes: message_body,
           })
-        : {
-            ok: true,
-            updated: false,
-            reason: "no_existing_open_offer",
-          };
+        : { ok: true, updated: false, reason: "no_existing_open_offer" };
 
-      initial_offer =
-        maybe_offer_progress?.updated
-          ? {
-              ok: true,
-              created: false,
-              reason: "existing_offer_progressed",
-              existing_offer_item_id: existing_offer?.item_id || null,
-              progress: maybe_offer_progress,
-            }
-          : await runtimeDeps.maybeCreateOfferFromContext({
-              context,
-              classification,
-              route,
-              message: message_body,
-              notes: message_body,
-              created_by: "Inbound Offer Engine",
-            });
+      initial_offer = maybe_offer_progress?.updated
+        ? {
+            ok: true,
+            created: false,
+            reason: "existing_offer_progressed",
+            existing_offer_item_id: existing_offer?.item_id || null,
+            progress: maybe_offer_progress,
+          }
+        : await runtimeDeps.maybeCreateOfferFromContext({
+            context,
+            classification,
+            route,
+            message: message_body,
+            notes: message_body,
+            created_by: "Inbound Offer Engine",
+          });
 
       underwriting = await runtimeDeps.maybeUpsertUnderwritingFromInbound({
         context,
@@ -459,18 +468,11 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       });
 
       if (seller_stage_reply?.brain_stage) {
-        await runtimeDeps.updateBrainStage({
-          brain_id,
-          stage: seller_stage_reply.brain_stage,
-        });
+        await runtimeDeps.updateBrainStage({ brain_id, stage: seller_stage_reply.brain_stage });
       }
 
       underwriting_follow_up = seller_stage_reply?.handled
-        ? {
-            ok: true,
-            queued: false,
-            reason: "suppressed_by_seller_stage_reply",
-          }
+        ? { ok: true, queued: false, reason: "suppressed_by_seller_stage_reply" }
         : await runtimeDeps.maybeQueueUnderwritingFollowUp({
             inbound_from,
             underwriting,
@@ -486,9 +488,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         underwriting_follow_up?.offer_ready === true;
 
       maybe_offer =
-        initial_offer?.created ||
-        initial_offer?.existing_offer_item_id ||
-        !underwriting_offer_ready
+        initial_offer?.created || initial_offer?.existing_offer_item_id || !underwriting_offer_ready
           ? initial_offer
           : await runtimeDeps.maybeCreateOfferFromContext({
               context,
@@ -531,11 +531,11 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_podio_persistence", error_message: err?.message || "unknown" };
+      return { ok: false, error: "textgrid_inbound_failed_podio_write", error_message: err?.message || "unknown" };
     }
 
-    if (inbound_debug_stage === "after_podio_persistence") {
-      return { ok: true, stage: "after_podio_persistence", pipeline_item_id: pipeline?.pipeline_item_id || null };
+    if (inbound_debug_stage === "after_podio_write") {
+      return { ok: true, stage: "after_podio_write", pipeline_item_id: pipeline?.pipeline_item_id || null };
     }
 
     runtimeDeps.info("textgrid.inbound_processed", {
@@ -609,6 +609,10 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         result_reason: "textgrid_inbound_processed",
       },
     });
+
+    if (inbound_debug_stage === "handler_exit") {
+      return { ok: true, stage: "handler_exit", message_id: extracted.message_id };
+    }
 
     return result;
   } catch (error) {
