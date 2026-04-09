@@ -141,7 +141,9 @@ function buildInboundIdempotencyKey(extracted = {}) {
   );
 }
 
-export async function handleTextgridInboundWebhook(payload = {}) {
+export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
+  const { inbound_debug_stage = null } = opts;
+
   const extracted = extractWebhookPayload(payload);
 
   const inbound_from = runtimeDeps.normalizeInboundTextgridPhone(extracted.from);
@@ -221,10 +223,16 @@ export async function handleTextgridInboundWebhook(payload = {}) {
   }
 
   try {
-    const context = await runtimeDeps.loadContext({
-      inbound_from,
-      create_brain_if_missing: true,
-    });
+    // ── SEGMENT: first_lookup ─────────────────────────────────────────────
+    let context;
+    try {
+      context = await runtimeDeps.loadContext({
+        inbound_from,
+        create_brain_if_missing: true,
+      });
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_first_lookup", error_message: err?.message || "unknown" };
+    }
 
     if (!context?.found) {
       runtimeDeps.warn("textgrid.inbound_context_not_found", {
@@ -263,222 +271,272 @@ export async function handleTextgridInboundWebhook(payload = {}) {
     const property_id = context.ids?.property_id || null;
     const phone_item_id = context.ids?.phone_item_id || null;
 
-    const classification = await runtimeDeps.classify(message_body, brain_item);
-
-    // ── Negative-reply fast-path ─────────────────────────────────────────
-    // When the seller clearly says stop/no/not-interested, immediately cancel
-    // every pending queue item for this owner+phone so no further touches fire
-    // while the brain-stage and phone suppress flags propagate asynchronously.
-    const inbound_is_negative = runtimeDeps.isNegativeReply(message_body);
-    let queue_cancellation = null;
-
-    if (inbound_is_negative && (master_owner_id || phone_item_id)) {
-      queue_cancellation = await runtimeDeps.cancelPendingQueueItemsForOwner({
-        master_owner_id,
-        phone_item_id,
-        reason: "inbound_negative_reply",
-      });
-
-      runtimeDeps.info("textgrid.inbound_negative_reply_queue_canceled", {
-        message_id: extracted.message_id,
-        inbound_from,
-        master_owner_id,
-        phone_item_id,
-        canceled_count: queue_cancellation?.canceled_count ?? 0,
-        items_checked: queue_cancellation?.items_checked ?? 0,
-      });
+    if (inbound_debug_stage === "after_first_lookup") {
+      return { ok: true, stage: "after_first_lookup", brain_id, master_owner_id, inbound_from };
     }
 
-    const route = runtimeDeps.resolveRoute({
-      classification,
-      brain_item,
-      phone_item: context.items?.phone_item || null,
-      message: message_body,
-    });
+    // ── SEGMENT: brain_lookup ─────────────────────────────────────────────
+    let classification, inbound_is_negative, queue_cancellation, route;
+    try {
+      classification = await runtimeDeps.classify(message_body, brain_item);
 
+      // ── Negative-reply fast-path ─────────────────────────────────────────
+      // When the seller clearly says stop/no/not-interested, immediately cancel
+      // every pending queue item for this owner+phone so no further touches fire
+      // while the brain-stage and phone suppress flags propagate asynchronously.
+      inbound_is_negative = runtimeDeps.isNegativeReply(message_body);
+      queue_cancellation = null;
+
+      if (inbound_is_negative && (master_owner_id || phone_item_id)) {
+        queue_cancellation = await runtimeDeps.cancelPendingQueueItemsForOwner({
+          master_owner_id,
+          phone_item_id,
+          reason: "inbound_negative_reply",
+        });
+
+        runtimeDeps.info("textgrid.inbound_negative_reply_queue_canceled", {
+          message_id: extracted.message_id,
+          inbound_from,
+          master_owner_id,
+          phone_item_id,
+          canceled_count: queue_cancellation?.canceled_count ?? 0,
+          items_checked: queue_cancellation?.items_checked ?? 0,
+        });
+      }
+
+      route = runtimeDeps.resolveRoute({
+        classification,
+        brain_item,
+        phone_item: context.items?.phone_item || null,
+        message: message_body,
+      });
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_brain_lookup", error_message: err?.message || "unknown" };
+    }
+
+    if (inbound_debug_stage === "after_brain_lookup") {
+      return { ok: true, stage: "after_brain_lookup", route_stage: route?.stage || null, classification_source: classification?.source || null };
+    }
+
+    // ── SEGMENT: message_event_create ─────────────────────────────────────
     const inbound_number_item_id = null;
 
-    await runtimeDeps.logInboundMessageEvent({
-      brain_item,
-      conversation_item_id: brain_id,
-      master_owner_id,
-      prospect_id,
-      property_id,
-      phone_item_id,
-      inbound_number_item_id,
-      message_body,
-      provider_message_id: extracted.message_id,
-      raw_carrier_status: extracted.status || "received",
-      received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
-      processed_by: "Inbound Webhook",
-      source_app: "TextGrid",
-      trigger_name: "textgrid-inbound",
-    });
+    try {
+      await runtimeDeps.logInboundMessageEvent({
+        brain_item,
+        conversation_item_id: brain_id,
+        master_owner_id,
+        prospect_id,
+        property_id,
+        phone_item_id,
+        inbound_number_item_id,
+        message_body,
+        provider_message_id: extracted.message_id,
+        raw_carrier_status: extracted.status || "received",
+        received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
+        processed_by: "Inbound Webhook",
+        source_app: "TextGrid",
+        trigger_name: "textgrid-inbound",
+      });
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_message_event_create", error_message: err?.message || "unknown" };
+    }
 
-    await runtimeDeps.updateBrainAfterInbound({
-      brain_id,
-      message_body,
-    });
+    if (inbound_debug_stage === "after_message_event_create") {
+      return { ok: true, stage: "after_message_event_create" };
+    }
 
-    await runtimeDeps.updateMasterOwnerAfterInbound({
-      master_owner_id,
-      received_at: new Date().toISOString(),
-    });
+    // ── SEGMENT: prospect_resolution ──────────────────────────────────────
+    try {
+      await runtimeDeps.updateBrainAfterInbound({
+        brain_id,
+        message_body,
+      });
 
-    await Promise.all([
-      route?.stage
-        ? runtimeDeps.updateBrainStage({
-            brain_id,
-            stage: route.stage,
+      await runtimeDeps.updateMasterOwnerAfterInbound({
+        master_owner_id,
+        received_at: new Date().toISOString(),
+      });
+
+      await Promise.all([
+        route?.stage
+          ? runtimeDeps.updateBrainStage({
+              brain_id,
+              stage: route.stage,
+            })
+          : Promise.resolve({ ok: false, reason: "missing_stage" }),
+
+        classification?.language
+          ? runtimeDeps.updateBrainLanguage({
+              brain_id,
+              language: classification.language,
+            })
+          : Promise.resolve({ ok: false, reason: "missing_language" }),
+
+        route?.seller_profile
+          ? runtimeDeps.updateBrainSellerProfile({
+              brain_id,
+              seller_profile: route.seller_profile,
+            })
+          : Promise.resolve({ ok: false, reason: "missing_seller_profile" }),
+      ]);
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_prospect_resolution", error_message: err?.message || "unknown" };
+    }
+
+    let existing_offer;
+    try {
+      existing_offer = await runtimeDeps.findLatestOpenOffer({
+        prospect_id,
+        master_owner_id,
+        property_id,
+      });
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_prospect_resolution", error_message: err?.message || "unknown" };
+    }
+
+    if (inbound_debug_stage === "after_prospect_resolution") {
+      return { ok: true, stage: "after_prospect_resolution", existing_offer_item_id: existing_offer?.item_id || null };
+    }
+
+    // ── SEGMENT: podio_persistence ────────────────────────────────────────
+    let maybe_offer_progress, initial_offer, underwriting, seller_stage_reply,
+        underwriting_follow_up, maybe_offer, active_offer_item_id, contract, pipeline;
+
+    try {
+      maybe_offer_progress = existing_offer
+        ? await runtimeDeps.maybeProgressOfferStatus({
+            offer_item_id: existing_offer.item_id,
+            message: message_body,
+            classification,
+            notes: message_body,
           })
-        : Promise.resolve({ ok: false, reason: "missing_stage" }),
+        : {
+            ok: true,
+            updated: false,
+            reason: "no_existing_open_offer",
+          };
 
-      classification?.language
-        ? runtimeDeps.updateBrainLanguage({
-            brain_id,
-            language: classification.language,
-          })
-        : Promise.resolve({ ok: false, reason: "missing_language" }),
+      initial_offer =
+        maybe_offer_progress?.updated
+          ? {
+              ok: true,
+              created: false,
+              reason: "existing_offer_progressed",
+              existing_offer_item_id: existing_offer?.item_id || null,
+              progress: maybe_offer_progress,
+            }
+          : await runtimeDeps.maybeCreateOfferFromContext({
+              context,
+              classification,
+              route,
+              message: message_body,
+              notes: message_body,
+              created_by: "Inbound Offer Engine",
+            });
 
-      route?.seller_profile
-        ? runtimeDeps.updateBrainSellerProfile({
-            brain_id,
-            seller_profile: route.seller_profile,
-          })
-        : Promise.resolve({ ok: false, reason: "missing_seller_profile" }),
-    ]);
+      underwriting = await runtimeDeps.maybeUpsertUnderwritingFromInbound({
+        context,
+        classification,
+        route,
+        message: message_body,
+        offer_item_id:
+          initial_offer?.offer?.offer_item_id ||
+          initial_offer?.existing_offer_item_id ||
+          existing_offer?.item_id ||
+          null,
+        source_channel: "SMS",
+        notes: message_body,
+      });
 
-    const existing_offer = await runtimeDeps.findLatestOpenOffer({
-      prospect_id,
-      master_owner_id,
-      property_id,
-    });
+      seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+        inbound_from,
+        context,
+        classification,
+        message: message_body,
+        maybe_offer: initial_offer,
+        existing_offer,
+      });
 
-    const maybe_offer_progress = existing_offer
-      ? await runtimeDeps.maybeProgressOfferStatus({
-          offer_item_id: existing_offer.item_id,
-          message: message_body,
-          classification,
-          notes: message_body,
-        })
-      : {
-          ok: true,
-          updated: false,
-          reason: "no_existing_open_offer",
-        };
+      if (seller_stage_reply?.brain_stage) {
+        await runtimeDeps.updateBrainStage({
+          brain_id,
+          stage: seller_stage_reply.brain_stage,
+        });
+      }
 
-    const initial_offer =
-      maybe_offer_progress?.updated
+      underwriting_follow_up = seller_stage_reply?.handled
         ? {
             ok: true,
-            created: false,
-            reason: "existing_offer_progressed",
-            existing_offer_item_id: existing_offer?.item_id || null,
-            progress: maybe_offer_progress,
+            queued: false,
+            reason: "suppressed_by_seller_stage_reply",
           }
-        : await runtimeDeps.maybeCreateOfferFromContext({
-            context,
+        : await runtimeDeps.maybeQueueUnderwritingFollowUp({
+            inbound_from,
+            underwriting,
             classification,
             route,
+            context,
             message: message_body,
-            notes: message_body,
-            created_by: "Inbound Offer Engine",
           });
 
-    const underwriting = await runtimeDeps.maybeUpsertUnderwritingFromInbound({
-      context,
-      classification,
-      route,
-      message: message_body,
-      offer_item_id:
+      const underwriting_offer_ready =
+        underwriting?.strategy?.auto_offer_ready === true ||
+        underwriting?.signals?.underwriting_auto_offer_ready === true ||
+        underwriting_follow_up?.offer_ready === true;
+
+      maybe_offer =
+        initial_offer?.created ||
+        initial_offer?.existing_offer_item_id ||
+        !underwriting_offer_ready
+          ? initial_offer
+          : await runtimeDeps.maybeCreateOfferFromContext({
+              context,
+              classification,
+              route,
+              message: message_body,
+              notes: message_body,
+              created_by: "Underwriting Offer Engine",
+              respect_underwriting_gate: false,
+            });
+
+      active_offer_item_id =
+        maybe_offer?.offer?.offer_item_id ||
+        maybe_offer?.existing_offer_item_id ||
         initial_offer?.offer?.offer_item_id ||
         initial_offer?.existing_offer_item_id ||
         existing_offer?.item_id ||
-        null,
-      source_channel: "SMS",
-      notes: message_body,
-    });
+        null;
 
-    const seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
-      inbound_from,
-      context,
-      classification,
-      message: message_body,
-      maybe_offer: initial_offer,
-      existing_offer,
-    });
-
-    if (seller_stage_reply?.brain_stage) {
-      await runtimeDeps.updateBrainStage({
-        brain_id,
-        stage: seller_stage_reply.brain_stage,
+      contract = await runtimeDeps.maybeCreateContractFromAcceptedOffer({
+        offer_item: existing_offer || null,
+        offer_item_id: active_offer_item_id,
+        offer_progress: maybe_offer_progress,
+        context,
+        route,
+        underwriting,
+        notes: message_body,
+        source_message: message_body,
+        auto_send: false,
+        dry_run: false,
       });
+
+      pipeline = await runtimeDeps.syncPipelineState({
+        property_id,
+        master_owner_id,
+        prospect_id,
+        conversation_item_id: brain_id,
+        offer_item_id: active_offer_item_id,
+        contract_item_id: contract?.contract_item_id || null,
+        notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
+      });
+    } catch (err) {
+      return { ok: false, error: "textgrid_inbound_failed_podio_persistence", error_message: err?.message || "unknown" };
     }
 
-    const underwriting_follow_up = seller_stage_reply?.handled
-      ? {
-          ok: true,
-          queued: false,
-          reason: "suppressed_by_seller_stage_reply",
-        }
-      : await runtimeDeps.maybeQueueUnderwritingFollowUp({
-          inbound_from,
-          underwriting,
-          classification,
-          route,
-          context,
-          message: message_body,
-        });
-
-    const underwriting_offer_ready =
-      underwriting?.strategy?.auto_offer_ready === true ||
-      underwriting?.signals?.underwriting_auto_offer_ready === true ||
-      underwriting_follow_up?.offer_ready === true;
-
-    const maybe_offer =
-      initial_offer?.created ||
-      initial_offer?.existing_offer_item_id ||
-      !underwriting_offer_ready
-        ? initial_offer
-        : await runtimeDeps.maybeCreateOfferFromContext({
-            context,
-            classification,
-            route,
-            message: message_body,
-            notes: message_body,
-            created_by: "Underwriting Offer Engine",
-            respect_underwriting_gate: false,
-          });
-
-    const active_offer_item_id =
-      maybe_offer?.offer?.offer_item_id ||
-      maybe_offer?.existing_offer_item_id ||
-      initial_offer?.offer?.offer_item_id ||
-      initial_offer?.existing_offer_item_id ||
-      existing_offer?.item_id ||
-      null;
-
-    const contract = await runtimeDeps.maybeCreateContractFromAcceptedOffer({
-      offer_item: existing_offer || null,
-      offer_item_id: active_offer_item_id,
-      offer_progress: maybe_offer_progress,
-      context,
-      route,
-      underwriting,
-      notes: message_body,
-      source_message: message_body,
-      auto_send: false,
-      dry_run: false,
-    });
-    const pipeline = await runtimeDeps.syncPipelineState({
-      property_id,
-      master_owner_id,
-      prospect_id,
-      conversation_item_id: brain_id,
-      offer_item_id: active_offer_item_id,
-      contract_item_id: contract?.contract_item_id || null,
-      notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
-    });
+    if (inbound_debug_stage === "after_podio_persistence") {
+      return { ok: true, stage: "after_podio_persistence", pipeline_item_id: pipeline?.pipeline_item_id || null };
+    }
 
     runtimeDeps.info("textgrid.inbound_processed", {
       message_id: extracted.message_id,

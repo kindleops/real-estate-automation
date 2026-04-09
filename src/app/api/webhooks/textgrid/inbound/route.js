@@ -683,7 +683,7 @@ export async function POST(request) {
       })
     );
 
-    const result = await runtimeDeps.handleTextgridInboundImpl(payload);
+    const result = await runtimeDeps.handleTextgridInboundImpl(payload, { inbound_debug_stage });
 
     safeRouteLog(
       "info",
