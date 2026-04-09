@@ -57,15 +57,18 @@ function safeRouteLog(level, event, meta = {}) {
       logFn(event, meta);
     }
   } catch (log_error) {
-    console.error(
-      serializeForConsole({
-        event: `${event}.logger_failed`,
-        log_error_message: log_error?.message || "unknown_logger_error",
-        log_error_stack: log_error?.stack || null,
-        original_event: event,
-        original_level: level,
-      })
-    );
+    // Wrap the catch body so a console.error throw cannot escape safeRouteLog.
+    try {
+      console.error(
+        serializeForConsole({
+          event: `${event}.logger_failed`,
+          log_error_message: log_error?.message || "unknown_logger_error",
+          log_error_stack: log_error?.stack || null,
+          original_event: event,
+          original_level: level,
+        })
+      );
+    } catch {}
   }
 }
 
@@ -186,18 +189,26 @@ export async function POST(request) {
       safe_status = clean(payload?.status) || null;
     } catch {}
 
-    safeRouteLog(
-      "info",
-      "textgrid_inbound.normalized",
-      buildTextgridWebhookLogMeta({
-        payload,
-        webhook_verification,
-        extra: {
-          event: payload.header_event || null,
-          parsed_body_keys,
-        },
-      })
-    );
+    try {
+      safeRouteLog(
+        "info",
+        "textgrid_inbound.normalized",
+        buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+          extra: {
+            event: payload.header_event || null,
+            parsed_body_keys,
+          },
+        })
+      );
+    } catch (error) {
+      console.error("SAFE_ROUTE_LOG_THROW_NORMALIZED", error.message, error.stack);
+      return NextResponse.json(
+        { ok: false, error: "textgrid_inbound_failed_safe_route_log" },
+        { status: 500 }
+      );
+    }
 
     console.log("INBOUND_CHECKPOINT_0");
 
