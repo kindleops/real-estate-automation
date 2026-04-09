@@ -141,40 +141,69 @@ function buildInboundIdempotencyKey(extracted = {}) {
   );
 }
 
+// Logger guards — prevent any logger throw from escaping handler segments.
+function safeInfo(event, meta = {}) {
+  try { runtimeDeps.info(event, meta); } catch {}
+}
+function safeWarn(event, meta = {}) {
+  try { runtimeDeps.warn(event, meta); } catch {}
+}
+
 export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
   const { inbound_debug_stage = null } = opts;
 
+  // ── Earliest possible gate ────────────────────────────────────────────────
+  // If this returns 500 the handler is not being invoked at all; the throw
+  // is in the route between before_handler and the handleTextgridInboundImpl
+  // call (likely safeRouteLog or maybeHandleBuyerTextgridInboundImpl).
+  if (inbound_debug_stage === "handler_entry") {
+    return { ok: true, stage: "handler_entry" };
+  }
+
   // ── SEGMENT: handler_entry ────────────────────────────────────────────────
-  // Synchronous extraction and phone normalisation — isolated so a throw here
-  // produces a named error rather than a generic 500.
   let extracted, inbound_from, inbound_to, message_body;
   try {
     extracted = extractWebhookPayload(payload);
+
+    if (inbound_debug_stage === "after_extract") {
+      return { ok: true, stage: "after_extract", message_id: extracted?.message_id || null };
+    }
+
     inbound_from = runtimeDeps.normalizeInboundTextgridPhone(extracted.from);
+
+    if (inbound_debug_stage === "after_normalize_from") {
+      return { ok: true, stage: "after_normalize_from", inbound_from };
+    }
+
     inbound_to = runtimeDeps.normalizeInboundTextgridPhone(extracted.to);
+
+    if (inbound_debug_stage === "after_normalize_to") {
+      return { ok: true, stage: "after_normalize_to", inbound_from, inbound_to };
+    }
+
     message_body = extracted.body;
 
-    runtimeDeps.info("textgrid.inbound_received", {
+    safeInfo("textgrid.inbound_received", {
       message_id: extracted.message_id,
       inbound_from,
       inbound_to,
       status: extracted.status,
     });
+
+    if (inbound_debug_stage === "after_inbound_received_log") {
+      return { ok: true, stage: "after_inbound_received_log", inbound_from, inbound_to };
+    }
   } catch (err) {
     return { ok: false, error: "textgrid_inbound_failed_handler_entry", error_message: err?.message || "unknown" };
   }
 
-  if (inbound_debug_stage === "handler_entry") {
-    return { ok: true, stage: "handler_entry", inbound_from, inbound_to };
-  }
-
   if (!inbound_from) {
-    runtimeDeps.warn("textgrid.inbound_missing_from", { message_id: extracted.message_id });
+    safeWarn("textgrid.inbound_missing_from", { message_id: extracted.message_id });
     return { ok: false, reason: "missing_inbound_from" };
   }
 
   if (!message_body) {
-    runtimeDeps.warn("textgrid.inbound_empty_body", { message_id: extracted.message_id, inbound_from });
+    safeWarn("textgrid.inbound_empty_body", { message_id: extracted.message_id, inbound_from });
     return { ok: false, reason: "empty_inbound_body" };
   }
 
@@ -209,7 +238,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
   }
 
   if (idempotency.duplicate) {
-    runtimeDeps.info("textgrid.inbound_duplicate_ignored", {
+    safeInfo("textgrid.inbound_duplicate_ignored", {
       message_id: extracted.message_id,
       inbound_from,
       reason: idempotency.reason,
@@ -246,7 +275,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     }
 
     if (!context?.found) {
-      runtimeDeps.warn("textgrid.inbound_context_not_found", {
+      safeWarn("textgrid.inbound_context_not_found", {
         message_id: extracted.message_id,
         inbound_from,
         reason: context?.reason || "unknown",
@@ -339,7 +368,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           reason: "inbound_negative_reply",
         });
 
-        runtimeDeps.info("textgrid.inbound_negative_reply_queue_canceled", {
+        safeInfo("textgrid.inbound_negative_reply_queue_canceled", {
           message_id: extracted.message_id,
           inbound_from,
           master_owner_id,
@@ -538,7 +567,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       return { ok: true, stage: "after_podio_write", pipeline_item_id: pipeline?.pipeline_item_id || null };
     }
 
-    runtimeDeps.info("textgrid.inbound_processed", {
+    safeInfo("textgrid.inbound_processed", {
       message_id: extracted.message_id,
       inbound_from,
       brain_id,
