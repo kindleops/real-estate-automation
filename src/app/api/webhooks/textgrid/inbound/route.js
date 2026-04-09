@@ -71,6 +71,12 @@ export async function GET() {
 }
 
 export async function POST(request) {
+  let log_payload = null;
+  let log_webhook_verification = null;
+  let accepted_logged = false;
+  let downstream_handler_invoked = false;
+  let podio_persistence_attempted = false;
+
   try {
     const raw_body = await request.clone().text().catch(() => "");
     const content_type = clean(request.headers.get("content-type"));
@@ -110,6 +116,8 @@ export async function POST(request) {
       ...verification,
       ...signature_meta,
     };
+    log_payload = payload;
+    log_webhook_verification = webhook_verification;
 
     runtimeDeps.logger.info(
       "textgrid_inbound.normalized",
@@ -119,6 +127,22 @@ export async function POST(request) {
         extra: {
           event: payload.header_event || null,
           parsed_body_keys: Object.keys(body || {}),
+        },
+      })
+    );
+
+    runtimeDeps.logger.info(
+      "textgrid_inbound.signature_branch_selected",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        extra: {
+          signature_invalid: Boolean(verification.required && !verification.ok),
+          will_continue_after_signature_check: !(
+            verification.required &&
+            !verification.ok &&
+            signature_verification_mode === "strict"
+          ),
         },
       })
     );
@@ -202,7 +226,9 @@ export async function POST(request) {
         webhook_verification,
       })
     );
+    accepted_logged = true;
 
+    downstream_handler_invoked = true;
     runtimeDeps.logger.info(
       "textgrid_inbound.handler_started",
       buildTextgridWebhookLogMeta({
@@ -232,6 +258,7 @@ export async function POST(request) {
     );
 
     if (buyer_result?.matched) {
+      podio_persistence_attempted = true;
       runtimeDeps.logger.info("textgrid_inbound.routed_to_buyer_disposition", {
         message_id: payload.message_id || null,
         from: payload.from || null,
@@ -267,6 +294,8 @@ export async function POST(request) {
       );
     }
 
+    downstream_handler_invoked = true;
+    podio_persistence_attempted = true;
     runtimeDeps.logger.info(
       "textgrid_inbound.handler_started",
       buildTextgridWebhookLogMeta({
@@ -314,7 +343,49 @@ export async function POST(request) {
       result,
     });
   } catch (error) {
-    runtimeDeps.logger.error("textgrid_inbound.failed", { error });
+    const error_meta = {
+      error_message: error?.message || "Unknown error",
+      error_stack: error?.stack || null,
+    };
+
+    if (!accepted_logged) {
+      runtimeDeps.logger.error(
+        "textgrid_inbound.failed_before_accept",
+        buildTextgridWebhookLogMeta({
+          payload: log_payload,
+          webhook_verification: log_webhook_verification,
+          downstream_handler_invoked,
+          podio_persistence_attempted,
+          final_response_status: 500,
+          extra: error_meta,
+        })
+      );
+    }
+
+    runtimeDeps.logger.error("textgrid_inbound.failed", {
+      ...buildTextgridWebhookLogMeta({
+        payload: log_payload,
+        webhook_verification: log_webhook_verification,
+        downstream_handler_invoked,
+        podio_persistence_attempted,
+        final_response_status: 500,
+      }),
+      ...error_meta,
+    });
+
+    runtimeDeps.logger.info(
+      "textgrid_inbound.response_sent",
+      buildTextgridWebhookLogMeta({
+        payload: log_payload,
+        webhook_verification: log_webhook_verification,
+        downstream_handler_invoked,
+        podio_persistence_attempted,
+        final_response_status: 500,
+        extra: {
+          response_error: "textgrid_inbound_failed",
+        },
+      })
+    );
 
     return NextResponse.json(
       {

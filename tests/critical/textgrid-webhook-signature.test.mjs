@@ -113,6 +113,12 @@ function setSignatureMode(t, mode) {
   });
 }
 
+function eventIndex(entries, event, predicate = null) {
+  return entries.findIndex(
+    (entry) => entry.event === event && (typeof predicate === "function" ? predicate(entry) : true)
+  );
+}
+
 // ── 1. Valid Twilio-style signature (auth_token) ─────────────────────────
 
 test("verifyTextgridWebhookRequest: accepts valid Twilio-style signature (auth_token)", () => {
@@ -468,6 +474,10 @@ test("handleTextgridDeliveryRequest: strict mode invalid signature → 401 with 
 
   const normalized = entries.find((entry) => entry.event === "textgrid_delivery.normalized");
   assert.ok(normalized, "strict mode should log normalized");
+  const branch = entries.find((entry) => entry.event === "textgrid_delivery.signature_branch_selected");
+  assert.ok(branch, "strict mode should log signature branch");
+  assert.equal(branch.meta.signature_verification_mode, "strict");
+  assert.equal(branch.meta.will_continue_after_signature_check, false);
 
   const warn = entries.find((e) => e.event === "textgrid_delivery.invalid_signature");
   assert.ok(warn, "Should log textgrid_delivery.invalid_signature warning");
@@ -559,6 +569,10 @@ test("handleTextgridDeliveryRequest: observe mode accepts invalid signature and 
 
   const normalized = entries.find((entry) => entry.event === "textgrid_delivery.normalized");
   assert.ok(normalized, "observe mode should log normalized");
+  const branch = entries.find((entry) => entry.event === "textgrid_delivery.signature_branch_selected");
+  assert.ok(branch, "observe mode should log signature branch");
+  assert.equal(branch.meta.signature_verification_mode, "observe");
+  assert.equal(branch.meta.will_continue_after_signature_check, true);
 
   const accepted = entries.find((entry) => entry.event === "textgrid_delivery.accepted");
   assert.ok(accepted, "observe mode should log accepted");
@@ -580,6 +594,14 @@ test("handleTextgridDeliveryRequest: observe mode accepts invalid signature and 
   assert.equal(responseLog.meta.final_response_status, 200);
   assert.equal(responseLog.meta.downstream_handler_invoked, true);
   assert.equal(responseLog.meta.podio_persistence_attempted, true);
+
+  const normalizedIndex = eventIndex(entries, "textgrid_delivery.normalized");
+  const acceptedIndex = eventIndex(entries, "textgrid_delivery.accepted");
+  const startedIndex = eventIndex(entries, "textgrid_delivery.handler_started");
+  const responseIndex = eventIndex(entries, "textgrid_delivery.response_sent");
+  assert.ok(normalizedIndex > -1 && acceptedIndex > normalizedIndex, "accepted should follow normalized");
+  assert.ok(acceptedIndex > -1 && startedIndex > acceptedIndex, "handler_started should follow accepted");
+  assert.ok(responseIndex > startedIndex, "response_sent should follow handler_started");
 });
 
 test("handleTextgridDeliveryRequest: off mode accepts request and skips verification", async (t) => {
@@ -635,6 +657,10 @@ test("handleTextgridDeliveryRequest: off mode accepts request and skips verifica
 
   const normalized = entries.find((entry) => entry.event === "textgrid_delivery.normalized");
   assert.ok(normalized, "off mode should log normalized");
+  const branch = entries.find((entry) => entry.event === "textgrid_delivery.signature_branch_selected");
+  assert.ok(branch, "off mode should log signature branch");
+  assert.equal(branch.meta.signature_verification_mode, "off");
+  assert.equal(branch.meta.will_continue_after_signature_check, true);
 
   const accepted = entries.find((entry) => entry.event === "textgrid_delivery.accepted");
   assert.ok(accepted, "off mode should log accepted");
@@ -705,6 +731,10 @@ test("textgrid inbound route: strict mode rejects invalid signature with 401", a
 
   const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
   assert.ok(normalized, "strict mode should log normalized");
+  const branch = entries.find((entry) => entry.event === "textgrid_inbound.signature_branch_selected");
+  assert.ok(branch, "strict mode should log signature branch");
+  assert.equal(branch.meta.signature_verification_mode, "strict");
+  assert.equal(branch.meta.will_continue_after_signature_check, false);
 
   const warn = entries.find((entry) => entry.event === "textgrid_inbound.invalid_signature");
   assert.ok(warn, "strict mode should log invalid signature");
@@ -793,6 +823,10 @@ test("textgrid inbound route: observe mode accepts invalid signature and continu
 
   const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
   assert.ok(normalized, "observe mode should log normalized");
+  const branch = entries.find((entry) => entry.event === "textgrid_inbound.signature_branch_selected");
+  assert.ok(branch, "observe mode should log signature branch");
+  assert.equal(branch.meta.signature_verification_mode, "observe");
+  assert.equal(branch.meta.will_continue_after_signature_check, true);
 
   const accepted = entries.find((entry) => entry.event === "textgrid_inbound.accepted");
   assert.ok(accepted, "observe mode should log accepted");
@@ -821,6 +855,18 @@ test("textgrid inbound route: observe mode accepts invalid signature and continu
   assert.equal(responseLog.meta.final_response_status, 200);
   assert.equal(responseLog.meta.downstream_handler_invoked, true);
   assert.equal(responseLog.meta.podio_persistence_attempted, true);
+
+  const normalizedIndex = eventIndex(entries, "textgrid_inbound.normalized");
+  const acceptedIndex = eventIndex(entries, "textgrid_inbound.accepted");
+  const startedIndex = eventIndex(
+    entries,
+    "textgrid_inbound.handler_started",
+    (entry) => entry.meta.handler_name === "handleTextgridInbound"
+  );
+  const responseIndex = eventIndex(entries, "textgrid_inbound.response_sent");
+  assert.ok(normalizedIndex > -1 && acceptedIndex > normalizedIndex, "accepted should follow normalized");
+  assert.ok(acceptedIndex > -1 && startedIndex > acceptedIndex, "handler_started should follow accepted");
+  assert.ok(responseIndex > startedIndex, "response_sent should follow handler_started");
 });
 
 test("textgrid inbound route: off mode accepts request and skips verification", async (t) => {
@@ -882,6 +928,10 @@ test("textgrid inbound route: off mode accepts request and skips verification", 
 
   const normalized = entries.find((entry) => entry.event === "textgrid_inbound.normalized");
   assert.ok(normalized, "off mode should log normalized");
+  const branch = entries.find((entry) => entry.event === "textgrid_inbound.signature_branch_selected");
+  assert.ok(branch, "off mode should log signature branch");
+  assert.equal(branch.meta.signature_verification_mode, "off");
+  assert.equal(branch.meta.will_continue_after_signature_check, true);
 
   const accepted = entries.find((entry) => entry.event === "textgrid_inbound.accepted");
   assert.ok(accepted, "off mode should log accepted");
@@ -906,4 +956,130 @@ test("textgrid inbound route: off mode accepts request and skips verification", 
   assert.ok(responseLog, "off mode should log response_sent");
   assert.equal(responseLog.meta.final_response_status, 200);
   assert.equal(responseLog.meta.downstream_handler_invoked, true);
+});
+
+test("handleTextgridDeliveryRequest: failure before accepted emits failed_before_accept", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const entries = [];
+  const logger = {
+    info: (event, meta) => entries.push({ level: "info", event, meta }),
+    warn: (event, meta) => {
+      entries.push({ level: "warn", event, meta });
+      if (event === "textgrid_delivery.invalid_signature") {
+        throw new Error("delivery_pre_accept_failure");
+      }
+    },
+    error: (event, meta) => entries.push({ level: "error", event, meta }),
+  };
+
+  const response = await handleTextgridDeliveryRequest(
+    new Request(DELIVERY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-signature",
+      },
+      body: new URLSearchParams({
+        SmsSid: "SM-delivery-fail-before-accept",
+        MessageStatus: "delivered",
+        From: "+12085550111",
+        To: "+12085550222",
+      }),
+    }),
+    {
+      logger,
+      verifyTextgridWebhookSignatureImpl: (opts) =>
+        verifyTextgridWebhookRequest({
+          ...opts,
+          auth_token: TEST_AUTH_TOKEN,
+          webhook_secret: TEST_WEBHOOK_SECRET,
+        }),
+      handleTextgridDeliveryImpl: async () => ({ ok: true }),
+    }
+  );
+
+  assert.equal(response.status, 500);
+  assert.equal(response.payload.error, "textgrid_delivery_failed");
+  assert.equal(eventIndex(entries, "textgrid_delivery.accepted"), -1);
+
+  const failed = entries.find((entry) => entry.event === "textgrid_delivery.failed_before_accept");
+  assert.ok(failed, "should log failed_before_accept");
+  assert.equal(failed.meta.error_message, "delivery_pre_accept_failure");
+  assert.equal(failed.meta.signature_verification_mode, "observe");
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_delivery.response_sent");
+  assert.ok(responseLog, "should log response_sent on pre-accept failure");
+  assert.equal(responseLog.meta.final_response_status, 500);
+
+  const normalizedIndex = eventIndex(entries, "textgrid_delivery.normalized");
+  const failedIndex = eventIndex(entries, "textgrid_delivery.failed_before_accept");
+  assert.ok(normalizedIndex > -1 && failedIndex > normalizedIndex);
+});
+
+test("textgrid inbound route: failure before accepted emits failed_before_accept", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const entries = [];
+  const logger = {
+    info: (event, meta) => entries.push({ level: "info", event, meta }),
+    warn: (event, meta) => {
+      entries.push({ level: "warn", event, meta });
+      if (event === "textgrid_inbound.invalid_signature") {
+        throw new Error("inbound_pre_accept_failure");
+      }
+    },
+    error: (event, meta) => entries.push({ level: "error", event, meta }),
+  };
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => ({ ok: true, matched: false }),
+    handleTextgridInboundImpl: async () => ({ ok: true }),
+    verifyTextgridWebhookRequestImpl: (opts) =>
+      verifyTextgridWebhookRequest({
+        ...opts,
+        auth_token: TEST_AUTH_TOKEN,
+        webhook_secret: TEST_WEBHOOK_SECRET,
+      }),
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-signature",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-fail-before-accept",
+        From: "+15550001234",
+        To: "+15559876543",
+        Body: "Hello inbound pre accept fail",
+        SmsStatus: "received",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 500);
+  assert.equal(payload.error, "textgrid_inbound_failed");
+  assert.equal(eventIndex(entries, "textgrid_inbound.accepted"), -1);
+
+  const failed = entries.find((entry) => entry.event === "textgrid_inbound.failed_before_accept");
+  assert.ok(failed, "should log failed_before_accept");
+  assert.equal(failed.meta.error_message, "inbound_pre_accept_failure");
+  assert.equal(failed.meta.signature_verification_mode, "observe");
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_inbound.response_sent");
+  assert.ok(responseLog, "should log response_sent on pre-accept failure");
+  assert.equal(responseLog.meta.final_response_status, 500);
+
+  const normalizedIndex = eventIndex(entries, "textgrid_inbound.normalized");
+  const failedIndex = eventIndex(entries, "textgrid_inbound.failed_before_accept");
+  assert.ok(normalizedIndex > -1 && failedIndex > normalizedIndex);
 });

@@ -65,6 +65,12 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
     verifyTextgridWebhookSignatureImpl = verifyTextgridWebhookRequest,
   } = deps;
 
+  let log_payload = null;
+  let log_webhook_verification = null;
+  let accepted_logged = false;
+  let downstream_handler_invoked = false;
+  let podio_persistence_attempted = false;
+
   try {
     const raw_body = await request.clone().text().catch(() => "");
     const content_type = clean(request?.headers?.get("content-type"));
@@ -109,6 +115,8 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
       ...verification,
       ...signature_meta,
     };
+    log_payload = payload;
+    log_webhook_verification = webhook_verification;
 
     logger.info(
       "textgrid_delivery.normalized",
@@ -118,6 +126,22 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
         extra: {
           event: payload.header_event || null,
           parsed_body_keys: Object.keys(body || {}),
+        },
+      })
+    );
+
+    logger.info(
+      "textgrid_delivery.signature_branch_selected",
+      buildTextgridWebhookLogMeta({
+        payload,
+        webhook_verification,
+        extra: {
+          signature_invalid: Boolean(verification.required && !verification.ok),
+          will_continue_after_signature_check: !(
+            verification.required &&
+            !verification.ok &&
+            signature_verification_mode === "strict"
+          ),
         },
       })
     );
@@ -203,7 +227,10 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
         webhook_verification,
       })
     );
+    accepted_logged = true;
 
+    downstream_handler_invoked = true;
+    podio_persistence_attempted = true;
     logger.info(
       "textgrid_delivery.handler_started",
       buildTextgridWebhookLogMeta({
@@ -254,12 +281,49 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
       },
     };
   } catch (error) {
+    const error_meta = {
+      error_message: error?.message || "Unknown error",
+      error_stack: error?.stack || null,
+    };
+
+    if (!accepted_logged) {
+      logger.error(
+        "textgrid_delivery.failed_before_accept",
+        buildTextgridWebhookLogMeta({
+          payload: log_payload,
+          webhook_verification: log_webhook_verification,
+          downstream_handler_invoked,
+          podio_persistence_attempted,
+          final_response_status: 500,
+          extra: error_meta,
+        })
+      );
+    }
+
     logger.error("textgrid_delivery.failed", {
-      error: {
-        message: error?.message || "Unknown error",
-        stack: error?.stack || null,
-      },
+      ...buildTextgridWebhookLogMeta({
+        payload: log_payload,
+        webhook_verification: log_webhook_verification,
+        downstream_handler_invoked,
+        podio_persistence_attempted,
+        final_response_status: 500,
+      }),
+      ...error_meta,
     });
+
+    logger.info(
+      "textgrid_delivery.response_sent",
+      buildTextgridWebhookLogMeta({
+        payload: log_payload,
+        webhook_verification: log_webhook_verification,
+        downstream_handler_invoked,
+        podio_persistence_attempted,
+        final_response_status: 500,
+        extra: {
+          response_error: "textgrid_delivery_failed",
+        },
+      })
+    );
 
     return {
       status: 500,
