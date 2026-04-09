@@ -210,52 +210,17 @@ export async function POST(request) {
       );
     }
 
-    console.log("INBOUND_CHECKPOINT_0");
+    const inbound_debug_stage = request.headers.get("x-inbound-debug-stage");
+
+    if (inbound_debug_stage === "after_normalized") {
+      return NextResponse.json({ ok: true, stage: "after_normalized" });
+    }
+
+    if (inbound_debug_stage === "after_checkpoint_0") {
+      return NextResponse.json({ ok: true, stage: "after_checkpoint_0" });
+    }
 
     try {
-      try {
-        console.log("INBOUND_CP_0");
-        console.log("INBOUND_CP_1A");
-        console.log(
-          "INBOUND_CHECKPOINT_1",
-          serializeForConsole({
-            message_id: safe_message_id,
-            from: safe_from,
-            to: safe_to,
-            parsed_body_keys,
-            signature_verification_mode: safe_signature_verification_mode,
-            next_statement: "build_checkpoint_base",
-          })
-        );
-        console.log("INBOUND_CP_1B");
-        console.log("INBOUND_CP_2A");
-        try {
-          runtimeDeps.logger.info("INBOUND_CHECKPOINT_1", {
-            message_id: safe_message_id,
-            from: safe_from,
-            to: safe_to,
-            parsed_body_keys,
-            signature_verification_mode: safe_signature_verification_mode,
-            next_statement: "build_checkpoint_base",
-          });
-        } catch (log_error) {
-          console.error(
-            "INBOUND_CHECKPOINT_1_LOGGER_FAILED",
-            serializeForConsole({
-              log_error_message: log_error?.message || "unknown_logger_error",
-              log_error_stack: log_error?.stack || null,
-            })
-          );
-        }
-        console.log("INBOUND_CP_2B");
-      } catch (early_err) {
-        console.error("INBOUND_PRE_ACCEPT_THROW", early_err.message, early_err.stack);
-        return NextResponse.json(
-          { ok: false, error: "textgrid_inbound_failed_pre_accept_early" },
-          { status: 500 }
-        );
-      }
-
       const checkpoint_base = {
         message_id: safe_message_id,
         from: safe_from,
@@ -263,6 +228,10 @@ export async function POST(request) {
         parsed_body_keys,
         signature_verification_mode: safe_signature_verification_mode,
       };
+
+      if (inbound_debug_stage === "after_checkpoint_base") {
+        return NextResponse.json({ ok: true, stage: "after_checkpoint_base" });
+      }
 
       console.log(
         "INBOUND_CHECKPOINT_2",
@@ -287,6 +256,10 @@ export async function POST(request) {
       }
 
       const signature_invalid = Boolean(verification.required && !verification.ok);
+
+      if (inbound_debug_stage === "after_signature_invalid") {
+        return NextResponse.json({ ok: true, stage: "after_signature_invalid" });
+      }
 
       console.log(
         "INBOUND_CHECKPOINT_3",
