@@ -384,6 +384,8 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
   const outboundEvent = createPodioItem(801, {
     "trigger-name": textField("queue-send:123"),
     "message-id": textField("provider-1"),
+    "processed-by": categoryField("Scheduled Campaign"),
+    "source-app": categoryField("Send Queue"),
     "ai-output": textField(
       JSON.stringify({
         queue_item_id: 123,
@@ -452,6 +454,8 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
   assert.equal(queueUpdates.length, 1);
   assert.equal(deliveryEventCount, 1);
   assert.equal(deliveryLogPayloads[0].conversation_item_id, 701);
+  assert.equal(deliveryLogPayloads[0].processed_by, "Scheduled Campaign");
+  assert.equal(deliveryLogPayloads[0].source_app, "Send Queue");
   assert.equal(eventStatusUpdateCount, 1);
   assert.equal(brainDeliveryUpdateCount, 1);
 });
@@ -637,7 +641,7 @@ test("delivery webhook normalizes raw TextGrid delivered callbacks and confirms 
   assert.equal(queueUpdates.length, 1);
   assert.equal(queueUpdates[0].item_id, 123);
   assert.equal(queueUpdates[0].payload["delivery-confirmed"], "✅ Confirmed");
-  assert.equal(queueUpdates[0].payload["queue-status"], "Sent");
+  assert.equal(queueUpdates[0].payload["queue-status"], "Delivered");
 });
 
 test("delivery webhook suppresses future outreach on hard-bounce destination failures", async () => {

@@ -80,8 +80,8 @@ export async function logDeliveryEvent({
   phone_item_id = null,
   textgrid_number_item_id = null,
   conversation_item_id = null,
-  processed_by = "Delivery Webhook",
-  source_app = "TextGrid",
+  processed_by = "Scheduled Campaign",
+  source_app = "External API",
   trigger_name = "textgrid-delivery",
 } = {}) {
   const normalized_status = normalizeDeliveryStatus(delivery_status || raw_carrier_status);

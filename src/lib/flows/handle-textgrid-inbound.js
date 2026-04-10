@@ -358,8 +358,8 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         provider_message_id: extracted.message_id,
         raw_carrier_status: extracted.status || "received",
         received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
-        processed_by: "Inbound Webhook",
-        source_app: "TextGrid",
+        processed_by: "Manual Sender",
+        source_app: "External API",
         trigger_name: "textgrid-inbound",
       });
     } catch (err) {

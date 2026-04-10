@@ -56,6 +56,8 @@ const EVENT_FIELDS = {
   master_owner: "master-owner",
   prospect: "linked-seller",
   conversation: "conversation",
+  processed_by: "processed-by",
+  source_app: "source-app",
 };
 
 const defaultDeps = {
@@ -808,6 +810,12 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
         runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.textgrid_number, null) ||
         runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.textgrid_number, null),
       conversation_item_id: primary_brain_id,
+      processed_by:
+        runtimeDeps.getCategoryValue(primary_event, EVENT_FIELDS.processed_by, null) ||
+        "Scheduled Campaign",
+      source_app:
+        runtimeDeps.getCategoryValue(primary_event, EVENT_FIELDS.source_app, null) ||
+        "External API",
       trigger_name:
         primary_queue_item?.item_id
           ? `textgrid-delivery:${primary_queue_item.item_id}`

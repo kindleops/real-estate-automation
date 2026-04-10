@@ -38,8 +38,8 @@ export async function logInboundMessageEvent({
   provider_message_id = null,
   raw_carrier_status = "received",
   received_at = null,
-  processed_by = "Inbound Webhook",
-  source_app = "TextGrid",
+  processed_by = "Manual Sender",
+  source_app = "External API",
   trigger_name = "textgrid-inbound",
 } = {}) {
   const ai_route = getCategoryValue(brain_item, "ai-route", null);
