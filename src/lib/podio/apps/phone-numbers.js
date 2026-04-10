@@ -15,6 +15,15 @@ const logger = child({
   app_id: APP_ID,
 });
 
+const defaultDeps = {
+  getItem,
+  updateItem,
+  filterAppItems,
+  logger,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
 export const PHONE_FIELDS = {
   phone_full_name: "phone-full-name",
   phone_first_name: "phone-first-name",
@@ -37,16 +46,24 @@ export const PHONE_FIELDS = {
   engagement_tier: "engagement-tier",
 };
 
+export function __setPhoneNumbersTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetPhoneNumbersTestDeps() {
+  runtimeDeps = { ...defaultDeps };
+}
+
 export async function getPhoneNumberItem(item_id) {
-  return getItem(item_id);
+  return runtimeDeps.getItem(item_id);
 }
 
 export async function updatePhoneNumberItem(item_id, fields = {}, revision = null) {
-  return updateItem(item_id, fields, revision);
+  return runtimeDeps.updateItem(item_id, fields, revision);
 }
 
 export async function findPhoneNumbers(filters = {}, limit = 30, offset = 0) {
-  return filterAppItems(APP_ID, filters, { limit, offset });
+  return runtimeDeps.filterAppItems(APP_ID, filters, { limit, offset });
 }
 
 function digitsOnly(value) {
@@ -54,7 +71,13 @@ function digitsOnly(value) {
 }
 
 function shouldDebugPhoneLookup(field, value) {
-  if (field !== PHONE_FIELDS.phone_hidden) return false;
+  if (
+    field !== PHONE_FIELDS.phone_hidden &&
+    field !== PHONE_FIELDS.canonical_e164 &&
+    field !== PHONE_FIELDS.phone
+  ) {
+    return false;
+  }
   return digitsOnly(value) === DEBUG_PHONE_LOOKUP_TARGET;
 }
 
@@ -65,22 +88,24 @@ function toPodioRichTextParagraph(value) {
   return `<p>${text}</p>`;
 }
 
-async function findFirstPhoneByTextField(field, raw) {
-  const normalized = String(raw ?? "").trim();
-  if (!normalized) return null;
+function uniqueLookupAttempts(attempts = []) {
+  return attempts.filter((attempt, index, all) => {
+    const value = String(attempt?.value ?? "").trim();
+    if (!value) return false;
+    return all.findIndex((other) => String(other?.value ?? "").trim() === value) === index;
+  });
+}
 
-  const attempts = [
-    { label: "plain_text", value: normalized },
-    { label: "rich_text_html", value: toPodioRichTextParagraph(normalized) },
-  ].filter((attempt, index, all) => all.findIndex((other) => other.value === attempt.value) === index);
+async function findFirstPhoneByFieldAttempts(field, attempts = [], raw = null) {
+  const normalized_attempts = uniqueLookupAttempts(attempts);
 
-  for (const attempt of attempts) {
+  for (const attempt of normalized_attempts) {
     const filters = { [field]: attempt.value };
-    const response = await filterAppItems(APP_ID, filters, { limit: 1, offset: 0 });
+    const response = await runtimeDeps.filterAppItems(APP_ID, filters, { limit: 1, offset: 0 });
     const item = response?.items?.[0] ?? null;
 
     if (shouldDebugPhoneLookup(field, raw)) {
-      logger.info("phone_lookup.audit_filter_attempt", {
+      runtimeDeps.logger.info("phone_lookup.audit_filter_attempt", {
         field,
         raw,
         attempt: attempt.label,
@@ -101,6 +126,43 @@ async function findFirstPhoneByTextField(field, raw) {
   }
 
   return null;
+}
+
+async function findFirstPhoneByTextField(field, raw) {
+  const normalized = String(raw ?? "").trim();
+  if (!normalized) return null;
+
+  return findFirstPhoneByFieldAttempts(
+    field,
+    [
+      { label: "plain_text", value: normalized },
+      { label: "rich_text_html", value: toPodioRichTextParagraph(normalized) },
+    ],
+    raw
+  );
+}
+
+function formatUsPhoneNational(d10) {
+  if (String(d10 ?? "").length !== 10) return "";
+  return `(${d10.slice(0, 3)}) ${d10.slice(3, 6)}-${d10.slice(6)}`;
+}
+
+export async function findPhoneByRawPhoneField(raw) {
+  const trimmed = String(raw ?? "").trim();
+  const d10 = normalizeUsPhone10(trimmed);
+  const canonical_e164 = toCanonicalUsE164(d10);
+
+  return findFirstPhoneByFieldAttempts(
+    PHONE_FIELDS.phone,
+    [
+      { label: "raw_input", value: trimmed },
+      { label: "digits_10", value: d10 },
+      { label: "digits_11", value: d10 ? `1${d10}` : "" },
+      { label: "canonical_e164", value: canonical_e164 },
+      { label: "national_format", value: formatUsPhoneNational(d10) },
+    ],
+    raw
+  );
 }
 
 export async function findPhoneByHiddenNumber(raw) {
@@ -126,17 +188,21 @@ export async function findPhoneRecord(raw_phone) {
   return (
     (await findPhoneByHiddenNumber(d10)) ??
     (await findPhoneByCanonicalE164(canonical_e164)) ??
-    (await findPhoneByCanonicalE164(d10))
+    (await findPhoneByCanonicalE164(d10)) ??
+    (await findPhoneByRawPhoneField(raw_phone))
   );
 }
 
 export default {
   APP_ID,
   PHONE_FIELDS,
+  __setPhoneNumbersTestDeps,
+  __resetPhoneNumbersTestDeps,
   getPhoneNumberItem,
   updatePhoneNumberItem,
   findPhoneNumbers,
   findPhoneByHiddenNumber,
   findPhoneByCanonicalE164,
+  findPhoneByRawPhoneField,
   findPhoneRecord,
 };
