@@ -3,6 +3,7 @@ import { loadContext } from "@/lib/domain/context/load-context.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { normalizeInboundTextgridPhone } from "@/lib/providers/textgrid.js";
+import { getPodioRetryAfterSeconds, isPodioRateLimitError } from "@/lib/providers/podio.js";
 import { logInboundMessageEvent } from "@/lib/domain/events/log-inbound-message-event.js";
 import { updateBrainAfterInbound } from "@/lib/domain/brain/update-brain-after-inbound.js";
 import { updateBrainStage } from "@/lib/domain/brain/update-brain-stage.js";
@@ -68,6 +69,26 @@ export function __resetTextgridInboundTestDeps() {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function buildInboundStepFailure(error, err) {
+  const podio_rate_limit = isPodioRateLimitError(err);
+  return {
+    ok: false,
+    error,
+    error_message: err?.message || "unknown",
+    retryable: podio_rate_limit,
+    podio_rate_limit,
+    retry_after_seconds: podio_rate_limit ? getPodioRetryAfterSeconds(err, null) : null,
+    retry_after_at: podio_rate_limit
+      ? clean(
+          err?.retry_after_at ||
+            err?.cooldown_until ||
+            err?.response?.data?.retry_after_at ||
+            err?.response?.data?.cooldown_until
+        ) || null
+      : null,
+  };
 }
 
 function extractWebhookPayload(payload = {}) {
@@ -223,7 +244,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       },
     });
   } catch (err) {
-    return { ok: false, error: "textgrid_inbound_failed_message_event_lookup", error_message: err?.message || "unknown" };
+    return buildInboundStepFailure("textgrid_inbound_failed_message_event_lookup", err);
   }
 
   if (!idempotency.ok) {
@@ -269,7 +290,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         create_brain_if_missing: true,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_brain_lookup", error_message: err?.message || "unknown" };
+      return buildInboundStepFailure("textgrid_inbound_failed_brain_lookup", err);
     }
 
     if (!context?.found) {
@@ -342,7 +363,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         trigger_name: "textgrid-inbound",
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_message_event_create", error_message: err?.message || "unknown" };
+      return buildInboundStepFailure("textgrid_inbound_failed_message_event_create", err);
     }
 
     if (inbound_debug_stage === "after_message_event_create") {
@@ -383,7 +404,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         message: message_body,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_conversation_resolution", error_message: err?.message || "unknown" };
+      return buildInboundStepFailure("textgrid_inbound_failed_conversation_resolution", err);
     }
 
     if (inbound_debug_stage === "after_conversation_resolution") {
@@ -415,7 +436,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           : Promise.resolve({ ok: false, reason: "missing_seller_profile" }),
       ]);
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_prospect_resolution", error_message: err?.message || "unknown" };
+      return buildInboundStepFailure("textgrid_inbound_failed_prospect_resolution", err);
     }
 
     if (inbound_debug_stage === "after_prospect_resolution") {
@@ -432,7 +453,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         property_id,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_market_resolution", error_message: err?.message || "unknown" };
+      return buildInboundStepFailure("textgrid_inbound_failed_market_resolution", err);
     }
 
     if (inbound_debug_stage === "after_market_resolution") {
@@ -558,7 +579,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
       });
     } catch (err) {
-      return { ok: false, error: "textgrid_inbound_failed_podio_write", error_message: err?.message || "unknown" };
+      return buildInboundStepFailure("textgrid_inbound_failed_podio_write", err);
     }
 
     if (inbound_debug_stage === "after_podio_write") {

@@ -831,6 +831,13 @@ export async function POST(request) {
       })
     );
 
+    const main_handler_response_status = result?.retryable ? 503 : 200;
+    const response_headers = {};
+    const retry_after_seconds = Number(result?.retry_after_seconds);
+    if (Number.isFinite(retry_after_seconds) && retry_after_seconds > 0) {
+      response_headers["Retry-After"] = String(Math.max(1, Math.ceil(retry_after_seconds)));
+    }
+
     safeRouteLog(
       "info",
       "textgrid_inbound.response_sent",
@@ -839,21 +846,30 @@ export async function POST(request) {
         webhook_verification,
         downstream_handler_invoked: true,
         podio_persistence_attempted: true,
-        final_response_status: 200,
+        final_response_status: main_handler_response_status,
         extra: {
           buyer_handler_failed,
           buyer_handler_error_message,
+          retryable: Boolean(result?.retryable),
+          retry_after_seconds: response_headers["Retry-After"] || null,
+          retry_after_at: result?.retry_after_at || null,
         },
       })
     );
 
-    return NextResponse.json({
-      ok: result?.ok !== false,
-      route: "webhooks/textgrid/inbound",
-      verification: webhook_verification,
-      buyer_handler_failed,
-      result,
-    });
+    return NextResponse.json(
+      {
+        ok: result?.ok !== false,
+        route: "webhooks/textgrid/inbound",
+        verification: webhook_verification,
+        buyer_handler_failed,
+        result,
+      },
+      {
+        status: main_handler_response_status,
+        headers: response_headers,
+      }
+    );
   } catch (error) {
     const failure_meta = {
       message_id: safe_message_id,

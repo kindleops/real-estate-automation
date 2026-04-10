@@ -1202,6 +1202,73 @@ test("textgrid inbound route: buyer handler failure does not block main inbound 
   assert.equal(responseLog.meta.buyer_handler_failed, true);
 });
 
+test("textgrid inbound route: retryable main handler failure returns 503 with retry-after", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const { entries, logger } = makeLogger();
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => ({ ok: true, matched: false }),
+    handleTextgridInboundImpl: async () => ({
+      ok: false,
+      error: "textgrid_inbound_failed_message_event_lookup",
+      error_message: "Podio cooldown active until 2026-04-10T06:11:22.114Z",
+      retryable: true,
+      retry_after_seconds: 1800,
+      retry_after_at: "2026-04-10T06:11:22.114Z",
+      podio_rate_limit: true,
+    }),
+    verifyTextgridWebhookRequestImpl: (opts) =>
+      verifyTextgridWebhookRequest({
+        ...opts,
+        auth_token: TEST_AUTH_TOKEN,
+        webhook_secret: TEST_WEBHOOK_SECRET,
+      }),
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-retryable-main-handler",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-retryable-main-handler-1",
+        SmsSid: "SM-inbound-retryable-main-handler-1",
+        MessageSid: "SM-inbound-retryable-main-handler-1",
+        From: "+16127433952",
+        To: "+14693131600",
+        Body: "Manual real context probe retryable main handler",
+        SmsStatus: "received",
+        AccountSid: "AC-PROBE",
+        ApiVersion: "2010-04-01",
+        NumMedia: "0",
+        NumSegments: "1",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Retry-After"), "1800");
+  assert.equal(payload.ok, false);
+  assert.equal(payload.result?.retryable, true);
+  assert.equal(payload.result?.retry_after_at, "2026-04-10T06:11:22.114Z");
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_inbound.response_sent");
+  assert.ok(responseLog, "should log response_sent for retryable main handler failure");
+  assert.equal(responseLog.meta.final_response_status, 503);
+  assert.equal(responseLog.meta.retryable, true);
+  assert.equal(responseLog.meta.retry_after_seconds, "1800");
+  assert.equal(responseLog.meta.retry_after_at, "2026-04-10T06:11:22.114Z");
+});
+
 test("handleTextgridDeliveryRequest: failure before accepted emits failed_before_accept", async (t) => {
   setSignatureMode(t, "observe");
 
