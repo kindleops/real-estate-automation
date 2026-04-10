@@ -152,49 +152,47 @@ function safeWarn(event, meta = {}) {
 export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
   const { inbound_debug_stage = null } = opts;
 
-  // ── Earliest possible gate ────────────────────────────────────────────────
-  // If this returns 500 the handler is not being invoked at all; the throw
-  // is in the route between before_handler and the handleTextgridInboundImpl
-  // call (likely safeRouteLog or maybeHandleBuyerTextgridInboundImpl).
   if (inbound_debug_stage === "handler_entry") {
     return { ok: true, stage: "handler_entry" };
   }
 
-  // ── SEGMENT: handler_entry ────────────────────────────────────────────────
   let extracted, inbound_from, inbound_to, message_body;
   try {
     extracted = extractWebhookPayload(payload);
-
     if (inbound_debug_stage === "after_extract") {
-      return { ok: true, stage: "after_extract", message_id: extracted?.message_id || null };
+      return { ok: true, stage: "after_extract" };
     }
 
     inbound_from = runtimeDeps.normalizeInboundTextgridPhone(extracted.from);
-
     if (inbound_debug_stage === "after_normalize_from") {
-      return { ok: true, stage: "after_normalize_from", inbound_from };
+      return { ok: true, stage: "after_normalize_from" };
     }
 
     inbound_to = runtimeDeps.normalizeInboundTextgridPhone(extracted.to);
-
     if (inbound_debug_stage === "after_normalize_to") {
-      return { ok: true, stage: "after_normalize_to", inbound_from, inbound_to };
+      return { ok: true, stage: "after_normalize_to" };
     }
 
     message_body = extracted.body;
 
-    safeInfo("textgrid.inbound_received", {
-      message_id: extracted.message_id,
-      inbound_from,
-      inbound_to,
-      status: extracted.status,
-    });
+    try {
+      runtimeDeps.info("textgrid.inbound_received", {
+        message_id: extracted.message_id,
+        inbound_from,
+        inbound_to,
+        body_preview: String(message_body || "").slice(0, 120),
+      });
+    } catch {}
 
     if (inbound_debug_stage === "after_inbound_received_log") {
-      return { ok: true, stage: "after_inbound_received_log", inbound_from, inbound_to };
+      return { ok: true, stage: "after_inbound_received_log" };
     }
-  } catch (err) {
-    return { ok: false, error: "textgrid_inbound_failed_handler_entry", error_message: err?.message || "unknown" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: "textgrid_inbound_failed_handler_entry",
+      detail: error?.message || "unknown_handler_entry_error",
+    };
   }
 
   if (!inbound_from) {
