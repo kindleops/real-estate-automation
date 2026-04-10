@@ -72,6 +72,25 @@ function safeRouteLog(level, event, meta = {}) {
   }
 }
 
+function isMainInboundHandlerDebugStage(stage = null) {
+  return [
+    "handler_entry",
+    "after_extract",
+    "after_normalize_from",
+    "after_normalize_to",
+    "after_inbound_received_log",
+    "after_message_event_lookup",
+    "after_brain_lookup",
+    "after_phone_resolution",
+    "after_message_event_create",
+    "after_conversation_resolution",
+    "after_prospect_resolution",
+    "after_market_resolution",
+    "after_podio_write",
+    "handler_exit",
+  ].includes(clean(stage));
+}
+
 async function parseRequestBody(request) {
   const contentType = clean(request.headers.get("content-type")).toLowerCase();
 
@@ -221,6 +240,36 @@ export async function POST(request) {
     }
 
     try {
+      console.log(
+        "INBOUND_CHECKPOINT_1",
+        serializeForConsole({
+          message_id: safe_message_id,
+          from: safe_from,
+          to: safe_to,
+          parsed_body_keys,
+          signature_verification_mode: safe_signature_verification_mode,
+          next_statement: "build_checkpoint_base",
+        })
+      );
+      try {
+        runtimeDeps.logger.info("INBOUND_CHECKPOINT_1", {
+          message_id: safe_message_id,
+          from: safe_from,
+          to: safe_to,
+          parsed_body_keys,
+          signature_verification_mode: safe_signature_verification_mode,
+          next_statement: "build_checkpoint_base",
+        });
+      } catch (log_error) {
+        console.error(
+          "INBOUND_CHECKPOINT_1_LOGGER_FAILED",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+
       const checkpoint_base = {
         message_id: safe_message_id,
         from: safe_from,
@@ -594,42 +643,110 @@ export async function POST(request) {
       return NextResponse.json({ ok: true, stage: "before_handler" });
     }
 
-    downstream_handler_invoked = true;
-    safeRouteLog(
-      "info",
-      "textgrid_inbound.handler_started",
-      buildTextgridWebhookLogMeta({
+    const bypass_buyer_handler_for_debug = isMainInboundHandlerDebugStage(inbound_debug_stage);
+
+    if (bypass_buyer_handler_for_debug) {
+      const bypass_meta = buildTextgridWebhookLogMeta({
         payload,
         webhook_verification,
-        downstream_handler_invoked: true,
+        downstream_handler_invoked: false,
+        podio_persistence_attempted: false,
         extra: {
-          handler_name: "maybeHandleBuyerTextgridInbound",
+          inbound_debug_stage,
+          buyer_handler_bypassed_for_debug: true,
         },
-      })
-    );
+      });
+      console.log(
+        "textgrid_inbound.buyer_handler_bypassed_for_debug",
+        serializeForConsole(bypass_meta)
+      );
+      try {
+        runtimeDeps.logger.info("textgrid_inbound.buyer_handler_bypassed_for_debug", bypass_meta);
+      } catch (log_error) {
+        console.error(
+          "textgrid_inbound.buyer_handler_bypassed_for_debug.logger_failed",
+          serializeForConsole({
+            log_error_message: log_error?.message || "unknown_logger_error",
+            log_error_stack: log_error?.stack || null,
+          })
+        );
+      }
+    }
 
-    const buyer_result = await runtimeDeps.maybeHandleBuyerTextgridInboundImpl(payload);
+    let buyer_result = { ok: true, matched: false, reason: "buyer_handler_not_invoked" };
+
+    if (!bypass_buyer_handler_for_debug) {
+      downstream_handler_invoked = true;
+      safeRouteLog(
+        "info",
+        "textgrid_inbound.handler_started",
+        buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+          downstream_handler_invoked: true,
+          extra: {
+            handler_name: "maybeHandleBuyerTextgridInbound",
+          },
+        })
+      );
+
+      try {
+        buyer_result = await runtimeDeps.maybeHandleBuyerTextgridInboundImpl(payload);
+      } catch (error) {
+        const buyer_error_meta = buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+          downstream_handler_invoked: true,
+          podio_persistence_attempted: false,
+          final_response_status: 500,
+          extra: {
+            handler_name: "maybeHandleBuyerTextgridInbound",
+            error_message: error?.message || "Unknown error",
+            error_stack: error?.stack || null,
+            inbound_debug_stage,
+          },
+        });
+        console.error(
+          "textgrid_inbound.buyer_handler_failed",
+          serializeForConsole(buyer_error_meta)
+        );
+        try {
+          runtimeDeps.logger.error("textgrid_inbound.buyer_handler_failed", buyer_error_meta);
+        } catch (log_error) {
+          console.error(
+            "textgrid_inbound.buyer_handler_failed.logger_failed",
+            serializeForConsole({
+              log_error_message: log_error?.message || "unknown_logger_error",
+              log_error_stack: log_error?.stack || null,
+            })
+          );
+        }
+        throw error;
+      }
+    }
 
     if (inbound_debug_stage === "after_handler") {
       return NextResponse.json({ ok: true, stage: "after_handler", buyer_matched: Boolean(buyer_result?.matched) });
     }
 
-    safeRouteLog(
-      "info",
-      "textgrid_inbound.handler_completed",
-      buildTextgridWebhookLogMeta({
-        payload,
-        webhook_verification,
-        downstream_handler_invoked: true,
-        podio_persistence_attempted: Boolean(buyer_result?.matched),
-        extra: {
-          handler_name: "maybeHandleBuyerTextgridInbound",
-          buyer_disposition_matched: Boolean(buyer_result?.matched),
-        },
-      })
-    );
+    if (!bypass_buyer_handler_for_debug) {
+      safeRouteLog(
+        "info",
+        "textgrid_inbound.handler_completed",
+        buildTextgridWebhookLogMeta({
+          payload,
+          webhook_verification,
+          downstream_handler_invoked: true,
+          podio_persistence_attempted: Boolean(buyer_result?.matched),
+          extra: {
+            handler_name: "maybeHandleBuyerTextgridInbound",
+            buyer_disposition_matched: Boolean(buyer_result?.matched),
+          },
+        })
+      );
+    }
 
-    if (buyer_result?.matched) {
+    if (!bypass_buyer_handler_for_debug && buyer_result?.matched) {
       podio_persistence_attempted = true;
       safeRouteLog("info", "textgrid_inbound.routed_to_buyer_disposition", {
         message_id: payload.message_id || null,

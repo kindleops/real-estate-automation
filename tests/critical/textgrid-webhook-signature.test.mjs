@@ -1051,6 +1051,79 @@ test("textgrid inbound route: real-style form payload in observe mode reaches ac
   assert.ok(responseIndex > startedIndex, "real-style payload should log response_sent");
 });
 
+test("textgrid inbound route: handler debug stage bypasses buyer handler and reaches main handler", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const { entries, logger } = makeLogger();
+  let buyer_handler_called = false;
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => {
+      buyer_handler_called = true;
+      throw new Error("buyer_handler_should_be_bypassed");
+    },
+    handleTextgridInboundImpl: async (_payload, opts = {}) => ({
+      ok: true,
+      stage: opts.inbound_debug_stage || null,
+    }),
+    verifyTextgridWebhookRequestImpl: (opts) =>
+      verifyTextgridWebhookRequest({
+        ...opts,
+        auth_token: TEST_AUTH_TOKEN,
+        webhook_secret: TEST_WEBHOOK_SECRET,
+      }),
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-handler-entry",
+        "x-inbound-debug-stage": "handler_entry",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-handler-entry-1",
+        SmsSid: "SM-inbound-handler-entry-1",
+        MessageSid: "SM-inbound-handler-entry-1",
+        From: "+16127433952",
+        To: "+14693131600",
+        Body: "Manual real context probe handler entry",
+        SmsStatus: "received",
+        AccountSid: "AC-PROBE",
+        ApiVersion: "2010-04-01",
+        NumMedia: "0",
+        NumSegments: "1",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.result?.stage, "handler_entry");
+  assert.equal(buyer_handler_called, false, "buyer handler should be bypassed for main-handler debug stages");
+
+  const bypassLog = entries.find(
+    (entry) => entry.event === "textgrid_inbound.buyer_handler_bypassed_for_debug"
+  );
+  assert.ok(bypassLog, "should log buyer-handler bypass for debug");
+  assert.equal(bypassLog.meta.inbound_debug_stage, "handler_entry");
+  assert.equal(bypassLog.meta.buyer_handler_bypassed_for_debug, true);
+
+  const mainHandlerStarted = entries.find(
+    (entry) =>
+      entry.event === "textgrid_inbound.handler_started" &&
+      entry.meta.handler_name === "handleTextgridInbound"
+  );
+  assert.ok(mainHandlerStarted, "should invoke main inbound handler for handler_entry debug stage");
+});
+
 test("handleTextgridDeliveryRequest: failure before accepted emits failed_before_accept", async (t) => {
   setSignatureMode(t, "observe");
 
