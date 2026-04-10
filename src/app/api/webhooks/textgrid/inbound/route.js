@@ -230,6 +230,8 @@ export async function POST(request) {
     }
 
     const inbound_debug_stage = request.headers.get("x-inbound-debug-stage");
+    let buyer_handler_failed = false;
+    let buyer_handler_error_message = null;
 
     if (inbound_debug_stage === "after_normalized") {
       return NextResponse.json({ ok: true, stage: "after_normalized" });
@@ -693,6 +695,8 @@ export async function POST(request) {
       try {
         buyer_result = await runtimeDeps.maybeHandleBuyerTextgridInboundImpl(payload);
       } catch (error) {
+        buyer_handler_failed = true;
+        buyer_handler_error_message = error?.message || "Unknown error";
         const buyer_error_meta = buildTextgridWebhookLogMeta({
           payload,
           webhook_verification,
@@ -704,6 +708,7 @@ export async function POST(request) {
             error_message: error?.message || "Unknown error",
             error_stack: error?.stack || null,
             inbound_debug_stage,
+            will_continue_to_main_handler: true,
           },
         });
         console.error(
@@ -721,7 +726,12 @@ export async function POST(request) {
             })
           );
         }
-        throw error;
+        buyer_result = {
+          ok: false,
+          matched: false,
+          reason: "buyer_handler_failed",
+          error_message: error?.message || "Unknown error",
+        };
       }
     }
 
@@ -796,6 +806,8 @@ export async function POST(request) {
         podio_persistence_attempted: true,
         extra: {
           handler_name: "handleTextgridInbound",
+          buyer_handler_failed,
+          buyer_handler_error_message,
         },
       })
     );
@@ -813,6 +825,8 @@ export async function POST(request) {
         extra: {
           handler_name: "handleTextgridInbound",
           handler_ok: result?.ok !== false,
+          buyer_handler_failed,
+          buyer_handler_error_message,
         },
       })
     );
@@ -826,6 +840,10 @@ export async function POST(request) {
         downstream_handler_invoked: true,
         podio_persistence_attempted: true,
         final_response_status: 200,
+        extra: {
+          buyer_handler_failed,
+          buyer_handler_error_message,
+        },
       })
     );
 
@@ -833,6 +851,7 @@ export async function POST(request) {
       ok: result?.ok !== false,
       route: "webhooks/textgrid/inbound",
       verification: webhook_verification,
+      buyer_handler_failed,
       result,
     });
   } catch (error) {

@@ -1124,6 +1124,84 @@ test("textgrid inbound route: handler debug stage bypasses buyer handler and rea
   assert.ok(mainHandlerStarted, "should invoke main inbound handler for handler_entry debug stage");
 });
 
+test("textgrid inbound route: buyer handler failure does not block main inbound handler", async (t) => {
+  setSignatureMode(t, "observe");
+
+  const { entries, logger } = makeLogger();
+  let main_handler_called = false;
+
+  __setTextgridInboundRouteTestDeps({
+    logger,
+    maybeHandleBuyerTextgridInboundImpl: async () => {
+      throw new Error("buyer_handler_runtime_failure");
+    },
+    handleTextgridInboundImpl: async (payload) => {
+      main_handler_called = true;
+      return { ok: true, message_id: payload.message_id };
+    },
+    verifyTextgridWebhookRequestImpl: (opts) =>
+      verifyTextgridWebhookRequest({
+        ...opts,
+        auth_token: TEST_AUTH_TOKEN,
+        webhook_secret: TEST_WEBHOOK_SECRET,
+      }),
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+  });
+
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-textgrid-signature": "observe-mode-invalid-buyer-soft-fail",
+      },
+      body: new URLSearchParams({
+        SmsMessageSid: "SM-inbound-buyer-soft-fail-1",
+        SmsSid: "SM-inbound-buyer-soft-fail-1",
+        MessageSid: "SM-inbound-buyer-soft-fail-1",
+        From: "+16127433952",
+        To: "+14693131600",
+        Body: "Manual real context probe buyer soft fail",
+        SmsStatus: "received",
+        AccountSid: "AC-PROBE",
+        ApiVersion: "2010-04-01",
+        NumMedia: "0",
+        NumSegments: "1",
+      }),
+    })
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.buyer_handler_failed, true);
+  assert.equal(main_handler_called, true, "main inbound handler should still run");
+
+  const buyerFailed = entries.find(
+    (entry) => entry.event === "textgrid_inbound.buyer_handler_failed"
+  );
+  assert.ok(buyerFailed, "should log buyer handler failure");
+  assert.equal(buyerFailed.meta.error_message, "buyer_handler_runtime_failure");
+  assert.equal(buyerFailed.meta.will_continue_to_main_handler, true);
+
+  const mainHandlerStarted = entries.find(
+    (entry) =>
+      entry.event === "textgrid_inbound.handler_started" &&
+      entry.meta.handler_name === "handleTextgridInbound"
+  );
+  assert.ok(mainHandlerStarted, "should start main inbound handler after buyer failure");
+  assert.equal(mainHandlerStarted.meta.buyer_handler_failed, true);
+  assert.equal(mainHandlerStarted.meta.buyer_handler_error_message, "buyer_handler_runtime_failure");
+
+  const responseLog = entries.find((entry) => entry.event === "textgrid_inbound.response_sent");
+  assert.ok(responseLog, "should log response_sent after buyer soft failure");
+  assert.equal(responseLog.meta.final_response_status, 200);
+  assert.equal(responseLog.meta.buyer_handler_failed, true);
+});
+
 test("handleTextgridDeliveryRequest: failure before accepted emits failed_before_accept", async (t) => {
   setSignatureMode(t, "observe");
 
