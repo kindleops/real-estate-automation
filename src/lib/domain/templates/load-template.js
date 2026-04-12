@@ -1,6 +1,7 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { evaluateTemplatePlaceholders } from "@/lib/domain/templates/render-template.js";
+import { warn } from "@/lib/logging/logger.js";
 import { safeCategoryEquals } from "@/lib/providers/podio.js";
 import { getAttachedFieldSchema } from "@/lib/podio/schema.js";
 import { fetchTemplates } from "@/lib/podio/apps/templates.js";
@@ -85,6 +86,89 @@ function uniq(values = []) {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function templateHasStageOneMarker(template = null) {
+  const stage_code = clean(template?.stage_code).toUpperCase();
+  if (stage_code === "S1") return true;
+
+  return [template?.variant_group, template?.stage_label].some((value) =>
+    normalizeCategoryText(value).includes("stage 1")
+  );
+}
+
+function resolveNormalizedTemplateUseCase(template = null) {
+  return (
+    normalizeSellerFlowUseCase(
+      clean(template?.use_case_label) ||
+        clean(template?.use_case) ||
+        clean(template?.canonical_routing_slug),
+      clean(template?.variant_group) || clean(template?.stage_label) || null
+    ) || null
+  );
+}
+
+function logTouchOneTemplateRejection(reason, template = null, extra = {}) {
+  warn("template.touch_one_candidate_rejected", {
+    reason,
+    template_id: template?.item_id ?? null,
+    template_title: clean(template?.title) || null,
+    template_use_case: clean(template?.use_case) || null,
+    template_use_case_label: clean(template?.use_case_label) || null,
+    canonical_routing_slug: clean(template?.canonical_routing_slug) || null,
+    template_stage_code: clean(template?.stage_code) || null,
+    template_stage_label: clean(template?.stage_label) || null,
+    template_variant_group: clean(template?.variant_group) || null,
+    template_language: clean(template?.language) || null,
+    template_source: clean(template?.source) || null,
+    ...extra,
+  });
+}
+
+function filterStrictTouchOneCandidates(
+  templates = [],
+  {
+    preferred_language = "English",
+  } = {}
+) {
+  const valid_candidates = [];
+
+  for (const template of templates) {
+    const resolved_use_case = resolveNormalizedTemplateUseCase(template);
+    if (resolved_use_case !== "ownership_check") {
+      logTouchOneTemplateRejection("use_case_mismatch", template, {
+        resolved_use_case,
+      });
+      continue;
+    }
+
+    if (!templateHasStageOneMarker(template)) {
+      logTouchOneTemplateRejection("stage_mismatch", template, {
+        resolved_use_case,
+      });
+      continue;
+    }
+
+    valid_candidates.push(template);
+  }
+
+  if (!valid_candidates.length) return [];
+
+  const english_candidates = valid_candidates.filter((template) =>
+    safeCategoryEquals(template?.language, preferred_language || "English")
+  );
+
+  if (!english_candidates.length) return valid_candidates;
+
+  for (const template of valid_candidates) {
+    if (!english_candidates.includes(template)) {
+      logTouchOneTemplateRejection("language_filtered", template, {
+        preferred_language: preferred_language || "English",
+      });
+    }
+  }
+
+  return english_candidates;
 }
 
 const TEMPLATE_BATCH_CACHE = new Map();
@@ -703,6 +787,11 @@ async function collectBucketCandidates({
   // and later-stage templates from the scoring pool without needing a separate
   // Podio query.
   allowed_variant_groups = null,
+  required_use_cases = null,
+  required_variant_groups = null,
+  require_explicit_variant_group = false,
+  strict_touch_one_podio_only = false,
+  strict_touch_one_language = "English",
   diagnostics = null,
 }) {
   let all_candidates = [];
@@ -744,6 +833,12 @@ async function collectBucketCandidates({
     template_render_overrides,
   });
 
+  if (strict_touch_one_podio_only) {
+    all_candidates = filterStrictTouchOneCandidates(all_candidates, {
+      preferred_language: strict_touch_one_language,
+    });
+  }
+
   // Restrict to allowed variant groups when a caller-supplied allow-list is present.
   // Templates with null/empty variant_group are always permitted — they carry no
   // stage metadata and therefore cannot be classified as a forbidden stage.
@@ -751,6 +846,23 @@ async function collectBucketCandidates({
     all_candidates = all_candidates.filter(
       (t) => !t.variant_group || allowed_variant_groups.has(t.variant_group)
     );
+  }
+
+  if (required_use_cases?.size > 0) {
+    const normalized_required_use_cases = new Set(
+      [...required_use_cases].map((value) => clean(value).toLowerCase()).filter(Boolean)
+    );
+    all_candidates = all_candidates.filter((template) =>
+      normalized_required_use_cases.has(clean(template?.use_case).toLowerCase())
+    );
+  }
+
+  if (required_variant_groups?.size > 0) {
+    all_candidates = all_candidates.filter((template) => {
+      const variant_group = clean(template?.variant_group);
+      if (!variant_group) return !require_explicit_variant_group;
+      return required_variant_groups.has(variant_group);
+    });
   }
 
   if (diagnostics) {
@@ -852,6 +964,55 @@ function buildPriorityFilterSets({
   });
 }
 
+function buildStrictTouchOnePodioFilterSets({
+  language = "English",
+} = {}) {
+  const filters = [];
+  const stage_one_variants = [
+    "Stage 1 — Ownership Confirmation",
+    "Stage 1 — Ownership Check",
+    "Stage 1 Ownership Confirmation",
+    "Stage 1 Ownership Check",
+  ];
+  const requested_language = clean(language) || "English";
+
+  for (const stage_variant of stage_one_variants) {
+    filters.push(
+      buildFilterPayload({
+        variant_group: stage_variant,
+        language: requested_language,
+        active: "Yes",
+      })
+    );
+    filters.push(
+      buildFilterPayload({
+        variant_group: stage_variant,
+        active: "Yes",
+      })
+    );
+  }
+
+  filters.push(
+    buildFilterPayload({
+      language: requested_language,
+      active: "Yes",
+    })
+  );
+  filters.push(
+    buildFilterPayload({
+      active: "Yes",
+    })
+  );
+
+  const seen = new Set();
+  return filters.filter((filter_set) => {
+    const key = stableTemplateBatchCacheKey(filter_set);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export async function loadTemplateCandidates({
   category = "Residential",
   secondary_category = null,
@@ -871,6 +1032,10 @@ export async function loadTemplateCandidates({
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
   allowed_variant_groups = null,
+  required_use_cases = null,
+  required_variant_groups = null,
+  require_explicit_variant_group = false,
+  strict_touch_one_podio_only = false,
 }) {
   const resolution_diagnostics = createTemplateResolutionDiagnostics();
   const normalized_preferences = normalizeTemplateFilters({
@@ -904,7 +1069,14 @@ export async function loadTemplateCandidates({
   };
   const buckets = [];
 
-  if (use_cases.length) {
+  if (strict_touch_one_podio_only) {
+    buckets.push({
+      source: "podio",
+      filter_sets: buildStrictTouchOnePodioFilterSets({
+        language: requested_language,
+      }),
+    });
+  } else if (use_cases.length) {
     buckets.push({
       source: "podio",
       filter_sets: buildPriorityFilterSets({
@@ -982,41 +1154,43 @@ export async function loadTemplateCandidates({
     }
   }
 
-  buckets.push({
-    source: "local_registry",
-    filter_sets: buildPriorityFilterSets({
-      source: "local_registry",
-      category,
-      secondary_category,
-      use_cases,
-      tone,
-      gender_variant,
-      languages,
-      sequence_position,
-      paired_with_agent_type,
-      fallback_agent_type,
-      include_variant_group: false,
-    }),
-  });
-
-  if (allow_variant_group_fallback && variant_group) {
+  if (!strict_touch_one_podio_only) {
     buckets.push({
       source: "local_registry",
       filter_sets: buildPriorityFilterSets({
         source: "local_registry",
         category,
         secondary_category,
-        use_cases: [],
-        variant_group,
+        use_cases,
         tone,
         gender_variant,
         languages,
         sequence_position,
         paired_with_agent_type,
         fallback_agent_type,
-        include_variant_group: true,
+        include_variant_group: false,
       }),
     });
+
+    if (allow_variant_group_fallback && variant_group) {
+      buckets.push({
+        source: "local_registry",
+        filter_sets: buildPriorityFilterSets({
+          source: "local_registry",
+          category,
+          secondary_category,
+          use_cases: [],
+          variant_group,
+          tone,
+          gender_variant,
+          languages,
+          sequence_position,
+          paired_with_agent_type,
+          fallback_agent_type,
+          include_variant_group: true,
+        }),
+      });
+    }
   }
 
   for (const bucket of buckets) {
@@ -1030,6 +1204,11 @@ export async function loadTemplateCandidates({
       template_render_overrides,
       preferences,
       allowed_variant_groups,
+      required_use_cases,
+      required_variant_groups,
+      require_explicit_variant_group,
+      strict_touch_one_podio_only,
+      strict_touch_one_language: requested_language,
       diagnostics: resolution_diagnostics,
     });
 
@@ -1056,6 +1235,20 @@ export async function loadTemplateCandidates({
         template_selection_diagnostics: selection_diagnostics,
       }));
     }
+  }
+
+  if (strict_touch_one_podio_only) {
+    warn("template.touch_one_template_missing", {
+      reason: "template_missing",
+      requested_language,
+      use_case: use_case || null,
+      variant_group: variant_group || null,
+      category: category || null,
+      secondary_category: secondary_category || null,
+      selection_diagnostics: summarizeTemplateResolutionDiagnostics(
+        resolution_diagnostics
+      ),
+    });
   }
 
   return [];
@@ -1089,6 +1282,10 @@ export async function loadTemplate({
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
   allowed_variant_groups = null,
+  required_use_cases = null,
+  required_variant_groups = null,
+  require_explicit_variant_group = false,
+  strict_touch_one_podio_only = false,
 }) {
   const scored = await loadTemplateCandidates({
     category,
@@ -1109,6 +1306,10 @@ export async function loadTemplate({
     remote_fetcher,
     local_fetcher,
     allowed_variant_groups,
+    required_use_cases,
+    required_variant_groups,
+    require_explicit_variant_group,
+    strict_touch_one_podio_only,
   });
 
   if (!scored.length) return null;

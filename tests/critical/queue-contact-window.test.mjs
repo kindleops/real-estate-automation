@@ -81,25 +81,21 @@ test("resolveContactWindowField: recognized schema option returns field_value an
   assert.equal(result.reason, null);
 });
 
-test("resolveContactWindowField: valid time-range format without schema option passes through via compat bypass", () => {
-  // "8AM-9AM CT" is a valid source contact window from Master Owners.  It has no
-  // matching option in the Send Queue schema (only "9AM-8PM CT" is an option),
-  // but schema.js shouldAllowRawCategoryCompatibility / isValidSendQueueContactWindow
-  // accepts the raw string so Podio does not return a 400.  We therefore INCLUDE it.
+test("resolveContactWindowField: valid time-range format without schema option is omitted safely", () => {
   const result = resolveContactWindowField("8AM-9AM CT");
 
-  assert.equal(result.omitted, false, "valid time-range format must not be omitted");
-  assert.equal(result.field_value, "8AM-9AM CT");
+  assert.equal(result.omitted, true, "valid time-range format must be omitted when schema has no option");
+  assert.equal(result.field_value, undefined);
   assert.equal(result.category_option_id, null);
-  assert.equal(result.reason, null);
+  assert.equal(result.reason, "formatted_value_missing_option_id");
 });
 
-test("resolveContactWindowField: another real-world seller window without schema option passes through via compat bypass", () => {
+test("resolveContactWindowField: another real-world seller window without schema option is omitted safely", () => {
   const result = resolveContactWindowField("12PM-2PM CT");
 
-  assert.equal(result.omitted, false);
-  assert.equal(result.field_value, "12PM-2PM CT");
-  assert.equal(result.reason, null);
+  assert.equal(result.omitted, true);
+  assert.equal(result.field_value, undefined);
+  assert.equal(result.reason, "formatted_value_missing_option_id");
 });
 
 test("resolveContactWindowField: empty / null / undefined contact window is omitted with 'empty' reason", () => {
@@ -112,7 +108,7 @@ test("resolveContactWindowField: empty / null / undefined contact window is omit
 
 // ── buildSendQueueItem integration tests ──────────────────────────────────────
 
-test("buildSendQueueItem writes contact-window when value matches time-range format (compat bypass)", async () => {
+test("buildSendQueueItem omits contact-window when value has no matching schema option", async () => {
   let captured_fields = null;
 
   const result = await buildSendQueueItem({
@@ -131,15 +127,16 @@ test("buildSendQueueItem writes contact-window when value matches time-range for
   });
 
   assert.ok(result.ok, "queue creation must succeed");
-  assert.equal(result.contact_window_written, true, "contact_window_written must be true");
-  assert.equal(result.contact_window_omit_reason, null, "no omit reason for a valid time-range");
-
-  // The contact-window field IS in the Podio payload — schema.js compat bypass
-  // allows valid time-range strings as raw text without an option ID.
+  assert.equal(result.contact_window_written, false, "contact_window_written must be false");
+  assert.equal(
+    result.contact_window_omit_reason,
+    "formatted_value_missing_option_id",
+    "contact-window omit reason must explain the missing category option"
+  );
   assert.equal(
     "contact-window" in (captured_fields || {}),
-    true,
-    "contact-window must be present in the Podio creation payload"
+    false,
+    "contact-window must be omitted from the Podio creation payload"
   );
 
   // Core fields must still be present
@@ -177,7 +174,7 @@ test("buildSendQueueItem writes contact-window when the value matches a known sc
   );
 });
 
-test("buildSendQueueItem writes contact-window for 12PM-2PM CT (compat bypass, no schema option)", async () => {
+test("buildSendQueueItem omits contact-window for 12PM-2PM CT when no schema option exists", async () => {
   const result = await buildSendQueueItem({
     context: makeBaseContext({
       summary: { total_messages_sent: 0, contact_window: "12PM-2PM CT" },
@@ -191,12 +188,11 @@ test("buildSendQueueItem writes contact-window for 12PM-2PM CT (compat bypass, n
   });
 
   assert.ok(result.ok);
-  assert.equal(result.contact_window_written, true, "valid time-range must be written");
-  // No warning — the compat bypass handles it gracefully
+  assert.equal(result.contact_window_written, false, "valid time-range must be omitted without a schema option");
   const has_contact_window_warning = result.warnings.some(
     (w) => typeof w === "string" && w.includes("contact-window field omitted")
   );
-  assert.equal(has_contact_window_warning, false, "no omit warning for a valid time-range window");
+  assert.equal(has_contact_window_warning, true, "omit warning must be surfaced for observability");
 });
 
 test("buildSendQueueItem writing contact-window does not affect scheduling timestamps", async () => {
@@ -222,7 +218,5 @@ test("buildSendQueueItem writing contact-window does not affect scheduling times
 
   assert.ok(captured_fields?.["scheduled-for-local"]?.start, "scheduled-for-local must be set");
   assert.ok(captured_fields?.["scheduled-for-utc"]?.start, "scheduled-for-utc must be set");
-  // contact-window IS written now (compat bypass allows valid time-range strings)
-  assert.equal("contact-window" in captured_fields, true, "contact-window must be present");
-  assert.equal(captured_fields["contact-window"], "8AM-9AM CT");
+  assert.equal("contact-window" in captured_fields, false, "contact-window must be omitted");
 });

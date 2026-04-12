@@ -38,3 +38,23 @@ test("renderTemplate still replaces double-brace placeholders", () => {
     "Hi, this is Ryan. Quick question — are you the owner of 2717 S 124TH EAST AVE?"
   );
 });
+
+test("renderTemplate maps legacy Stage 1 first_name and street_address placeholders to seller data", () => {
+  const result = renderTemplate({
+    template_text:
+      "Hi {{first_name}}, checking on {{street_address}}. Do you still own it?",
+    use_case: "ownership_check",
+    context: {
+      summary: {
+        seller_first_name: "Maria",
+        property_address: "123 Main St",
+        agent_name: "Ryan Kindle",
+      },
+    },
+  });
+
+  assert.equal(
+    result.rendered_text,
+    "Hi Maria, checking on 123 Main St. Do you still own it?"
+  );
+});

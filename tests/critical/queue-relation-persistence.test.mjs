@@ -8,6 +8,7 @@ import {
   buildFailedOutboundMessageEventFields,
   validateQueuedOutboundNumberItem,
 } from "@/lib/domain/queue/process-send-queue.js";
+import { PodioError } from "@/lib/providers/podio.js";
 import { mapTextgridFailureBucket } from "@/lib/providers/textgrid.js";
 import {
   appRefField,
@@ -159,6 +160,309 @@ test("send queue row uses the direct Podio template item on the live template fi
   assert.equal(result.template_app_field_written, true);
   assert.equal(result.template_attached, true);
   assert.equal(result.template_attachment_strategy, "selected_template_item_id");
+});
+
+test("strict cold outbound row forces Touch 1 stage fields even when conflicting inputs are passed", async () => {
+  let created_fields = null;
+
+  const result = await buildSendQueueItem({
+    context: {
+      found: true,
+      items: {
+        phone_item: createActivePhoneItem(),
+        brain_item: null,
+        master_owner_item: createPodioItem(201),
+        property_item: null,
+        agent_item: null,
+        market_item: null,
+      },
+      ids: {
+        phone_item_id: 401,
+        master_owner_id: 201,
+        prospect_id: 301,
+        property_id: null,
+        market_id: null,
+        assigned_agent_id: null,
+      },
+      recent: {
+        touch_count: 0,
+      },
+      summary: {
+        total_messages_sent: 0,
+      },
+    },
+    queue_id: "strict-touch-one",
+    rendered_message_text: "Hi Jose, checking on 3124 Rodeo St. Do you still own it?",
+    template_id: 9901,
+    template_item: {
+      item_id: 9901,
+      source: "podio",
+      title: "Ownership Check V1",
+      raw: {
+        app: {
+          app_id: APP_IDS.templates,
+        },
+      },
+    },
+    message_type: "Follow-Up",
+    current_stage: "Offer",
+    use_case_template: "offer_reveal_cash",
+    strict_cold_outbound: true,
+    textgrid_number_item_id: 501,
+    scheduled_for_local: "2026-04-04 12:43:17",
+    scheduled_for_utc: "2026-04-04 17:43:17",
+    create_item: async (_app_id, fields) => {
+      created_fields = fields;
+      return { item_id: 126 };
+    },
+    update_item: async () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(created_fields["message-type"], "Cold Outbound");
+  assert.deepEqual(created_fields["template-2"], [9901]);
+  assert.equal(result.message_type_value, "Cold Outbound");
+  assert.equal(result.current_stage_value, "Cold Outbound");
+  assert.equal(result.use_case_template_value, "ownership_check");
+  assert.equal(result.template_relation_id, 9901);
+  if ("current-stage" in (created_fields || {})) {
+    assert.equal(created_fields["current-stage"], "Cold Outbound");
+  }
+});
+
+test("strict cold outbound rejects non-numeric Podio template ids", async () => {
+  await assert.rejects(
+    () =>
+      buildSendQueueItem({
+        context: {
+          found: true,
+          items: {
+            phone_item: createActivePhoneItem(),
+            brain_item: null,
+            master_owner_item: createPodioItem(201),
+            property_item: null,
+            agent_item: null,
+            market_item: null,
+          },
+          ids: {
+            phone_item_id: 401,
+            master_owner_id: 201,
+            prospect_id: 301,
+            property_id: null,
+            market_id: null,
+            assigned_agent_id: null,
+          },
+          recent: {
+            touch_count: 0,
+          },
+          summary: {
+            total_messages_sent: 0,
+          },
+        },
+        queue_id: "strict-touch-one-invalid-template-id",
+        rendered_message_text: "Hi Jose, checking on 3124 Rodeo St. Do you still own it?",
+        template_id: "9901",
+        template_item: {
+          item_id: 9901,
+          source: "podio",
+          title: "Ownership Check V1",
+          raw: {
+            app: {
+              app_id: APP_IDS.templates,
+            },
+          },
+        },
+        current_stage: "Cold Outbound",
+        use_case_template: "ownership_check",
+        strict_cold_outbound: true,
+        textgrid_number_item_id: 501,
+        scheduled_for_local: "2026-04-04 12:43:17",
+        scheduled_for_utc: "2026-04-04 17:43:17",
+        create_item: async () => ({ item_id: 127 }),
+        update_item: async () => {},
+      }),
+    (error) => error?.code === "INVALID_TEMPLATE_ID"
+  );
+});
+
+test("strict cold outbound rejects Touch 1 message text with offer language", async () => {
+  await assert.rejects(
+    () =>
+      buildSendQueueItem({
+        context: {
+          found: true,
+          items: {
+            phone_item: createActivePhoneItem(),
+            brain_item: null,
+            master_owner_item: createPodioItem(201),
+            property_item: null,
+            agent_item: null,
+            market_item: null,
+          },
+          ids: {
+            phone_item_id: 401,
+            master_owner_id: 201,
+            prospect_id: 301,
+            property_id: null,
+            market_id: null,
+            assigned_agent_id: null,
+          },
+          recent: {
+            touch_count: 0,
+          },
+          summary: {
+            total_messages_sent: 0,
+          },
+        },
+        queue_id: "strict-touch-one-invalid-message",
+        rendered_message_text: "Hi Jose, would you take an offer on 3124 Rodeo St?",
+        template_id: 9901,
+        template_item: {
+          item_id: 9901,
+          source: "podio",
+          title: "Ownership Check V1",
+          raw: {
+            app: {
+              app_id: APP_IDS.templates,
+            },
+          },
+        },
+        current_stage: "Cold Outbound",
+        use_case_template: "ownership_check",
+        strict_cold_outbound: true,
+        textgrid_number_item_id: 501,
+        scheduled_for_local: "2026-04-04 12:43:17",
+        scheduled_for_utc: "2026-04-04 17:43:17",
+        create_item: async () => ({ item_id: 128 }),
+        update_item: async () => {},
+      }),
+    (error) => error?.code === "INVALID_STAGE_1_MESSAGE" && error?.phrase === "offer"
+  );
+});
+
+test("strict cold outbound rejects Podio templates without a resolved relation id", async () => {
+  await assert.rejects(
+    () =>
+      buildSendQueueItem({
+        context: {
+          found: true,
+          items: {
+            phone_item: createActivePhoneItem(),
+            brain_item: null,
+            master_owner_item: createPodioItem(201),
+            property_item: null,
+            agent_item: null,
+            market_item: null,
+          },
+          ids: {
+            phone_item_id: 401,
+            master_owner_id: 201,
+            prospect_id: 301,
+            property_id: null,
+            market_id: null,
+            assigned_agent_id: null,
+          },
+          recent: {
+            touch_count: 0,
+          },
+          summary: {
+            total_messages_sent: 0,
+          },
+        },
+        queue_id: "strict-touch-one-missing-template-relation",
+        rendered_message_text: "Hi Jose, checking on 3124 Rodeo St. Do you still own it?",
+        template_item: {
+          source: "podio",
+          title: "Ownership Check V1",
+          raw: {
+            app: {
+              app_id: APP_IDS.templates,
+            },
+          },
+        },
+        current_stage: "Cold Outbound",
+        use_case_template: "ownership_check",
+        strict_cold_outbound: true,
+        textgrid_number_item_id: 501,
+        scheduled_for_local: "2026-04-04 12:43:17",
+        scheduled_for_utc: "2026-04-04 17:43:17",
+        create_item: async () => ({ item_id: 129 }),
+        update_item: async () => {},
+      }),
+    (error) => error?.code === "MISSING_TEMPLATE_RELATION"
+  );
+});
+
+test("strict cold outbound does not silently create a queue row when Podio rejects the template relation", async () => {
+  let create_attempts = 0;
+
+  await assert.rejects(
+    () =>
+      buildSendQueueItem({
+        context: {
+          found: true,
+          items: {
+            phone_item: createActivePhoneItem(),
+            brain_item: null,
+            master_owner_item: createPodioItem(201),
+            property_item: null,
+            agent_item: null,
+            market_item: null,
+          },
+          ids: {
+            phone_item_id: 401,
+            master_owner_id: 201,
+            prospect_id: 301,
+            property_id: null,
+            market_id: null,
+            assigned_agent_id: null,
+          },
+          recent: {
+            touch_count: 0,
+          },
+          summary: {
+            total_messages_sent: 0,
+          },
+        },
+        queue_id: "strict-touch-one-relation-rejected",
+        rendered_message_text: "Hi Jose, checking on 3124 Rodeo St. Do you still own it?",
+        template_id: 9901,
+        template_item: {
+          item_id: 9901,
+          source: "podio",
+          title: "Ownership Check V1",
+          raw: {
+            app: {
+              app_id: APP_IDS.templates,
+            },
+          },
+        },
+        current_stage: "Cold Outbound",
+        use_case_template: "ownership_check",
+        strict_cold_outbound: true,
+        textgrid_number_item_id: 501,
+        scheduled_for_local: "2026-04-04 12:43:17",
+        scheduled_for_utc: "2026-04-04 17:43:17",
+        create_item: async () => {
+          create_attempts += 1;
+          throw new PodioError("Invalid value for template relation", {
+            status: 400,
+            path: "/item/app/30680653/",
+            data: {
+              error: "invalid_value",
+            },
+          });
+        },
+        update_item: async () => {},
+      }),
+    (error) => error?.code === "MISSING_TEMPLATE_RELATION"
+  );
+
+  assert.equal(
+    create_attempts,
+    1,
+    "Podio template relation rejection must not retry by creating a template-less queue row"
+  );
 });
 
 test("send queue row still queues successfully when local template fallback is selected", async () => {

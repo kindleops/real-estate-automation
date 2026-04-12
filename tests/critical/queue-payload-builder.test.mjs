@@ -921,9 +921,9 @@ test("Part 7 — category written as 'Trust / Estate' for TRUST/ESTATE | ABSENTE
   assert.equal(captured_fields?.["category"], "Trust / Estate");
 });
 
-// ── Part 7.4: contact-window written via pattern bypass ───────────────────────
+// ── Part 7.4: contact-window omit path when schema has no matching option ─────
 
-test("Part 7 — contact-window '8AM-9PM Local' is written (matches CONTACT_WINDOW_PATTERN)", async () => {
+test("Part 7 — contact-window '8AM-9PM Local' is omitted when schema has no matching option", async () => {
   let captured_fields = null;
   const result = await buildSendQueueItem({
     context: makeBaseContext(),
@@ -939,8 +939,9 @@ test("Part 7 — contact-window '8AM-9PM Local' is written (matches CONTACT_WIND
   });
 
   assert.ok(result.ok);
-  assert.equal(result.contact_window_written, true, "contact-window must be written");
-  assert.equal(captured_fields?.["contact-window"], "8AM-9PM Local");
+  assert.equal(result.contact_window_written, false, "contact-window must be omitted");
+  assert.equal(result.contact_window_omit_reason, "formatted_value_missing_option_id");
+  assert.equal("contact-window" in (captured_fields || {}), false);
 });
 
 test("Part 7 — contact-window '9AM-8PM CT' is written (matches pattern and schema option)", async () => {
@@ -963,7 +964,7 @@ test("Part 7 — contact-window '9AM-8PM CT' is written (matches pattern and sch
   assert.equal(captured_fields?.["contact-window"], "9AM-8PM CT");
 });
 
-test("Part 7 — contact-window '7AM-8PM ET' is written via pattern bypass", async () => {
+test("Part 7 — contact-window '7AM-8PM ET' is omitted when schema has no matching option", async () => {
   let captured_fields = null;
   const result = await buildSendQueueItem({
     context: makeBaseContext(),
@@ -979,8 +980,9 @@ test("Part 7 — contact-window '7AM-8PM ET' is written via pattern bypass", asy
   });
 
   assert.ok(result.ok);
-  assert.equal(result.contact_window_written, true, "7AM-8PM ET must be passed through");
-  assert.equal(captured_fields?.["contact-window"], "7AM-8PM ET");
+  assert.equal(result.contact_window_written, false, "7AM-8PM ET must be omitted safely");
+  assert.equal(result.contact_window_omit_reason, "formatted_value_missing_option_id");
+  assert.equal("contact-window" in (captured_fields || {}), false);
 });
 
 test("Part 7 — contact-window with invalid format is omitted", async () => {

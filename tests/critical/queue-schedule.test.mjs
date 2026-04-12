@@ -30,13 +30,11 @@ test("queue schedule spreads a Central morning window across the next local day 
   });
 
   assert.match(result.scheduled_for_local, /^2026-04-03 /);
-  assert.equal(result.reason, "outside_contact_window_schedule_within_window");
+  assert.equal(result.reason, "after_contact_window_schedule_next_window");
   assert.equal(result.within_contact_window, false);
-  assert.ok(parseLocalMinute(result.scheduled_for_local) >= 7 * 60 + 5);
-  assert.ok(parseLocalMinute(result.scheduled_for_local) <= 8 * 60 + 54);
-  assert.equal(result.scheduled_for_local, "2026-04-03 08:02:01");
-  assert.equal(result.scheduled_for_utc, "2026-04-03 13:02:01");
-  assert.equal(parseLocalSecond(result.scheduled_for_local), 1);
+  assert.equal(result.scheduled_for_local, "2026-04-03 07:14:43");
+  assert.equal(result.scheduled_for_utc, "2026-04-03 12:14:43");
+  assert.equal(parseLocalSecond(result.scheduled_for_local), 43);
 });
 
 test("queue schedule without a distribution key still pins to window start", () => {
@@ -47,19 +45,20 @@ test("queue schedule without a distribution key still pins to window start", () 
   });
 
   assert.equal(result.scheduled_for_local, "2026-04-03 07:00:00");
-  assert.equal(result.reason, "outside_contact_window_schedule_at_window_start");
+  assert.equal(result.reason, "after_contact_window_schedule_next_window");
   assert.equal(result.within_contact_window, false);
 });
 
-test("queue schedule keeps an in-window Local schedule at the current time", () => {
+test("queue schedule adds a two-minute buffer inside the active contact window", () => {
   const result = resolveQueueSchedule({
     now: "2026-04-02T22:14:00Z",
     timezone_label: "Central",
     contact_window: "9AM-8PM Local",
   });
 
-  assert.equal(result.scheduled_for_local, "2026-04-02 17:14:00");
-  assert.equal(result.scheduled_for_utc, "2026-04-02 22:14:00");
+  assert.equal(result.scheduled_for_local, "2026-04-02 17:16:00");
+  assert.equal(result.scheduled_for_utc, "2026-04-02 22:16:00");
+  assert.equal(result.reason, "inside_contact_window_schedule_with_spread");
   assert.equal(result.within_contact_window, true);
 });
 
@@ -78,15 +77,13 @@ test("queue schedule respects target timezone when the window starts later today
   });
 
   assert.match(mountain.scheduled_for_local, /^2026-04-02 /);
-  assert.ok(parseLocalMinute(mountain.scheduled_for_local) >= 17 * 60 + 5);
-  assert.ok(parseLocalMinute(mountain.scheduled_for_local) <= 19 * 60 + 54);
-  assert.equal(mountain.scheduled_for_local, "2026-04-02 19:37:22");
-  assert.equal(mountain.scheduled_for_utc, "2026-04-03 01:37:22");
+  assert.equal(mountain.reason, "before_contact_window_schedule_at_window_start");
+  assert.equal(mountain.scheduled_for_local, "2026-04-02 17:02:20");
+  assert.equal(mountain.scheduled_for_utc, "2026-04-02 23:02:20");
   assert.match(eastern.scheduled_for_local, /^2026-04-03 /);
-  assert.ok(parseLocalMinute(eastern.scheduled_for_local) >= 12 * 60 + 5);
-  assert.ok(parseLocalMinute(eastern.scheduled_for_local) <= 12 * 60 + 54);
-  assert.equal(eastern.scheduled_for_local, "2026-04-03 12:37:21");
-  assert.equal(eastern.scheduled_for_utc, "2026-04-03 16:37:21");
+  assert.equal(eastern.reason, "after_contact_window_schedule_next_window");
+  assert.equal(eastern.scheduled_for_local, "2026-04-03 12:07:35");
+  assert.equal(eastern.scheduled_for_utc, "2026-04-03 16:07:35");
 });
 
 test("latency-aware queue schedule delays an in-window reply instead of sending immediately", () => {
@@ -101,12 +98,9 @@ test("latency-aware queue schedule delays an in-window reply instead of sending 
 
   assert.equal(result.agent_delay_minutes, 22);
   assert.equal(result.within_contact_window, true);
-  // The latency (22 min) is applied to "now", and the delayed time falls inside
-  // the contact window, so the message is scheduled at exactly the delayed time.
-  // No further inside-window redistribution — latency already provides per-row variation.
-  assert.equal(result.reason, "inside_contact_window_schedule_now");
-  assert.equal(result.scheduled_for_local, "2026-04-02 17:36:00");
-  assert.equal(result.scheduled_for_utc, "2026-04-02 22:36:00");
+  assert.equal(result.reason, "inside_contact_window_schedule_with_spread");
+  assert.equal(result.scheduled_for_local, "2026-04-02 17:38:20");
+  assert.equal(result.scheduled_for_utc, "2026-04-02 22:38:20");
 });
 
 test("latency-aware queue schedule rolls a delayed reply into the next contact window when needed", () => {
@@ -122,17 +116,18 @@ test("latency-aware queue schedule rolls a delayed reply into the next contact w
   assert.equal(result.agent_delay_minutes, 90);
   assert.match(result.scheduled_for_local, /^2026-04-03 /);
   assert.equal(result.within_contact_window, false);
-  assert.ok(parseLocalMinute(result.scheduled_for_local) >= 17 * 60 + 5);
-  assert.ok(parseLocalMinute(result.scheduled_for_local) <= 17 * 60 + 54);
+  assert.equal(result.reason, "after_contact_window_schedule_next_window");
+  assert.equal(result.scheduled_for_local, "2026-04-03 17:01:44");
+  assert.equal(result.scheduled_for_utc, "2026-04-03 22:01:44");
 });
 
-test("first-contact scheduling clips seller morning windows to start at 8AM local", () => {
+test("first-contact scheduling preserves the seller-provided window", () => {
   assert.equal(
     buildFirstContactWindow({
       contact_window: "7AM-9AM CT",
       timezone_label: "Central",
     }),
-    "8AM-9AM CT"
+    "7AM-9AM CT"
   );
 });
 
@@ -146,7 +141,7 @@ test("first-contact scheduling preserves seller-specific windows that already fi
   );
 });
 
-test("non-first-contact scheduling uses an all-day window regardless of seller contact-window", () => {
+test("non-first-contact scheduling keeps the seller contact window instead of forcing all-day sending", () => {
   assert.equal(buildAlwaysOnContactWindow("Central"), "12AM-11:59PM CT");
   assert.equal(
     resolveSchedulingContactWindow({
@@ -154,7 +149,7 @@ test("non-first-contact scheduling uses an all-day window regardless of seller c
       timezone_label: "Central",
       is_first_contact: false,
     }),
-    "12AM-11:59PM CT"
+    "7AM-9AM CT"
   );
 });
 
@@ -196,7 +191,7 @@ test("inside-window rows with different distribution keys get different schedule
   assert.ok(times.size >= 2, "rows must not all collapse to the same timestamp");
 });
 
-test("inside-window schedule reason is distribute_within_remaining_window when key provided", () => {
+test("inside-window schedule reason reflects buffered in-window scheduling when key provided", () => {
   const result = resolveQueueSchedule({
     now: "2026-04-04T14:00:00Z", // 9:00 AM Central — inside 8AM-9PM window
     timezone_label: "Central",
@@ -207,26 +202,25 @@ test("inside-window schedule reason is distribute_within_remaining_window when k
   assert.equal(result.within_contact_window, true);
   assert.equal(
     result.reason,
-    "inside_contact_window_distribute_within_remaining_window"
+    "inside_contact_window_schedule_with_spread"
   );
-  // Must be scheduled between current time (9:00 AM) and window end (9:00 PM)
-  assert.ok(parseLocalMinute(result.scheduled_for_local) >= 9 * 60);
-  assert.ok(parseLocalMinute(result.scheduled_for_local) <= 21 * 60);
+  assert.equal(result.scheduled_for_local, "2026-04-04 16:08:29");
+  assert.equal(result.scheduled_for_utc, "2026-04-04 21:08:29");
 });
 
-test("inside-window without distribution_key still schedules at now (no regression)", () => {
+test("inside-window without distribution_key still applies the two-minute minimum buffer", () => {
   const result = resolveQueueSchedule({
     now: "2026-04-02T22:14:00Z",
     timezone_label: "Central",
     contact_window: "9AM-8PM Local",
   });
 
-  assert.equal(result.scheduled_for_local, "2026-04-02 17:14:00");
-  assert.equal(result.reason, "inside_contact_window_schedule_now");
+  assert.equal(result.scheduled_for_local, "2026-04-02 17:16:00");
+  assert.equal(result.reason, "inside_contact_window_schedule_with_spread");
   assert.equal(result.within_contact_window, true);
 });
 
-test("inside-window with < 5 minutes remaining falls back to schedule-now", () => {
+test("inside-window with < 5 minutes remaining still respects the minimum buffer inside the window", () => {
   // 8:57 PM Central — only 3 minutes until window end at 9PM
   const result = resolveQueueSchedule({
     now: "2026-04-04T01:57:00Z", // 8:57 PM Central
@@ -236,8 +230,8 @@ test("inside-window with < 5 minutes remaining falls back to schedule-now", () =
   });
 
   assert.equal(result.within_contact_window, true);
-  assert.equal(result.reason, "inside_contact_window_schedule_now");
-  assert.ok(parseLocalMinute(result.scheduled_for_local) >= 20 * 60 + 57);
+  assert.equal(result.reason, "inside_contact_window_schedule_with_spread");
+  assert.equal(result.scheduled_for_local, "2026-04-03 20:59:53");
 });
 
 test("inside-window distribution is deterministic — same key always gives same time", () => {

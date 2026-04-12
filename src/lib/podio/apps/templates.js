@@ -1,4 +1,5 @@
 import APP_IDS from "@/lib/config/app-ids.js";
+import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import {
   getItem,
   updateItem,
@@ -27,8 +28,33 @@ function safeArray(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
+function deriveTemplateUseCase(item, variant_group = null) {
+  const use_case_label = getCategoryValue(item, "use-case-2", null);
+  const canonical_routing_slug = getCategoryValue(item, "use-case", null);
+  const canonical_slug_root =
+    clean(canonical_routing_slug).split("__").filter(Boolean)[0] || null;
+
+  return (
+    normalizeSellerFlowUseCase(
+      use_case_label || canonical_slug_root || canonical_routing_slug,
+      variant_group
+    ) ||
+    use_case_label ||
+    canonical_slug_root ||
+    canonical_routing_slug ||
+    null
+  );
+}
+
 export function normalizeTemplateItem(item) {
   const fields = Array.isArray(item?.fields) ? item.fields : [];
+  const variant_group = firstPresentCategory(item, ["stage", "stage-label"], null);
+  const use_case_label = getCategoryValue(item, "use-case-2", null);
+  const canonical_routing_slug = getCategoryValue(item, "use-case", null);
 
   return {
     item_id: item?.item_id || null,
@@ -36,10 +62,10 @@ export function normalizeTemplateItem(item) {
     raw: item,
     template_id: getNumberValue(item, "template-id", null),
     title: getTextValue(item, "title", "") || cleanTemplateTitle(item),
-    use_case: firstPresentCategory(item, ["use-case", "use-case-2"], null),
-    use_case_label: getCategoryValue(item, "use-case-2", null),
-    canonical_routing_slug: getCategoryValue(item, "use-case", null),
-    variant_group: firstPresentCategory(item, ["stage", "stage-label"], null),
+    use_case: deriveTemplateUseCase(item, variant_group),
+    use_case_label,
+    canonical_routing_slug,
+    variant_group,
     stage_code: getCategoryValue(item, "stage-code", null),
     stage_label: getCategoryValue(item, "stage-label", null),
     tone: getCategoryValue(item, "tone", null),

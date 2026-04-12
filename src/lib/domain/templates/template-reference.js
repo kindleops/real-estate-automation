@@ -37,22 +37,11 @@ function buildTemplateAttachmentCandidates(selected, target_app_ids = []) {
           attachment_reason: null,
         }
       : null;
-  const bridge_candidate =
-    selected.selected_template_bridge_id
-      ? {
-          attached_template_id: selected.selected_template_bridge_id,
-          field_value: [selected.selected_template_bridge_id],
-          attachment_strategy: "template_id_bridge",
-          attachment_reason: null,
-        }
-      : null;
   const direct_app_allowed =
     !target_app_ids.length ||
     (selected.selected_template_app_id &&
       target_app_ids.includes(selected.selected_template_app_id));
-  const ordered_candidates = direct_app_allowed
-    ? [direct_candidate, bridge_candidate]
-    : [bridge_candidate, direct_candidate];
+  const ordered_candidates = direct_app_allowed ? [direct_candidate] : [];
 
   return uniqueAttachmentCandidates(ordered_candidates);
 }

@@ -183,6 +183,7 @@ const SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES = new Set([
 ].map((value) => normalizeCategoryText(value)));
 
 const SEND_QUEUE_CURRENT_STAGE_COMPAT_VALUES = new Set([
+  "cold outbound",
   "ownership confirmation",
   "offer interest confirmation",
   "seller price discovery",

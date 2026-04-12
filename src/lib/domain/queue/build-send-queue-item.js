@@ -258,6 +258,47 @@ function normalizeContactWindow(value, fallback = "8AM-9PM Local") {
   return raw || fallback;
 }
 
+const TOUCH_ONE_FORBIDDEN_MESSAGE_PHRASES = Object.freeze([
+  "still talking",
+  "offer",
+  "number",
+  "price",
+  "call",
+  "contract",
+  "close",
+  "lock it in",
+]);
+
+function buildQueueValidationError(code, details = {}) {
+  const error = new Error(code);
+  error.code = code;
+  Object.assign(error, details);
+  return error;
+}
+
+function resolveTemplateSource(template_id = null, template_item = null) {
+  const explicit_template_id =
+    template_id !== null && template_id !== undefined && template_id !== ""
+      ? template_id
+      : template_item?.item_id ?? null;
+
+  if (clean(template_item?.source)) return clean(template_item?.source);
+  if (clean(explicit_template_id).startsWith("local-template:")) return "local_registry";
+  return toItemId(explicit_template_id) ? "podio" : null;
+}
+
+function detectTouchOneMessageViolation(message_text = "") {
+  const normalized = clean(message_text).toLowerCase();
+  if (!normalized) return null;
+
+  return (
+    TOUCH_ONE_FORBIDDEN_MESSAGE_PHRASES.find((phrase) => {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escaped}\\b`, "i").test(normalized);
+    }) || null
+  );
+}
+
 // Checks whether the resolved contact window has a matching category option in
 // the Send Queue app schema.  The attached schema may be stale — it only has a
 // subset of the real Podio options.  If no option ID exists the field must be
@@ -456,8 +497,15 @@ async function createQueueItemWithTemplateCandidates({
   fields,
   template_candidates = [],
   template_field_external_id = QUEUE_FIELDS.template,
+  allow_create_without_template = true,
 }) {
   if (!template_candidates.length) {
+    if (!allow_create_without_template) {
+      throw buildQueueValidationError("MISSING_TEMPLATE_RELATION", {
+        template_field_external_id,
+      });
+    }
+
     return {
       created: await create_item(APP_IDS.send_queue, fields),
       selected_candidate: null,
@@ -466,6 +514,7 @@ async function createQueueItemWithTemplateCandidates({
     };
   }
 
+  let last_error = null;
   for (const candidate of template_candidates) {
     const attempt_fields = {
       ...fields,
@@ -483,7 +532,19 @@ async function createQueueItemWithTemplateCandidates({
       if (!shouldRetryQueueCreateWithoutTemplate(error)) {
         throw error;
       }
+      last_error = error;
     }
+  }
+
+  if (!allow_create_without_template) {
+    const error = buildQueueValidationError("MISSING_TEMPLATE_RELATION", {
+      template_field_external_id,
+      last_error_message: last_error?.message ?? null,
+      last_error_status:
+        last_error?.status ?? last_error?.response?.status ?? null,
+    });
+    if (last_error) error.cause = last_error;
+    throw error;
   }
 
   const fallback_fields = { ...fields };
@@ -503,6 +564,7 @@ export async function buildSendQueueItem({
   rendered_message_text,
   template_id = null,
   template_item = null,
+  expected_template_message_text = null,
   defer_message_resolution = false,
   textgrid_number_item_id,
   scheduled_for_local,
@@ -524,6 +586,7 @@ export async function buildSendQueueItem({
   secondary_category = null,
   current_stage = null,
   use_case_template = null,
+  strict_cold_outbound = false,
   personalization_tags_used: explicit_personalization_tags_used = null,
   create_item = createItem,
   update_item = updateItem,
@@ -657,6 +720,12 @@ export async function buildSendQueueItem({
   const next_touch_number =
     touch_number ??
     ((context.recent?.touch_count || context.summary?.total_messages_sent || 0) + 1);
+  const normalized_message_type = strict_cold_outbound
+    ? "Cold Outbound"
+    : normalizeMessageType(message_type);
+  const normalized_expected_template_message = normalizeForQueueText(
+    expected_template_message_text
+  );
 
   const scheduled_local_value =
     normalizeDateField(scheduled_for_local) || { start: nowIso() };
@@ -698,11 +767,16 @@ export async function buildSendQueueItem({
   const direct_property_type = getCategoryValue(property_item, "property-type", null);
   const resolved_property_type = direct_property_type || property_type;
   const property_type_field = resolveQueueCategoryField(QUEUE_FIELDS.property_type, resolved_property_type);
-  const resolved_current_stage = deriveQueueCurrentStage({
-    route_stage: current_stage,
-    conversation_stage: context.summary?.conversation_stage || null,
-    use_case: use_case_template,
-  });
+  const resolved_use_case_template = strict_cold_outbound
+    ? "ownership_check"
+    : use_case_template;
+  const resolved_current_stage = strict_cold_outbound
+    ? "Cold Outbound"
+    : deriveQueueCurrentStage({
+        route_stage: current_stage,
+        conversation_stage: context.summary?.conversation_stage || null,
+        use_case: resolved_use_case_template,
+      });
   const current_stage_field = resolveQueueCategoryField(
     QUEUE_FIELDS.current_stage,
     resolved_current_stage
@@ -722,14 +796,17 @@ export async function buildSendQueueItem({
   const resolved_owner_category = secondary_category || mapOwnerTypeToQueueCategory(owner_type_raw);
   const owner_type_field = resolveQueueCategoryField(QUEUE_FIELDS.owner_type, resolved_owner_type);
   const category_field = resolveQueueCategoryField(QUEUE_FIELDS.category, resolved_owner_category);
-  const use_case_template_field = resolveQueueCategoryField(QUEUE_FIELDS.use_case_template, use_case_template);
+  const use_case_template_field = resolveQueueCategoryField(
+    QUEUE_FIELDS.use_case_template,
+    resolved_use_case_template
+  );
 
   for (const [field_name, source_value, resolved] of [
     [QUEUE_FIELDS.property_type, property_type, property_type_field],
     [QUEUE_FIELDS.owner_type, resolved_owner_type, owner_type_field],
     [QUEUE_FIELDS.category, secondary_category, category_field],
     [QUEUE_FIELDS.current_stage, resolved_current_stage, current_stage_field],
-    [QUEUE_FIELDS.use_case_template, use_case_template, use_case_template_field],
+    [QUEUE_FIELDS.use_case_template, resolved_use_case_template, use_case_template_field],
   ]) {
     if (resolved.omitted && resolved.reason !== "empty") {
       warn("queue.category_field_write_omitted", {
@@ -765,9 +842,79 @@ export async function buildSendQueueItem({
     template_id,
     template_item,
   });
+  const selected_template_source =
+    template_reference.selected_template_source ||
+    resolveTemplateSource(template_id, template_item);
   const template_field_value = template_reference.field_value;
   const template_candidates = template_reference.attachment_candidates || [];
   const missing_relation_warnings = [];
+
+  if (selected_template_source === "podio" && template_id !== null && template_id !== undefined) {
+    if (typeof template_id !== "number" || !Number.isFinite(template_id) || template_id <= 0) {
+      throw buildQueueValidationError("INVALID_TEMPLATE_ID", {
+        template_id,
+        template_source: selected_template_source,
+      });
+    }
+  }
+
+  if (
+    selected_template_source === "podio" &&
+    !toItemId(template_reference.selected_template_item_id)
+  ) {
+    throw buildQueueValidationError("MISSING_TEMPLATE_RELATION", {
+      template_id,
+      selected_template_item_id: template_reference.selected_template_item_id,
+      template_source: selected_template_source,
+    });
+  }
+
+  if (selected_template_source === "podio" && !template_field_value) {
+    throw buildQueueValidationError("MISSING_TEMPLATE_RELATION", {
+      template_id,
+      selected_template_item_id: template_reference.selected_template_item_id,
+      template_source: selected_template_source,
+      template_attachment_reason: template_reference.attachment_reason ?? null,
+      template_field_external_id,
+    });
+  }
+
+  if (
+    template_reference.selected_template_item_id &&
+    normalized_expected_template_message &&
+    message_text &&
+    message_text !== normalized_expected_template_message
+  ) {
+    throw buildQueueValidationError("TEMPLATE_MESSAGE_MISMATCH", {
+      template_id: template_reference.selected_template_item_id,
+      template_source: selected_template_source,
+      message_text,
+      expected_template_message_text: normalized_expected_template_message,
+    });
+  }
+
+  if (strict_cold_outbound) {
+    const message_violation = detectTouchOneMessageViolation(message_text);
+
+    if (normalized_message_type !== "Cold Outbound") {
+      throw buildQueueValidationError("INVALID_STAGE_1_MESSAGE_TYPE", {
+        message_type: normalized_message_type,
+      });
+    }
+
+    if (clean(resolved_use_case_template).toLowerCase() !== "ownership_check") {
+      throw buildQueueValidationError("INVALID_STAGE_1_USE_CASE", {
+        use_case_template: resolved_use_case_template,
+      });
+    }
+
+    if (message_violation) {
+      throw buildQueueValidationError("INVALID_STAGE_1_MESSAGE", {
+        phrase: message_violation,
+        message_text,
+      });
+    }
+  }
 
   if (!master_owner_id && (master_owner_item?.item_id || context.ids?.master_owner_id)) {
     missing_relation_warnings.push("master_owner_relation_unresolved");
@@ -821,7 +968,7 @@ export async function buildSendQueueItem({
 
     [QUEUE_FIELDS.phone_number]: asArrayAppRef(phone_item_id),
     [QUEUE_FIELDS.textgrid_number]: asArrayAppRef(textgrid_number_item_id),
-    [QUEUE_FIELDS.message_type]: normalizeMessageType(message_type),
+    [QUEUE_FIELDS.message_type]: normalized_message_type,
     [QUEUE_FIELDS.touch_number]: next_touch_number,
     [QUEUE_FIELDS.dnc_check]: dnc_check,
 
@@ -845,7 +992,9 @@ export async function buildSendQueueItem({
     ...(current_stage_field.omitted
       ? {}
       : { [QUEUE_FIELDS.current_stage]: current_stage_field.field_value }),
-    ...(use_case_template_field.omitted ? {} : { [QUEUE_FIELDS.use_case_template]: use_case_template_field.field_value }),
+    ...(use_case_template_field.omitted
+      ? {}
+      : { [QUEUE_FIELDS.use_case_template]: use_case_template_field.field_value }),
   };
 
   Object.keys(fields).forEach((key) => {
@@ -869,6 +1018,7 @@ export async function buildSendQueueItem({
     fields,
     template_candidates,
     template_field_external_id,
+    allow_create_without_template: selected_template_source !== "podio",
   }));
 
   const resolved_queue_id = queue_id || null;
@@ -910,7 +1060,7 @@ export async function buildSendQueueItem({
     template_id,
     selected_template_id: template_reference.selected_template_id ?? null,
     selected_template_item_id: template_reference.selected_template_item_id ?? null,
-    selected_template_source: template_reference.selected_template_source ?? null,
+    selected_template_source: selected_template_source ?? null,
     selected_template_title: template_reference.selected_template_title ?? null,
     selected_template_use_case: template_reference.selected_template_use_case ?? null,
     selected_template_variant_group:
@@ -955,6 +1105,9 @@ export async function buildSendQueueItem({
     current_stage_written: !current_stage_field.omitted,
     current_stage_value: resolved_current_stage,
     use_case_template_written: !use_case_template_field.omitted,
+    message_type_value: normalized_message_type,
+    use_case_template_value: resolved_use_case_template,
+    strict_cold_outbound: Boolean(strict_cold_outbound),
     warnings: [
       ...missing_relation_warnings,
       ...(defer_message_resolution && !message_text
@@ -978,5 +1131,9 @@ export async function buildSendQueueItem({
   };
 }
 
-export { resolveContactWindowField, resolveQueueCategoryField };
+export {
+  detectTouchOneMessageViolation,
+  resolveContactWindowField,
+  resolveQueueCategoryField,
+};
 export default buildSendQueueItem;

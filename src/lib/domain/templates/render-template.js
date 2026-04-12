@@ -21,13 +21,14 @@ const LEGACY_PLACEHOLDER_ALIASES = Object.freeze({
   agent_name: "agent_first_name",
   market: "property_city",
   city: "property_city",
+  street_address: "property_address",
   units: "unit_count",
   occupancy: "occupied_units",
   avg_rent: "monthly_rents",
   estimated_expenses: "monthly_expenses",
   target_net_to_seller: "offer_price",
   smart_cash_offer_display: "offer_price",
-  first_name: "agent_first_name",
+  first_name: "seller_first_name",
 });
 
 function normalizeWhitespace(value) {
@@ -157,6 +158,7 @@ export function buildVariableMap(context = {}, overrides = {}) {
     owner_name: seller_first_name,
     seller_name: seller_first_name,
     agent_name: agent_first_name,
+    street_address: property_address,
     city: property_city,
     market: property_city,
     units: unit_count,
@@ -164,7 +166,7 @@ export function buildVariableMap(context = {}, overrides = {}) {
     avg_rent: monthly_rents,
     estimated_expenses: monthly_expenses,
     smart_cash_offer_display: offer_price,
-    first_name: agent_first_name,
+    first_name: seller_first_name,
   };
 }
 

@@ -114,7 +114,7 @@ test("seller-stage replies can send outside quiet hours once the seller has enga
   assert.equal(result.ok, true);
   assert.equal(result.queued, true);
   assert.equal(result.schedule.within_contact_window, true);
-  assert.equal(result.schedule.scheduled_for_local, "2026-04-02 22:44:00");
+  assert.equal(result.schedule.scheduled_for_local, "2026-04-02 22:46:05");
   assert.equal(queue_calls[0].contact_window, "12AM-11:59PM CT");
 });
 
@@ -140,7 +140,7 @@ test("seller-stage replies after stage 1 can send outside quiet hours with laten
   assert.equal(result.ok, true);
   assert.equal(result.queued, true);
   assert.equal(result.schedule.within_contact_window, true);
-  assert.equal(result.schedule.scheduled_for_local, "2026-04-02 22:44:00");
+  assert.equal(result.schedule.scheduled_for_local, "2026-04-02 22:46:46");
   assert.equal(queue_calls[0].contact_window, "12AM-11:59PM CT");
   assert.equal(queue_calls[0].use_case, "asking_price");
 });

@@ -137,6 +137,7 @@ function extractContactWindowSuffix(contact_window = "", timezone_label = "Centr
 export function parseQueueContactWindow(window_value) {
   const raw = clean(window_value);
   if (!raw) return null;
+  const suffix = extractContactWindowSuffix(raw);
 
   const normalized = raw.toUpperCase();
 
@@ -151,7 +152,7 @@ export function parseQueueContactWindow(window_value) {
 
   if (start === null || end === null) return null;
 
-  return { start, end };
+  return { start, end, suffix };
 }
 
 export function buildAlwaysOnContactWindow(timezone_label = "Central") {
@@ -171,31 +172,7 @@ export function buildFirstContactWindow({
     return `${formatTimeToken(min_minutes)}-${formatTimeToken(max_minutes)} ${suffix}`;
   }
 
-  const intervals =
-    parsed_window.end >= parsed_window.start
-      ? [[parsed_window.start, parsed_window.end]]
-      : [
-          [parsed_window.start, 24 * 60 - 1],
-          [0, parsed_window.end],
-        ];
-
-  const overlaps = intervals
-    .map(([start, end]) => [Math.max(start, min_minutes), Math.min(end, max_minutes)])
-    .filter(([start, end]) => end > start);
-
-  if (!overlaps.length) {
-    return `${formatTimeToken(min_minutes)}-${formatTimeToken(max_minutes)} ${suffix}`;
-  }
-
-  overlaps.sort((left, right) => {
-    const left_span = left[1] - left[0];
-    const right_span = right[1] - right[0];
-    if (right_span !== left_span) return right_span - left_span;
-    return left[0] - right[0];
-  });
-
-  const [start, end] = overlaps[0];
-  return `${formatTimeToken(start)}-${formatTimeToken(end)} ${suffix}`;
+  return `${formatTimeToken(parsed_window.start)}-${formatTimeToken(parsed_window.end)} ${suffix}`;
 }
 
 export function resolveSchedulingContactWindow({
@@ -203,14 +180,10 @@ export function resolveSchedulingContactWindow({
   timezone_label = "Central",
   is_first_contact = false,
 } = {}) {
-  if (is_first_contact) {
-    return buildFirstContactWindow({
-      contact_window,
-      timezone_label,
-    });
-  }
-
-  return buildAlwaysOnContactWindow(timezone_label);
+  return buildFirstContactWindow({
+    contact_window,
+    timezone_label,
+  });
 }
 
 function formatPodioLocalDateTime(parts) {
@@ -277,34 +250,6 @@ function shouldSendNow(current_minutes, window) {
   return current_minutes >= window.start || current_minutes <= window.end;
 }
 
-function getWindowDurationMinutes(window) {
-  if (!window) return 0;
-
-  if (window.end >= window.start) {
-    return Math.max(0, window.end - window.start);
-  }
-
-  return Math.max(0, (24 * 60 - window.start) + window.end);
-}
-
-function pickDistributedWindowSecondOfDay(window, distribution_key = null) {
-  if (!window) return 0;
-
-  const duration_minutes = getWindowDurationMinutes(window);
-  if (!distribution_key || duration_minutes <= 0) {
-    return window.start * 60;
-  }
-
-  const duration_seconds = duration_minutes * 60;
-  const guard_band_seconds = duration_minutes >= 30 ? 5 * 60 : 0;
-  const usable_span_seconds = Math.max(1, duration_seconds - guard_band_seconds * 2);
-  const offset_seconds =
-    guard_band_seconds +
-    (Math.abs(hashString(String(distribution_key))) % usable_span_seconds);
-
-  return ((window.start * 60) + offset_seconds) % (24 * 60 * 60);
-}
-
 function clampToPositiveInteger(value, fallback = 0) {
   const numeric = Math.round(Number(value));
   if (!Number.isFinite(numeric) || numeric < 0) {
@@ -330,6 +275,80 @@ function pickDeterministicDelayMinutes(
   return min + (Math.abs(hashString(String(distribution_key))) % span);
 }
 
+function pickDeterministicSecond(distribution_key = null, salt = "second") {
+  if (!distribution_key) return 0;
+  return Math.abs(hashString(`${distribution_key}:${salt}`)) % 60;
+}
+
+function pickMinuteInRange(min_minutes, max_minutes, distribution_key = null, salt = "minute") {
+  const min = clampToPositiveInteger(min_minutes, 0);
+  const max = clampToPositiveInteger(max_minutes, min);
+
+  if (max <= min) return min;
+  if (!distribution_key) return min;
+
+  const span = max - min + 1;
+  return min + (Math.abs(hashString(`${distribution_key}:${salt}`)) % span);
+}
+
+function addWindowSpread(base_minute, window, distribution_key = null) {
+  const spread = pickDeterministicDelayMinutes(0, 20, distribution_key);
+  const tentative = base_minute + spread;
+
+  if (window.end >= window.start) {
+    return Math.min(tentative, window.end);
+  }
+
+  return tentative >= 24 * 60 ? tentative % (24 * 60) : tentative;
+}
+
+function assertScheduledMinuteWithinWindow(scheduled_minute, window, metadata = {}) {
+  if (shouldSendNow(scheduled_minute, window)) return;
+
+  const error = new Error("INVALID_CONTACT_WINDOW");
+  error.code = "INVALID_CONTACT_WINDOW";
+  error.schedule_metadata = metadata;
+  throw error;
+}
+
+function buildScheduledResult({
+  target_date,
+  scheduled_minute,
+  scheduled_second = 0,
+  parsed_window,
+  timeZone,
+  timezone_label,
+  contact_window,
+  reason,
+  within_contact_window,
+}) {
+  assertScheduledMinuteWithinWindow(scheduled_minute, parsed_window, {
+    scheduled_minute,
+    parsed_window,
+    timezone_label,
+    contact_window,
+    reason,
+  });
+
+  const scheduled_local_parts = {
+    ...target_date,
+    hour: Math.floor(scheduled_minute / 60),
+    minute: scheduled_minute % 60,
+    second: scheduled_second,
+  };
+  const scheduled_utc_date = zonedLocalDateTimeToUtcDate(scheduled_local_parts, timeZone);
+
+  return {
+    scheduled_for_local: formatPodioLocalDateTime(scheduled_local_parts),
+    scheduled_for_utc: toPodioDateTimeString(scheduled_utc_date),
+    timeZone,
+    timezone_label: clean(timezone_label) || "Central",
+    contact_window: clean(contact_window) || null,
+    reason,
+    within_contact_window,
+  };
+}
+
 export function resolveQueueSchedule({
   now = new Date().toISOString(),
   timezone_label = "Central",
@@ -342,6 +361,10 @@ export function resolveQueueSchedule({
   const timeZone = mapQueueTimezoneToIana(timezone_label);
   const local_now_parts = getLocalDateTimeParts(safe_now, timeZone);
   const parsed_window = parseQueueContactWindow(contact_window);
+  const timezone_suffix = extractContactWindowSuffix(contact_window, timezone_label);
+  const normalized_contact_window =
+    clean(contact_window) ||
+    `${formatTimeToken(8 * 60)}-${formatTimeToken(21 * 60)} ${timezone_suffix}`;
 
   if (!parsed_window) {
     return {
@@ -349,109 +372,97 @@ export function resolveQueueSchedule({
       scheduled_for_utc: toPodioDateTimeString(safe_now),
       timeZone,
       timezone_label: clean(timezone_label) || "Central",
-      contact_window: clean(contact_window) || null,
+      contact_window: normalized_contact_window,
       reason: contact_window ? "unparseable_contact_window_schedule_now" : "missing_contact_window_schedule_now",
       within_contact_window: true,
     };
   }
 
-  if (shouldSendNow(local_now_parts.minutes_since_midnight, parsed_window)) {
-    // When a distribution_key is supplied and enough window remains, spread rows
-    // across the remaining contact window instead of collapsing all to "now".
-    // Without a key, < 5 min remaining, or distribute_when_inside_window=false,
-    // fall back to the exact current time.
-    if (distribute_when_inside_window && distribution_key && parsed_window.end >= parsed_window.start) {
-      const remaining_minutes =
-        parsed_window.end - local_now_parts.minutes_since_midnight;
-      if (remaining_minutes >= 5) {
-        const remaining_window = {
-          start: local_now_parts.minutes_since_midnight,
-          end: parsed_window.end,
-        };
-        const scheduled_second_of_day = pickDistributedWindowSecondOfDay(
-          remaining_window,
-          distribution_key
-        );
-        const dist_hour = Math.floor(scheduled_second_of_day / 3600);
-        const dist_minute = Math.floor((scheduled_second_of_day % 3600) / 60);
-        const dist_second = scheduled_second_of_day % 60;
-        const distributed_local_parts = {
-          ...local_now_parts,
-          hour: dist_hour,
-          minute: dist_minute,
-          second: dist_second,
-        };
-        const distributed_utc_date = zonedLocalDateTimeToUtcDate(
-          distributed_local_parts,
-          timeZone
-        );
-        return {
-          scheduled_for_local: formatPodioLocalDateTime(distributed_local_parts),
-          scheduled_for_utc: toPodioDateTimeString(distributed_utc_date),
-          timeZone,
-          timezone_label: clean(timezone_label) || "Central",
-          contact_window: clean(contact_window) || null,
-          reason: "inside_contact_window_distribute_within_remaining_window",
-          within_contact_window: true,
-        };
+  const current_minutes = local_now_parts.minutes_since_midnight;
+  const within_contact_window = shouldSendNow(current_minutes, parsed_window);
+  const scheduled_second = pickDeterministicSecond(distribution_key);
+
+  if (within_contact_window) {
+    let earliest_minute = current_minutes + 2;
+    let latest_minute = parsed_window.end;
+    let target_date = addLocalDays(local_now_parts, 0);
+
+    if (parsed_window.end < parsed_window.start) {
+      if (current_minutes >= parsed_window.start) {
+        latest_minute = 24 * 60 - 1;
       }
     }
 
-    return {
-      scheduled_for_local: formatPodioLocalDateTime(local_now_parts),
-      scheduled_for_utc: toPodioDateTimeString(safe_now),
+    if (earliest_minute > latest_minute) {
+      target_date = addLocalDays(local_now_parts, 1);
+      const delayed_start = addWindowSpread(
+        parsed_window.start,
+        parsed_window,
+        distribution_key ? `${distribution_key}:next-window-start` : null
+      );
+
+      return buildScheduledResult({
+        target_date,
+        scheduled_minute: delayed_start,
+        scheduled_second,
+        parsed_window,
+        timeZone,
+        timezone_label,
+        contact_window: normalized_contact_window,
+        reason: "inside_contact_window_roll_to_next_window",
+        within_contact_window,
+      });
+    }
+
+    const scheduled_minute =
+      distribute_when_inside_window
+        ? pickMinuteInRange(
+            earliest_minute,
+            latest_minute,
+            distribution_key,
+            "inside-window"
+          )
+        : earliest_minute;
+
+    return buildScheduledResult({
+      target_date,
+      scheduled_minute,
+      scheduled_second,
+      parsed_window,
       timeZone,
-      timezone_label: clean(timezone_label) || "Central",
-      contact_window: clean(contact_window) || null,
-      reason: "inside_contact_window_schedule_now",
-      within_contact_window: true,
-    };
+      timezone_label,
+      contact_window: normalized_contact_window,
+      reason: "inside_contact_window_schedule_with_spread",
+      within_contact_window,
+    });
   }
 
-  const target_date =
-    parsed_window.end >= parsed_window.start &&
-    local_now_parts.minutes_since_midnight > parsed_window.end
-      ? addLocalDays(local_now_parts, 1)
-      : parsed_window.end < parsed_window.start &&
-          local_now_parts.minutes_since_midnight > parsed_window.end &&
-          local_now_parts.minutes_since_midnight < parsed_window.start
-        ? addLocalDays(local_now_parts, 0)
-        : addLocalDays(local_now_parts, 0);
-
-  const scheduled_second_of_day = pickDistributedWindowSecondOfDay(
+  const before_window_start =
+    parsed_window.end >= parsed_window.start
+      ? current_minutes < parsed_window.start
+      : current_minutes > parsed_window.end && current_minutes < parsed_window.start;
+  const target_date = before_window_start
+    ? addLocalDays(local_now_parts, 0)
+    : addLocalDays(local_now_parts, 1);
+  const scheduled_minute = addWindowSpread(
+    parsed_window.start,
     parsed_window,
-    distribution_key
+    distribution_key ? `${distribution_key}:window-start` : null
   );
-  const start_hour = Math.floor(scheduled_second_of_day / 3600);
-  const start_minute = Math.floor((scheduled_second_of_day % 3600) / 60);
-  const start_second = scheduled_second_of_day % 60;
-  const scheduled_local_parts = {
-    ...target_date,
-    hour: start_hour,
-    minute: start_minute,
-    second: start_second,
-  };
 
-  if (
-    parsed_window.end >= parsed_window.start &&
-    local_now_parts.minutes_since_midnight > parsed_window.end
-  ) {
-    Object.assign(scheduled_local_parts, addLocalDays(local_now_parts, 1));
-  }
-
-  const scheduled_utc_date = zonedLocalDateTimeToUtcDate(scheduled_local_parts, timeZone);
-
-  return {
-    scheduled_for_local: formatPodioLocalDateTime(scheduled_local_parts),
-    scheduled_for_utc: toPodioDateTimeString(scheduled_utc_date),
+  return buildScheduledResult({
+    target_date,
+    scheduled_minute,
+    scheduled_second,
+    parsed_window,
     timeZone,
-    timezone_label: clean(timezone_label) || "Central",
-    contact_window: clean(contact_window) || null,
-    reason: distribution_key
-      ? "outside_contact_window_schedule_within_window"
-      : "outside_contact_window_schedule_at_window_start",
-    within_contact_window: false,
-  };
+    timezone_label,
+    contact_window: normalized_contact_window,
+    reason: before_window_start
+      ? "before_contact_window_schedule_at_window_start"
+      : "after_contact_window_schedule_next_window",
+    within_contact_window,
+  });
 }
 
 export function resolveLatencyAwareQueueSchedule({

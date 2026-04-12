@@ -134,9 +134,9 @@ test("queue builder writes contact-window when value matches time-range format (
   assert.equal(result.queue_item_id, 123, "queue item must be created successfully");
   assert.equal(
     "contact-window" in (created_fields || {}),
-    true,
-    "contact-window must be present in the payload via compat bypass"
+    false,
+    "contact-window must be omitted when the schema has no matching category option"
   );
-  assert.equal(result.contact_window_written, true);
-  assert.equal(result.contact_window_omit_reason, null);
+  assert.equal(result.contact_window_written, false);
+  assert.equal(result.contact_window_omit_reason, "formatted_value_missing_option_id");
 });

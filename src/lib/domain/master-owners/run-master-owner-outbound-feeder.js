@@ -19,9 +19,7 @@ import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
-import { LOCAL_TEMPLATE_CANDIDATES } from "@/lib/domain/templates/local-template-registry.js";
 import {
-  evaluateTemplatePlaceholders,
   renderTemplate,
 } from "@/lib/domain/templates/render-template.js";
 import { validateActivePhone } from "@/lib/domain/compliance/validate-active-phone.js";
@@ -43,11 +41,15 @@ import {
   loadUsableTextgridNumbers,
 } from "@/lib/domain/routing/choose-textgrid-number.js";
 import { resolveMarketSendingProfile } from "@/lib/config/market-sending-zones.js";
-import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
+import {
+  buildSendQueueItem,
+  detectTouchOneMessageViolation,
+} from "@/lib/domain/queue/build-send-queue-item.js";
 import {
   resolveQueueSchedule,
   resolveSchedulingContactWindow,
 } from "@/lib/domain/queue/queue-schedule.js";
+import { findSendQueueItemByQueueId } from "@/lib/podio/apps/send-queue.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
   fetchAllItems,
@@ -154,6 +156,13 @@ const FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS = new Set([
   "Stage 1 Ownership Check",
   "Stage 1 Ownership Confirmation",
 ]);
+
+const TOUCH_ONE_STAGE = "Cold Outbound";
+const TOUCH_ONE_MESSAGE_TYPE = "Cold Outbound";
+const TOUCH_ONE_USE_CASE = "ownership_check";
+const TOUCH_ONE_VARIANT_GROUP = "Stage 1 — Ownership Confirmation";
+const TOUCH_ONE_PERSONA = "Warm Professional";
+const TOUCH_ONE_TONE = "Warm";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -332,20 +341,6 @@ function countReasons(results = []) {
     .sort((left, right) => right.count - left.count);
 }
 
-function countPlaceholderMentions(placeholders = []) {
-  const counts = new Map();
-
-  for (const placeholder of placeholders) {
-    const key = clean(placeholder);
-    if (!key) continue;
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-
-  return [...counts.entries()]
-    .map(([placeholder, count]) => ({ placeholder, count }))
-    .sort((left, right) => right.count - left.count);
-}
-
 function buildTemplateSelectionInputs({
   effective_follow_up_plan = null,
   primary_category = "Residential",
@@ -387,7 +382,11 @@ function buildTemplateSelectionInputs({
       "Warm Professional",
     context,
     allow_variant_group_fallback: true,
-    allowed_variant_groups: is_first_touch ? FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS : undefined,
+    allowed_variant_groups: undefined,
+    required_use_cases: undefined,
+    required_variant_groups: undefined,
+    require_explicit_variant_group: false,
+    strict_touch_one_podio_only: Boolean(is_first_touch),
   };
 }
 
@@ -418,47 +417,6 @@ function summarizeTemplateSelectionInputs({
     recently_used_template_count:
       template_selection_inputs.recently_used_template_ids?.length || 0,
     is_first_touch,
-  };
-}
-
-function inspectStageOneTemplateFallback({
-  context = null,
-  template_selection_inputs = {},
-} = {}) {
-  const fallback_candidates = LOCAL_TEMPLATE_CANDIDATES.filter(
-    (template) =>
-      template?.use_case === "ownership_check" &&
-      FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(template?.variant_group || "")
-  );
-  const missing_required_placeholders = [];
-  const invalid_placeholders = [];
-  let renderable_candidate_count = 0;
-
-  for (const template of fallback_candidates) {
-    const evaluation = evaluateTemplatePlaceholders({
-      template_text: template?.text || "",
-      use_case: template_selection_inputs.use_case || "ownership_check",
-      variant_group:
-        template_selection_inputs.variant_group || "Stage 1 — Ownership Confirmation",
-      context: template_selection_inputs.context || context || {},
-    });
-
-    if (evaluation.ok) {
-      renderable_candidate_count += 1;
-      continue;
-    }
-
-    missing_required_placeholders.push(...evaluation.missing_required_placeholders);
-    invalid_placeholders.push(...evaluation.invalid_placeholders);
-  }
-
-  return {
-    fallback_candidate_count: fallback_candidates.length,
-    renderable_candidate_count,
-    missing_required_placeholder_counts: countPlaceholderMentions(
-      missing_required_placeholders
-    ).slice(0, 10),
-    invalid_placeholder_counts: countPlaceholderMentions(invalid_placeholders).slice(0, 10),
   };
 }
 
@@ -1015,6 +973,115 @@ function deriveSendPriority(priority_score, owner_item) {
   if (priority_tier === "TIER_1" || priority_score >= 1400) return "_ Urgent";
   if (priority_tier === "TIER_2" || priority_score >= 850) return "_ Normal";
   return "_ Low";
+}
+
+function buildStrictTouchOneRoute(route = null) {
+  return {
+    ...(route || {}),
+    stage: TOUCH_ONE_STAGE,
+    lifecycle_stage: null,
+    use_case: TOUCH_ONE_USE_CASE,
+    tone: TOUCH_ONE_TONE,
+    variant_group: TOUCH_ONE_VARIANT_GROUP,
+    persona: TOUCH_ONE_PERSONA,
+    brain_ai_route: null,
+    template_filters: {
+      ...(route?.template_filters || {}),
+      paired_with_agent_type: TOUCH_ONE_PERSONA,
+      fallback_agent_type: TOUCH_ONE_PERSONA,
+    },
+  };
+}
+
+function isValidTouchOneTemplate(template = null) {
+  if (!template) return false;
+
+  const resolved_use_case = normalizeSellerFlowUseCase(
+    clean(template?.use_case_label) ||
+      clean(template?.use_case) ||
+      clean(template?.canonical_routing_slug),
+    clean(template?.variant_group) || clean(template?.stage_label) || null
+  );
+  const stage_code = clean(template?.stage_code).toUpperCase();
+  const stage_markers = [template?.variant_group, template?.stage_label].some((value) =>
+    lower(value).includes("stage 1")
+  );
+
+  return (
+    resolved_use_case === TOUCH_ONE_USE_CASE &&
+    (stage_code === "S1" || stage_markers)
+  );
+}
+
+function buildFeederValidationError(code, details = {}) {
+  const error = new Error(code);
+  error.code = code;
+  Object.assign(error, details);
+  return error;
+}
+
+function buildSyntheticQueueHistoryItem({
+  queue_item_id,
+  phone_item_id,
+  master_owner_id,
+  touch_number,
+  queue_id,
+} = {}) {
+  return {
+    item_id: queue_item_id || null,
+    fields: [
+      {
+        external_id: "queue-status",
+        values: [{ value: { text: "Queued" } }],
+      },
+      {
+        external_id: "phone-number",
+        values: [{ value: { item_id: phone_item_id } }],
+      },
+      {
+        external_id: "touch-number",
+        values: [{ value: Number(touch_number) || 0 }],
+      },
+      {
+        external_id: "queue-id-2",
+        values: [{ value: queue_id || null }],
+      },
+      {
+        external_id: "master-owner",
+        values: [{ value: { item_id: master_owner_id } }],
+      },
+    ],
+  };
+}
+
+function appendQueueItemToRuntimeHistory({
+  runtime = null,
+  master_owner_id = null,
+  queue_item_id = null,
+  phone_item_id = null,
+  touch_number = null,
+  queue_id = null,
+} = {}) {
+  if (!runtime?.owner_history_by_id || !master_owner_id || !queue_item_id) return;
+
+  const cache_key = String(master_owner_id);
+  const cached_history = runtime.owner_history_by_id.get(cache_key);
+  if (!cached_history?.queue_items) return;
+
+  const already_present = cached_history.queue_items.some(
+    (item) => String(item?.item_id || "") === String(queue_item_id)
+  );
+  if (already_present) return;
+
+  cached_history.queue_items.push(
+    buildSyntheticQueueHistoryItem({
+      queue_item_id,
+      phone_item_id,
+      master_owner_id,
+      touch_number,
+      queue_id,
+    })
+  );
 }
 
 async function loadCachedTextgridNumberPool({ runtime = null, log = logger } = {}) {
@@ -2463,6 +2530,8 @@ async function evaluateOwner({
   // CRM-confirmed engagement. Stale history from prior bad queue rows must not
   // permanently suppress them — only pending same-phone rows do.
   const is_first_touch = detectFirstTouch({ owner_item });
+  const strict_touch_one_mode = touch_number === 1;
+  const template_stage_lock = strict_touch_one_mode || is_first_touch;
 
   // For engaged/follow-up leads, suppress if contacted recently.
   // For first-touch blank-status leads, skip this entirely — their stale outbound
@@ -2913,33 +2982,41 @@ async function evaluateOwner({
     phone_item: selected_phone_record.phone_item,
     message: "",
   });
+  const effective_route = strict_touch_one_mode
+    ? buildStrictTouchOneRoute(route)
+    : route;
 
   const primary_category = deriveTemplatePrimaryCategory(
     property_item,
     owner_item,
-    route?.primary_category || "Residential"
+    effective_route?.primary_category || "Residential"
   );
   const follow_up_plan = explicit_follow_up_due
     ? deriveNoReplyFollowUpPlan({
         history,
         default_category: primary_category,
-        default_tone: route?.tone || "Warm",
+        default_tone: effective_route?.tone || TOUCH_ONE_TONE,
       })
     : null;
   const secondary_category = deriveTemplateSecondaryCategory(
     property_item,
     owner_item,
-    route?.secondary_category || null
+    effective_route?.secondary_category || null
   );
-  const sequence_position = deriveSequencePosition(route?.stage || stage_hint, owner_touch_count);
+  const sequence_position = strict_touch_one_mode
+    ? "1st Touch"
+    : deriveSequencePosition(
+        effective_route?.stage || stage_hint,
+        owner_touch_count
+      );
 
   // ── FIRST-TOUCH TEMPLATE GATING ─────────────────────────────────────────
   // is_first_touch was computed above (before suppression checks).
   // Suppress follow_up_plan for first-touch: any prior outbound history without
   // confirmed CRM engagement is contamination, not real stage progression.
-  const effective_follow_up_plan = is_first_touch ? null : follow_up_plan;
+  const effective_follow_up_plan = template_stage_lock ? null : follow_up_plan;
 
-  if (is_first_touch) {
+  if (template_stage_lock) {
     // Require at minimum a real property item OR a synthetic property built from
     // seller_id. The synthetic fallback was already attempted above before context
     // was built, so property_item?.synthetic being true here means seller_id
@@ -3029,7 +3106,7 @@ async function evaluateOwner({
       "no-property",
     primary_category || "no-category",
     language || "no-language",
-    route?.use_case || "no-use-case",
+    effective_route?.use_case || TOUCH_ONE_USE_CASE,
     message_variant_seed || "",
   ].join(":");
 
@@ -3044,7 +3121,7 @@ async function evaluateOwner({
         owner_item,
         context,
         classification,
-        route,
+        route: effective_route,
         rotation_key,
         now_ts,
         runtime,
@@ -3068,8 +3145,8 @@ async function evaluateOwner({
     effective_follow_up_plan,
     primary_category,
     secondary_category,
-    is_first_touch,
-    route,
+    is_first_touch: template_stage_lock,
+    route: effective_route,
     language,
     sequence_position,
     context,
@@ -3079,7 +3156,7 @@ async function evaluateOwner({
     template_selection_inputs,
     property_item,
     context,
-    is_first_touch,
+    is_first_touch: template_stage_lock,
   });
 
   log.info("master_owner_feeder.template_resolution_inputs", {
@@ -3087,7 +3164,7 @@ async function evaluateOwner({
     ...template_resolution_inputs,
   });
 
-  const selected_template = await timedStage(
+  let selected_template = await timedStage(
     log,
     "master_owner_feeder.template_selection",
     {
@@ -3098,24 +3175,15 @@ async function evaluateOwner({
   );
 
   if (!selected_template?.item_id) {
-    const stage_one_fallback = is_first_touch
-      ? inspectStageOneTemplateFallback({
-          context,
-          template_selection_inputs,
-        })
-      : null;
     const template_resolution_diagnostics = {
       ...template_resolution_inputs,
-      failure_reason: is_first_touch
-        ? stage_one_fallback?.renderable_candidate_count
-          ? "stage1_templates_available_but_not_selected"
-          : "stage1_fallback_templates_not_renderable"
+      failure_reason: template_stage_lock
+        ? "template_missing"
         : "no_template_candidates_matched_filters",
-      fallback_candidate_count: stage_one_fallback?.fallback_candidate_count ?? 0,
-      renderable_candidate_count: stage_one_fallback?.renderable_candidate_count ?? 0,
-      missing_required_placeholder_counts:
-        stage_one_fallback?.missing_required_placeholder_counts ?? [],
-      invalid_placeholder_counts: stage_one_fallback?.invalid_placeholder_counts ?? [],
+      fallback_candidate_count: 0,
+      renderable_candidate_count: 0,
+      missing_required_placeholder_counts: [],
+      invalid_placeholder_counts: [],
     };
 
     log.warn("master_owner_feeder.template_resolution_failed", {
@@ -3123,17 +3191,30 @@ async function evaluateOwner({
       ...template_resolution_diagnostics,
     });
 
-    return {
-      ok: false,
-      skipped: true,
-      reason: "template_not_found",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      property: summarizeProperty(property_item, owner_item),
-      outbound_number_source: outbound_number.source,
-      outbound_number_diagnostics: outbound_number.diagnostics || null,
-      template_resolution_diagnostics,
-    };
+    if (template_stage_lock) {
+      log.warn("master_owner_feeder.touch_one_template_missing", {
+        master_owner_id,
+        evaluation_depth,
+        template_resolution_diagnostics,
+        reason: "template_missing",
+      });
+      throw buildFeederValidationError("NO_STAGE_1_TEMPLATE_FOUND", {
+        master_owner_id,
+        template_resolution_diagnostics,
+      });
+    } else {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "template_not_found",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        property: summarizeProperty(property_item, owner_item),
+        outbound_number_source: outbound_number.source,
+        outbound_number_diagnostics: outbound_number.diagnostics || null,
+        template_resolution_diagnostics,
+      };
+    }
   }
 
   // Part 3 — Template selection audit log.
@@ -3161,7 +3242,7 @@ async function evaluateOwner({
     rotation_key,
     recently_used_count: context?.recent?.recently_used_template_ids?.length || 0,
     brain_item_id: owner_brain_item_id ?? null,
-    is_first_touch,
+    is_first_touch: template_stage_lock,
     sequence_position: template_selection_inputs.sequence_position || null,
     tone: template_selection_inputs.tone || null,
     language: template_selection_inputs.language || null,
@@ -3172,48 +3253,66 @@ async function evaluateOwner({
   // templates from reaching here.  If one slips through anyway (e.g. a template
   // with a forbidden use_case but no variant_group), reject it and treat the
   // result as "no valid first-touch template available" rather than as an error.
-  if (is_first_touch) {
+  if (template_stage_lock && !isValidTouchOneTemplate(selected_template)) {
     const tmpl_use_case = selected_template.use_case || null;
     const tmpl_variant = selected_template.variant_group || null;
     const use_case_forbidden =
       tmpl_use_case && FORBIDDEN_FIRST_TOUCH_USE_CASES.has(tmpl_use_case);
     const variant_not_allowed =
       tmpl_variant && !FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(tmpl_variant);
-
-    if (use_case_forbidden || variant_not_allowed) {
-      warn("master_owner_feeder.first_touch_template_guard_rejected", {
-        master_owner_id,
-        template_id: selected_template.item_id,
-        tmpl_use_case,
-        tmpl_variant,
-        use_case_forbidden,
-        variant_not_allowed,
-        note: "allowed_variant_groups filter should have excluded this — check template data in Podio",
-      });
-      return {
-        ok: false,
-        skipped: true,
-        reason: "no_valid_first_touch_template",
-        owner: owner_summary,
-        phone: selected_phone_record.summary,
-        property: summarizeProperty(property_item, owner_item),
-        first_touch: true,
-        template_id: selected_template.item_id,
-        tmpl_use_case,
-        tmpl_variant,
-      };
-    }
+    warn("master_owner_feeder.first_touch_template_guard_rejected", {
+      master_owner_id,
+      template_id: selected_template.item_id,
+      tmpl_use_case,
+      tmpl_variant,
+      use_case_forbidden,
+      variant_not_allowed,
+      note: "strict touch-one rejection",
+    });
+    throw buildFeederValidationError("INVALID_STAGE_1_TEMPLATE_SELECTED", {
+      master_owner_id,
+      template_id: selected_template.item_id,
+      tmpl_use_case,
+      tmpl_variant,
+    });
   }
   // ──────────────────────────────────────────────────────────────────────────
+
+  if (
+    strict_touch_one_mode &&
+    detectTouchOneMessageViolation(selected_template?.text || "")
+  ) {
+    warn("master_owner_feeder.touch_one_template_text_rejected", {
+      master_owner_id,
+      template_id: selected_template?.item_id ?? null,
+      template_title: selected_template?.title ?? null,
+      action: "reject_template",
+    });
+    throw buildFeederValidationError("INVALID_STAGE_1_MESSAGE", {
+      master_owner_id,
+      template_id: selected_template?.item_id ?? null,
+    });
+  }
+
+  if (strict_touch_one_mode && clean(selected_template?.source).toLowerCase() !== "podio") {
+    throw buildFeederValidationError("NO_STAGE_1_TEMPLATE_FOUND", {
+      master_owner_id,
+      template_id: selected_template?.item_id ?? null,
+      template_source: selected_template?.source ?? null,
+    });
+  }
 
   const render_result = renderTemplate({
     template_text: selected_template.text,
     context,
     overrides: {
       language,
-      conversation_stage: route?.stage || stage_hint,
-      lifecycle_stage: route?.lifecycle_stage || null,
-      ai_route: route?.brain_ai_route || context.summary?.brain_ai_route || null,
+      conversation_stage: effective_route?.stage || stage_hint,
+      lifecycle_stage: effective_route?.lifecycle_stage || null,
+      ai_route:
+        strict_touch_one_mode
+          ? null
+          : (effective_route?.brain_ai_route || context.summary?.brain_ai_route || null),
     },
     use_case: selected_template?.use_case || effective_follow_up_plan?.template_lookup_use_case,
     variant_group: selected_template?.variant_group || effective_follow_up_plan?.variant_group,
@@ -3223,7 +3322,7 @@ async function evaluateOwner({
     render_result?.invalid_placeholders?.length ||
     render_result?.missing_required_placeholders?.length
   ) {
-    if (is_first_touch) {
+    if (template_stage_lock) {
       warn("master_owner_feeder.first_touch_placeholder_validation_failed", {
         master_owner_id,
         detected_first_touch: true,
@@ -3242,7 +3341,7 @@ async function evaluateOwner({
       owner: owner_summary,
       phone: selected_phone_record.summary,
       property: summarizeProperty(property_item, owner_item),
-      first_touch: is_first_touch,
+      first_touch: template_stage_lock,
       template_id: selected_template.item_id,
       invalid_placeholders: render_result?.invalid_placeholders || [],
       missing_required_placeholders:
@@ -3262,6 +3361,23 @@ async function evaluateOwner({
       property: summarizeProperty(property_item, owner_item),
       template_id: selected_template.item_id,
     };
+  }
+
+  if (strict_touch_one_mode) {
+    const touch_one_violation = detectTouchOneMessageViolation(rendered_message_text);
+    if (touch_one_violation) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "invalid_stage_1_message",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        property: summarizeProperty(property_item, owner_item),
+        template_id: selected_template.item_id,
+        invalid_phrase: touch_one_violation,
+        rendered_message_text,
+      };
+    }
   }
 
   const schedule = resolveQueueSchedule({
@@ -3297,26 +3413,43 @@ async function evaluateOwner({
     deferred_brain_suppression: true,
     schedule,
     route: {
-      stage: route?.stage || stage_hint,
-      lifecycle_stage: route?.lifecycle_stage || null,
-      use_case: effective_follow_up_plan?.base_use_case || route?.use_case || "ownership_check",
-      tone: effective_follow_up_plan?.tone || route?.tone || "Warm",
+      stage: strict_touch_one_mode
+        ? TOUCH_ONE_STAGE
+        : (effective_route?.stage || stage_hint),
+      lifecycle_stage: strict_touch_one_mode
+        ? null
+        : (effective_route?.lifecycle_stage || null),
+      use_case: strict_touch_one_mode
+        ? TOUCH_ONE_USE_CASE
+        : (effective_follow_up_plan?.base_use_case ||
+            effective_route?.use_case ||
+            TOUCH_ONE_USE_CASE),
+      tone: strict_touch_one_mode
+        ? TOUCH_ONE_TONE
+        : (effective_follow_up_plan?.tone || effective_route?.tone || TOUCH_ONE_TONE),
       variant_group:
-        effective_follow_up_plan?.variant_group ||
-        route?.variant_group ||
-        "Stage 1 — Ownership Confirmation",
+        strict_touch_one_mode
+          ? TOUCH_ONE_VARIANT_GROUP
+          : (effective_follow_up_plan?.variant_group ||
+              effective_route?.variant_group ||
+              TOUCH_ONE_VARIANT_GROUP),
       language,
-      persona:
-        effective_follow_up_plan?.paired_with_agent_type ||
-        route?.template_filters?.paired_with_agent_type ||
-        route?.persona ||
-        "Warm Professional",
+      persona: strict_touch_one_mode
+        ? TOUCH_ONE_PERSONA
+        : (effective_follow_up_plan?.paired_with_agent_type ||
+            effective_route?.template_filters?.paired_with_agent_type ||
+            effective_route?.persona ||
+            TOUCH_ONE_PERSONA),
       category: effective_follow_up_plan?.category || primary_category,
       secondary_category: effective_follow_up_plan?.secondary_category ?? secondary_category,
       sequence_position,
       next_expected_stage:
-        effective_follow_up_plan?.next_expected_stage ||
-        canonicalStageForUseCase(route?.use_case || "ownership_check"),
+        strict_touch_one_mode
+          ? TOUCH_ONE_STAGE
+          : (effective_follow_up_plan?.next_expected_stage ||
+              canonicalStageForUseCase(
+                effective_route?.use_case || TOUCH_ONE_USE_CASE
+              )),
     },
     touch_number,
     send_priority,
@@ -3348,12 +3481,35 @@ async function evaluateOwner({
     selected_phone_record.phone_item_id,
     touch_number,
   ].join(":");
-  const queue_message_type =
-    effective_follow_up_plan
+  const existing_queue_row = await timedStage(
+    log,
+    "master_owner_feeder.queue_id_duplicate_check",
+    {
+      evaluation_depth,
+      queue_id: idempotency_queue_id,
+    },
+    () => findSendQueueItemByQueueId(idempotency_queue_id)
+  );
+
+  if (existing_queue_row?.item_id) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "duplicate_queue_id",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      duplicate_queue_item_id: existing_queue_row.item_id,
+      queue_id: idempotency_queue_id,
+    };
+  }
+
+  const queue_message_type = strict_touch_one_mode
+    ? TOUCH_ONE_MESSAGE_TYPE
+    : effective_follow_up_plan
       ? "Follow-Up"
       : deriveQueueMessageType(
-          route?.stage || stage_hint,
-          route?.lifecycle_stage || null
+          effective_route?.stage || stage_hint,
+          effective_route?.lifecycle_stage || null
         );
 
   try {
@@ -3362,6 +3518,7 @@ async function evaluateOwner({
       rendered_message_text,
       template_id: selected_template.item_id,
       template_item: selected_template,
+      expected_template_message_text: rendered_message_text,
       defer_message_resolution: false,
       textgrid_number_item_id: outbound_number.textgrid_number_item_id,
       scheduled_for_local: { start: schedule.scheduled_for_local },
@@ -3378,7 +3535,20 @@ async function evaluateOwner({
       queue_id: idempotency_queue_id,
       property_type: primary_category || null,
       secondary_category: secondary_category || null,
-      use_case_template: selected_template?.use_case || null,
+      current_stage: strict_touch_one_mode ? TOUCH_ONE_STAGE : (effective_route?.stage || stage_hint),
+      use_case_template: strict_touch_one_mode
+        ? TOUCH_ONE_USE_CASE
+        : (selected_template?.use_case || null),
+      strict_cold_outbound: strict_touch_one_mode,
+    });
+
+    appendQueueItemToRuntimeHistory({
+      runtime,
+      master_owner_id,
+      queue_item_id: queue_result?.queue_item_id || null,
+      phone_item_id: selected_phone_record.phone_item_id,
+      touch_number,
+      queue_id: idempotency_queue_id,
     });
 
     return {
@@ -3392,6 +3562,10 @@ async function evaluateOwner({
       queue_result,
     };
   } catch (error) {
+    if (strict_touch_one_mode) {
+      throw error;
+    }
+
     try {
       const queue_result = await queueOwnerFallbackMinimal({
         context,
@@ -3407,6 +3581,15 @@ async function evaluateOwner({
         selected_phone_record,
         error,
         log,
+      });
+
+      appendQueueItemToRuntimeHistory({
+        runtime,
+        master_owner_id,
+        queue_item_id: queue_result?.queue_item_id || null,
+        phone_item_id: selected_phone_record.phone_item_id,
+        touch_number,
+        queue_id: idempotency_queue_id,
       });
 
       return {
