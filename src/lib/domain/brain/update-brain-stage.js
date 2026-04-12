@@ -1,28 +1,14 @@
 // ─── update-brain-stage.js ───────────────────────────────────────────────
-import { updateBrain, normalizeStage } from "@/lib/providers/podio.js";
-
-const BRAIN_FIELDS = {
-  conversation_stage: "conversation-stage",
-};
-
-function clean(value) {
-  return String(value ?? "").trim();
-}
+import {
+  applyBrainStateUpdate,
+  buildStageBrainStateFields,
+} from "@/lib/domain/brain/brain-authority.js";
 
 export async function updateBrainStage({
   brain_id = null,
   stage = null,
 } = {}) {
-  if (!brain_id) {
-    return {
-      ok: false,
-      reason: "missing_brain_id",
-    };
-  }
-
-  const normalized_input = clean(stage);
-
-  if (!normalized_input) {
+  if (!String(stage ?? "").trim()) {
     return {
       ok: false,
       reason: "missing_stage",
@@ -30,16 +16,15 @@ export async function updateBrainStage({
     };
   }
 
-  const normalized_stage = normalizeStage(normalized_input);
-
-  await updateBrain(brain_id, {
-    [BRAIN_FIELDS.conversation_stage]: normalized_stage,
+  const result = await applyBrainStateUpdate({
+    brain_id,
+    reason: "conversation_stage_changed",
+    fields: buildStageBrainStateFields({ stage }),
   });
 
   return {
-    ok: true,
-    brain_id,
-    stage: normalized_stage,
+    ...result,
+    stage: result.updated_fields?.["conversation-stage"] || null,
   };
 }
 

@@ -9,8 +9,10 @@ import {
 
 const EVENT_FIELDS = {
   message_id: "message-id",
+  provider_message_sid: "text-2",
   timestamp: "timestamp",
   direction: "direction",
+  event_type: "category",
   master_owner: "master-owner",
   prospect: "linked-seller",
   property: "property",
@@ -34,6 +36,27 @@ function nowIso() {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function asArrayAppRef(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
+}
+
+const defaultDeps = {
+  createMessageEvent,
+  linkMessageEventToBrain,
+  mapTextgridFailureBucket,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
+export function __setLogDeliveryEventTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetLogDeliveryEventTestDeps() {
+  runtimeDeps = { ...defaultDeps };
 }
 
 function lower(value) {
@@ -80,7 +103,7 @@ export async function logDeliveryEvent({
   phone_item_id = null,
   textgrid_number_item_id = null,
   conversation_item_id = null,
-  processed_by = "Scheduled Campaign",
+  processed_by = "System",
   source_app = "External API",
   trigger_name = "textgrid-delivery",
 } = {}) {
@@ -88,7 +111,7 @@ export async function logDeliveryEvent({
   const is_failed = normalized_status === "Failed";
 
   const failure_bucket = is_failed
-    ? mapTextgridFailureBucket({
+    ? runtimeDeps.mapTextgridFailureBucket({
         ok: false,
         error_message,
         error_status,
@@ -102,7 +125,9 @@ export async function logDeliveryEvent({
 
   const fields = {
     [EVENT_FIELDS.message_id]: provider_message_id || null,
+    [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Outbound",
+    [EVENT_FIELDS.event_type]: is_failed ? "Send Failure" : "Delivery Update",
     [EVENT_FIELDS.timestamp]: { start: nowIso() },
     [EVENT_FIELDS.message]: message,
     [EVENT_FIELDS.delivery_status]: normalized_status,
@@ -121,21 +146,31 @@ export async function logDeliveryEvent({
         conversation_item_id,
       })
     ),
-    ...(master_owner_id ? { [EVENT_FIELDS.master_owner]: master_owner_id } : {}),
-    ...(prospect_id ? { [EVENT_FIELDS.prospect]: prospect_id } : {}),
-    ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
-    ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
-    ...(conversation_item_id ? { [EVENT_FIELDS.conversation]: conversation_item_id } : {}),
-    ...(textgrid_number_item_id
-      ? { [EVENT_FIELDS.textgrid_number]: textgrid_number_item_id }
+    ...(asArrayAppRef(master_owner_id)
+      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
+      : {}),
+    ...(asArrayAppRef(prospect_id)
+      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
+      : {}),
+    ...(asArrayAppRef(property_id)
+      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
+      : {}),
+    ...(asArrayAppRef(phone_item_id)
+      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
+      : {}),
+    ...(asArrayAppRef(textgrid_number_item_id)
+      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(textgrid_number_item_id) }
+      : {}),
+    ...(asArrayAppRef(conversation_item_id)
+      ? { [EVENT_FIELDS.conversation]: asArrayAppRef(conversation_item_id) }
       : {}),
     ...(failure_bucket ? { [EVENT_FIELDS.failure_bucket]: failure_bucket } : {}),
     ...(is_failed ? { [EVENT_FIELDS.is_final_failure]: "Yes" } : {}),
   };
 
-  const created = await createMessageEvent(fields);
+  const created = await runtimeDeps.createMessageEvent(fields);
 
-  await linkMessageEventToBrain({
+  await runtimeDeps.linkMessageEventToBrain({
     brain_id: conversation_item_id || null,
     message_event_id: created?.item_id ?? null,
   });

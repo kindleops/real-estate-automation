@@ -8,6 +8,8 @@ import {
   createStoredDocumentPackage,
 } from "@/lib/domain/documents/document-packages.js";
 import { sendContractViaDocusign } from "@/lib/domain/contracts/send-contract-via-docusign.js";
+import { resolveContractTemplate } from "@/lib/domain/contracts/resolve-contract-template.js";
+import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { createMessageEvent } from "@/lib/providers/podio.js";
 
 function clean(value) {
@@ -86,6 +88,16 @@ function normalizeSigners(signers = []) {
     .filter(Boolean);
 }
 
+function inferSignerRole(signer = {}) {
+  const normalized = lower(
+    signer?.role_name || signer?.recipient_type || signer?.signer_id || ""
+  );
+
+  if (normalized.includes("buyer")) return "buyer";
+  if (normalized.includes("cc")) return "internal_cc";
+  return "seller";
+}
+
 function isSendableContractStatus(status = "") {
   const normalized = lower(status);
   return ["draft", "sent", "viewed"].includes(normalized);
@@ -117,9 +129,12 @@ function validateSigningInputs({
   documents = [],
   signers = [],
   template_id = null,
+  resolved_template = null,
 } = {}) {
   const normalized_documents = normalizeDocuments(documents);
   const normalized_signers = normalizeSigners(signers);
+  const resolved_template_id =
+    clean(template_id) || clean(resolved_template?.docusign_template_id);
 
   if (!contract_item_id) {
     return {
@@ -171,12 +186,15 @@ function validateSigningInputs({
     };
   }
 
-  if (!normalized_documents.length && !clean(template_id)) {
+  if (!normalized_documents.length && !resolved_template_id) {
     return {
       ok: false,
-      reason: "missing_documents_or_template",
+      reason: resolved_template
+        ? "missing_documents_or_resolved_template"
+        : "missing_documents_or_template",
       contract_item_id,
       contract_status,
+      resolved_template,
     };
   }
 
@@ -199,6 +217,7 @@ function validateSigningInputs({
       reason: "invalid_signer",
       contract_item_id,
       contract_status,
+      invalid_signer,
     };
   }
 
@@ -209,7 +228,83 @@ function validateSigningInputs({
     contract_status,
     documents: normalized_documents,
     signers: normalized_signers,
+    template_id: resolved_template_id || null,
+    resolved_template: resolved_template || null,
   };
+}
+
+const defaultDeps = {
+  createStoredDocumentPackage,
+  createMessageEvent,
+  sendContractViaDocusign,
+  resolveContractTemplate,
+  syncPipelineState,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
+export function __setMaybeSendContractForSigningTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetMaybeSendContractForSigningTestDeps() {
+  runtimeDeps = { ...defaultDeps };
+}
+
+function buildContractSendBlocker({
+  validation = null,
+  resolved_template = null,
+} = {}) {
+  const reason = clean(validation?.reason);
+  const invalid_signer = validation?.invalid_signer || null;
+  const invalid_signer_role = inferSignerRole(invalid_signer);
+
+  switch (reason) {
+    case "missing_documents_or_template":
+    case "missing_documents_or_resolved_template":
+      return {
+        blocked: "Yes",
+        automation_status: "Escalated",
+        current_engine: "Contracts",
+        blocker_type: "Missing Docs",
+        next_system_action: resolved_template?.ok
+          ? "prepare_contract_documents"
+          : "resolve_contract_template",
+        blocker_summary: resolved_template?.ok
+          ? "Contract is missing a sendable template package or file documents."
+          : "No active auto-generation contract template could be resolved.",
+      };
+    case "missing_signers":
+      return {
+        blocked: "Yes",
+        automation_status: "Escalated",
+        current_engine: "Contracts",
+        blocker_type: "Missing Docs",
+        next_system_action: "collect_contract_signers",
+        blocker_summary: "Contract send is blocked until signer records are attached.",
+      };
+    case "invalid_signer":
+      return {
+        blocked: "Yes",
+        automation_status: "Escalated",
+        current_engine: "Contracts",
+        blocker_type: "Missing Docs",
+        next_system_action:
+          invalid_signer_role === "seller"
+            ? "collect_seller_email"
+            : invalid_signer_role === "buyer"
+              ? "collect_buyer_email"
+              : "repair_contract_signer",
+        blocker_summary:
+          invalid_signer_role === "seller"
+            ? "Seller signer data is incomplete for contract send."
+            : invalid_signer_role === "buyer"
+              ? "Buyer signer data is incomplete for contract send."
+              : "One or more contract signers are incomplete.",
+      };
+    default:
+      return null;
+  }
 }
 
 export async function maybeSendContractForSigning({
@@ -240,15 +335,43 @@ export async function maybeSendContractForSigning({
       ? contract
       : await getContractItem(contract_item_id);
 
+  const template_resolution =
+    !normalizeDocuments(documents).length && !clean(template_id)
+      ? await runtimeDeps.resolveContractTemplate({
+          contract_item,
+          contract_item_id,
+        })
+      : null;
+
   const validation = validateSigningInputs({
     contract_item,
     contract_item_id,
     documents,
     signers,
     template_id,
+    resolved_template: template_resolution?.ok ? template_resolution : null,
   });
 
   if (!validation.ok) {
+    const blocker = buildContractSendBlocker({
+      validation,
+      resolved_template: template_resolution,
+    });
+
+    if (blocker && validation.contract_item_id) {
+      await runtimeDeps.syncPipelineState({
+        contract_item_id: validation.contract_item_id,
+        blocked: blocker.blocked,
+        automation_status: blocker.automation_status,
+        current_engine: blocker.current_engine,
+        blocker_type: blocker.blocker_type,
+        blocker_summary: blocker.blocker_summary,
+        next_system_action: blocker.next_system_action,
+        notes: blocker.blocker_summary,
+        ai_next_move_summary: blocker.next_system_action,
+      });
+    }
+
     return {
       ok: false,
       attempted: false,
@@ -257,6 +380,7 @@ export async function maybeSendContractForSigning({
       contract_item_id: validation.contract_item_id,
       contract_status: validation.contract_status || null,
       envelope_id: validation.envelope_id || null,
+      template_resolution,
     };
   }
 
@@ -271,13 +395,14 @@ export async function maybeSendContractForSigning({
       ready: true,
       documents_count: validation.documents.length,
       signers_count: validation.signers.length,
+      template_resolution,
     };
   }
 
   const resolved_subject = deriveResolvedSubject(contract_item, subject);
   const document_archive =
     validation.documents.length
-      ? await createStoredDocumentPackage({
+      ? await runtimeDeps.createStoredDocumentPackage({
           namespace: "contracts",
           entity_type: "contract",
           entity_id: validation.contract_item_id,
@@ -299,7 +424,7 @@ export async function maybeSendContractForSigning({
       : null;
 
   if (document_archive?.ok) {
-    await createMessageEvent({
+    await runtimeDeps.createMessageEvent({
       "message-id": `contract-archive:${validation.contract_item_id}:${document_archive.package_id}`,
       "timestamp": { start: new Date().toISOString() },
       "direction": "Outbound",
@@ -325,13 +450,13 @@ export async function maybeSendContractForSigning({
     });
   }
 
-  const send_result = await sendContractViaDocusign({
+  const send_result = await runtimeDeps.sendContractViaDocusign({
     contract_item_id: validation.contract_item_id,
     contract_item,
     subject: resolved_subject,
     documents: validation.documents,
     signers: validation.signers,
-    template_id,
+    template_id: validation.template_id,
     email_blurb,
     metadata,
     dry_run,
@@ -347,6 +472,7 @@ export async function maybeSendContractForSigning({
     envelope_id: send_result?.envelope_id || null,
     documents_count: validation.documents.length,
     signers_count: validation.signers.length,
+    template_resolution,
     document_archive,
     send_result,
   };

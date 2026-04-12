@@ -16,7 +16,6 @@ import {
   dateField,
   textField,
 } from "../helpers/test-helpers.js";
-import { PodioError } from "@/lib/providers/podio.js";
 
 function createActivePhoneItem(item_id = 401) {
   return createPodioItem(item_id, {
@@ -88,18 +87,19 @@ test("send queue row persists property, template, phone, and master owner relati
   assert.deepEqual(created_fields["master-owner"], [201]);
   assert.deepEqual(created_fields.prospects, [301]);
   assert.deepEqual(created_fields.properties, [601]);
-  assert.deepEqual(created_fields.template, [901]);
+  assert.deepEqual(created_fields["template-2"], [9901]);
+  assert.equal(created_fields["current-stage"], "Ownership Confirmation");
   assert.equal(result.selected_template_id, 9901);
   assert.equal(result.selected_template_source, "podio");
   assert.equal(result.selected_template_title, "Ownership Check V1");
-  assert.equal(result.template_relation_id, 901);
+  assert.equal(result.template_relation_id, 9901);
   assert.equal(result.template_app_field_written, true);
   assert.equal(result.template_attached, true);
   assert.equal(result.selected_template_resolution_source, "podio_template");
-  assert.equal(result.template_attachment_strategy, "template_id_bridge");
+  assert.equal(result.template_attachment_strategy, "selected_template_item_id");
 });
 
-test("send queue row falls back to the direct Podio template item when the bridge relation is rejected", async () => {
+test("send queue row uses the direct Podio template item on the live template field", async () => {
   const create_attempts = [];
 
   const result = await buildSendQueueItem({
@@ -148,19 +148,13 @@ test("send queue row falls back to the direct Podio template item when the bridg
     scheduled_for_utc: "2026-04-04 17:43:17",
     create_item: async (_app_id, fields) => {
       create_attempts.push(fields);
-
-      if (fields.template?.[0] === 901) {
-        throw new PodioError("template value rejected", { status: 400 });
-      }
-
       return { item_id: 125 };
     },
     update_item: async () => {},
   });
 
-  assert.equal(create_attempts.length, 2);
-  assert.deepEqual(create_attempts[0].template, [901]);
-  assert.deepEqual(create_attempts[1].template, [9901]);
+  assert.equal(create_attempts.length, 1);
+  assert.deepEqual(create_attempts[0]["template-2"], [9901]);
   assert.equal(result.template_relation_id, 9901);
   assert.equal(result.template_app_field_written, true);
   assert.equal(result.template_attached, true);
@@ -215,7 +209,7 @@ test("send queue row still queues successfully when local template fallback is s
   });
 
   assert.equal(result.ok, true);
-  assert.equal("template" in (created_fields || {}), false);
+  assert.equal("template-2" in (created_fields || {}), false);
   assert.equal(result.selected_template_id, "local-template:ownership_check:no-agent:v1");
   assert.equal(result.selected_template_source, "local_registry");
   assert.equal(result.template_relation_id, null);
@@ -251,7 +245,7 @@ test("outbound send event payload preserves phone, property, template, and conve
 
   assert.deepEqual(fields["phone-number"], [401]);
   assert.deepEqual(fields.property, [601]);
-  assert.deepEqual(fields["template-selected"], [901]);
+  assert.deepEqual(fields.template, [901]);
   assert.deepEqual(fields.conversation, [701]);
 });
 
@@ -284,7 +278,7 @@ test("failed-send event payload preserves phone, property, template, and convers
 
   assert.deepEqual(fields["phone-number"], [401]);
   assert.deepEqual(fields.property, [601]);
-  assert.deepEqual(fields["template-selected"], [901]);
+  assert.deepEqual(fields.template, [901]);
   assert.deepEqual(fields.conversation, [701]);
   assert.equal(fields["failure-bucket"], "Hard Bounce");
 });

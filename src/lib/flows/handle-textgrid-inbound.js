@@ -7,8 +7,6 @@ import { getPodioRetryAfterSeconds, isPodioRateLimitError } from "@/lib/provider
 import { logInboundMessageEvent } from "@/lib/domain/events/log-inbound-message-event.js";
 import { updateBrainAfterInbound } from "@/lib/domain/brain/update-brain-after-inbound.js";
 import { updateBrainStage } from "@/lib/domain/brain/update-brain-stage.js";
-import { updateBrainLanguage } from "@/lib/domain/brain/update-brain-language.js";
-import { updateBrainSellerProfile } from "@/lib/domain/brain/update-brain-seller-profile.js";
 import { maybeCreateOfferFromContext } from "@/lib/domain/offers/maybe-create-offer-from-context.js";
 import { maybeProgressOfferStatus } from "@/lib/domain/offers/maybe-progress-offer-status.js";
 import { maybeUpsertUnderwritingFromInbound } from "@/lib/domain/underwriting/maybe-upsert-underwriting-from-inbound.js";
@@ -19,6 +17,8 @@ import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue
 import { updateMasterOwnerAfterInbound } from "@/lib/domain/master-owners/update-master-owner-after-inbound.js";
 import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
 import { cancelPendingQueueItemsForOwner } from "@/lib/domain/queue/cancel-pending-queue-items.js";
+import { extractUnderwritingSignals } from "@/lib/domain/underwriting/extract-underwriting-signals.js";
+import { buildInboundConversationState } from "@/lib/domain/communications-engine/state-machine.js";
 import {
   beginIdempotentProcessing,
   completeIdempotentProcessing,
@@ -36,8 +36,6 @@ const defaultDeps = {
   logInboundMessageEvent,
   updateBrainAfterInbound,
   updateBrainStage,
-  updateBrainLanguage,
-  updateBrainSellerProfile,
   maybeCreateOfferFromContext,
   maybeProgressOfferStatus,
   maybeUpsertUnderwritingFromInbound,
@@ -48,6 +46,8 @@ const defaultDeps = {
   updateMasterOwnerAfterInbound,
   isNegativeReply,
   cancelPendingQueueItemsForOwner,
+  extractUnderwritingSignals,
+  buildInboundConversationState,
   beginIdempotentProcessing,
   completeIdempotentProcessing,
   failIdempotentProcessing,
@@ -373,9 +373,16 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // ── SEGMENT: conversation_resolution ─────────────────────────────────
     // Classify the message body, handle negative-reply cancellations, and
     // resolve the routing decision.
-    let classification, inbound_is_negative, queue_cancellation, route;
+    let classification, inbound_is_negative, queue_cancellation, route, signals,
+      deterministic_state;
     try {
       classification = await runtimeDeps.classify(message_body, brain_item);
+      signals = runtimeDeps.extractUnderwritingSignals({
+        message: message_body,
+        classification,
+        route: null,
+        context,
+      });
 
       inbound_is_negative = runtimeDeps.isNegativeReply(message_body);
       queue_cancellation = null;
@@ -403,6 +410,20 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         phone_item: context.items?.phone_item || null,
         message: message_body,
       });
+
+      signals = runtimeDeps.extractUnderwritingSignals({
+        message: message_body,
+        classification,
+        route,
+        context,
+      });
+      deterministic_state = runtimeDeps.buildInboundConversationState({
+        context,
+        classification,
+        route,
+        message: message_body,
+        signals,
+      });
     } catch (err) {
       return buildInboundStepFailure("textgrid_inbound_failed_conversation_resolution", err);
     }
@@ -415,26 +436,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // Write brain activity, master-owner timestamps, and stage/language/profile
     // updates in parallel.
     try {
-      await runtimeDeps.updateBrainAfterInbound({ brain_id, message_body });
+      await runtimeDeps.updateBrainAfterInbound({
+        brain_id,
+        message_body,
+        follow_up_trigger_state:
+          deterministic_state?.follow_up_trigger_state || "AI Running",
+        deterministic_state,
+      });
 
       await runtimeDeps.updateMasterOwnerAfterInbound({
         master_owner_id,
         received_at: new Date().toISOString(),
       });
-
-      await Promise.all([
-        route?.stage
-          ? runtimeDeps.updateBrainStage({ brain_id, stage: route.stage })
-          : Promise.resolve({ ok: false, reason: "missing_stage" }),
-
-        classification?.language
-          ? runtimeDeps.updateBrainLanguage({ brain_id, language: classification.language })
-          : Promise.resolve({ ok: false, reason: "missing_language" }),
-
-        route?.seller_profile
-          ? runtimeDeps.updateBrainSellerProfile({ brain_id, seller_profile: route.seller_profile })
-          : Promise.resolve({ ok: false, reason: "missing_seller_profile" }),
-      ]);
     } catch (err) {
       return buildInboundStepFailure("textgrid_inbound_failed_prospect_resolution", err);
     }

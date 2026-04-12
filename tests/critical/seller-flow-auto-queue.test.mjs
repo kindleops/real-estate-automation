@@ -80,7 +80,7 @@ test("seller-stage auto queue uses blank-use-case template lookup for stage 2 an
   assert.equal(result.ok, true);
   assert.equal(result.queued, true);
   assert.equal(result.reason, "seller_flow_reply_queued");
-  assert.equal(result.brain_stage, "Offer");
+  assert.equal(result.brain_stage, "Offer Interest Confirmation");
   assert.equal(result.response_window.min_minutes, 14);
   assert.equal(result.response_window.max_minutes, 14);
   assert.equal(queue_calls.length, 1);

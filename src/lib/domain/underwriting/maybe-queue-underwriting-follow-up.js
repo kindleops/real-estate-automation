@@ -1,6 +1,7 @@
 // ─── maybe-queue-underwriting-follow-up.js ───────────────────────────────
 import { queueOutboundMessage } from "@/lib/flows/queue-outbound-message.js";
 import { getNumberValue } from "@/lib/providers/podio.js";
+import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -191,11 +192,10 @@ function buildFollowUpDecision({
   const signals = underwriting?.signals || {};
   const strategy = underwriting?.strategy || {};
   const strategy_name = deriveStrategyName({ strategy, signals });
-  const route_stage =
-    route?.stage ||
-    signals.route_stage ||
-    context?.summary?.conversation_stage ||
-    null;
+  const route_stage = collapseConversationStageToLegacy(
+    route?.stage || signals.route_stage || context?.summary?.conversation_stage || null,
+    null
+  );
   const route_use_case = route?.use_case || signals.route_use_case || null;
 
   if (route_stage === "Contract") {

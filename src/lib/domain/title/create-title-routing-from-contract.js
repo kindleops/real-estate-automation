@@ -2,13 +2,24 @@
 import {
   CONTRACT_FIELDS,
   getContractItem,
+  updateContractItem,
 } from "@/lib/podio/apps/contracts.js";
 import {
   TITLE_ROUTING_FIELDS,
   createTitleRoutingItem,
 } from "@/lib/podio/apps/title-routing.js";
-import { getDateValue, getFirstAppReferenceId } from "@/lib/providers/podio.js";
+import {
+  TITLE_COMPANY_FIELDS,
+  getTitleCompanyItem,
+} from "@/lib/podio/apps/title-companies.js";
+import {
+  getDateValue,
+  getFirstAppReferenceId,
+  getPhoneValue,
+  getTextValue,
+} from "@/lib/providers/podio.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
+import { syncContractStatus } from "@/lib/domain/contracts/sync-contract-status.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -85,6 +96,42 @@ function normalizeRoutingStatus(value = "Not Routed") {
   return "Not Routed";
 }
 
+function mapContractStatusFromRoutingStatus(status = "") {
+  switch (clean(status)) {
+    case "Routed":
+      return "Sent To Title";
+    case "Opened":
+      return "Opened";
+    case "Clear to Close":
+      return "Clear To Close";
+    case "Closed":
+      return "Closed";
+    case "Cancelled":
+      return "Cancelled";
+    default:
+      return null;
+  }
+}
+
+const defaultDeps = {
+  getContractItem,
+  createTitleRoutingItem,
+  getTitleCompanyItem,
+  updateContractItem,
+  syncPipelineState,
+  syncContractStatus,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
+export function __setCreateTitleRoutingFromContractTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetCreateTitleRoutingFromContractTestDeps() {
+  runtimeDeps = { ...defaultDeps };
+}
+
 export async function createTitleRoutingFromContract({
   contract_item_id = null,
   contract_item = null,
@@ -97,7 +144,7 @@ export async function createTitleRoutingFromContract({
   let resolved_contract_item = contract_item || null;
 
   if (!resolved_contract_item && contract_item_id) {
-    resolved_contract_item = await getContractItem(contract_item_id);
+    resolved_contract_item = await runtimeDeps.getContractItem(contract_item_id);
   }
 
   const resolved_contract_item_id =
@@ -125,10 +172,14 @@ export async function createTitleRoutingFromContract({
       property_id: refs.property_id,
     });
 
+  const normalized_routing_status = normalizeRoutingStatus(routing_status);
+  const title_company_item = refs.title_company_item_id
+    ? await runtimeDeps.getTitleCompanyItem(refs.title_company_item_id).catch(() => null)
+    : null;
   const payload = {
     [TITLE_ROUTING_FIELDS.title]: generated_title_routing_id,
     [TITLE_ROUTING_FIELDS.title_routing_id]: generated_title_routing_id,
-    [TITLE_ROUTING_FIELDS.routing_status]: normalizeRoutingStatus(routing_status),
+    [TITLE_ROUTING_FIELDS.routing_status]: normalized_routing_status,
     [TITLE_ROUTING_FIELDS.contract]: asAppRef(resolved_contract_item_id),
     ...(refs.master_owner_id
       ? { [TITLE_ROUTING_FIELDS.master_owner]: asAppRef(refs.master_owner_id) }
@@ -151,6 +202,36 @@ export async function createTitleRoutingFromContract({
     ...(refs.expected_closing_date
       ? { [TITLE_ROUTING_FIELDS.expected_closing_date]: { start: refs.expected_closing_date } }
       : {}),
+    ...(normalized_routing_status === "Routed"
+      ? { [TITLE_ROUTING_FIELDS.file_routed_date]: { start: nowIso() } }
+      : {}),
+    ...(clean(getTextValue(title_company_item, TITLE_COMPANY_FIELDS.contact_manager, ""))
+      ? {
+          [TITLE_ROUTING_FIELDS.primary_title_contact]: getTextValue(
+            title_company_item,
+            TITLE_COMPANY_FIELDS.contact_manager,
+            ""
+          ),
+        }
+      : {}),
+    ...(clean(getTextValue(title_company_item, TITLE_COMPANY_FIELDS.new_order_email, ""))
+      ? {
+          [TITLE_ROUTING_FIELDS.title_contact_email]: getTextValue(
+            title_company_item,
+            TITLE_COMPANY_FIELDS.new_order_email,
+            ""
+          ),
+        }
+      : {}),
+    ...(clean(getPhoneValue(title_company_item, TITLE_COMPANY_FIELDS.phone, ""))
+      ? {
+          [TITLE_ROUTING_FIELDS.title_contact_phone]: getPhoneValue(
+            title_company_item,
+            TITLE_COMPANY_FIELDS.phone,
+            ""
+          ),
+        }
+      : {}),
     [TITLE_ROUTING_FIELDS.internal_notes]: appendNotes(
       `[${nowIso()}] Title routing created from contract.`,
       source,
@@ -158,8 +239,16 @@ export async function createTitleRoutingFromContract({
     ) || undefined,
   };
 
-  const created = await createTitleRoutingItem(payload);
-  const pipeline = await syncPipelineState({
+  const created = await runtimeDeps.createTitleRoutingItem(payload);
+  await runtimeDeps.updateContractItem(resolved_contract_item_id, {
+    [CONTRACT_FIELDS.title_routing]: asAppRef(created?.item_id || null),
+  });
+
+  const contract_sync = await runtimeDeps.syncContractStatus({
+    contract_item_id: resolved_contract_item_id,
+    status: mapContractStatusFromRoutingStatus(normalized_routing_status),
+  });
+  const pipeline = await runtimeDeps.syncPipelineState({
     contract_item_id: resolved_contract_item_id,
     title_routing_item_id: created?.item_id || null,
     property_id: refs.property_id,
@@ -167,6 +256,13 @@ export async function createTitleRoutingFromContract({
     prospect_id: refs.prospect_id,
     assigned_agent_id: refs.assigned_agent_id,
     market_id: refs.market_item_id,
+    current_engine: "Title Routing",
+    blocked: refs.title_company_item_id ? "No" : "Yes",
+    blocker_type: refs.title_company_item_id ? null : "Other",
+    blocker_summary: refs.title_company_item_id
+      ? null
+      : "Title routing is missing a linked title company.",
+    next_system_action: refs.title_company_item_id ? null : "assign_title_company",
     notes: "Title routing created from contract.",
   });
 
@@ -177,6 +273,7 @@ export async function createTitleRoutingFromContract({
     title_routing_item_id: created?.item_id || null,
     title_routing_id: generated_title_routing_id,
     contract_item_id: resolved_contract_item_id,
+    contract_sync,
     pipeline,
     payload,
     raw: created,

@@ -11,9 +11,14 @@ import {
   PodioError,
 } from "@/lib/providers/podio.js";
 
-import { getCategoryOptionId, getAttachedFieldSchema } from "@/lib/podio/schema.js";
+import {
+  getCategoryOptionId,
+  getAttachedFieldSchema,
+  shouldAllowRawCategoryCompatibilityValue,
+} from "@/lib/podio/schema.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { resolveTemplateFieldReference } from "@/lib/domain/templates/template-reference.js";
+import { deriveQueueCurrentStage } from "@/lib/domain/communications-engine/state-machine.js";
 import { warn } from "@/lib/logging/logger.js";
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -46,6 +51,7 @@ const QUEUE_FIELDS = {
   sms_agent: "sms-agent",
   textgrid_number: "textgrid-number",
   template: "template",
+  current_stage: "current-stage",
 
   touch_number: "touch-number",
   dnc_check: "dnc-check",
@@ -61,6 +67,12 @@ const QUEUE_FIELDS = {
   category: "category",
   use_case_template: "use-case-template",
 };
+
+function getQueueTemplateFieldExternalId() {
+  return getAttachedFieldSchema(APP_IDS.send_queue, "template-2")
+    ? "template-2"
+    : QUEUE_FIELDS.template;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -310,6 +322,15 @@ function resolveQueueCategoryField(external_id, value) {
     return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
   }
 
+  if (shouldAllowRawCategoryCompatibilityValue(APP_IDS.send_queue, external_id, raw)) {
+    return {
+      field_value: raw,
+      category_option_id: null,
+      omitted: false,
+      reason: "compat_raw_category_value",
+    };
+  }
+
   // Distinguish "schema has no options at all" (stale supplement) from
   // "options exist but none match" (label mismatch).
   const reason =
@@ -438,6 +459,7 @@ async function createQueueItemWithTemplateCandidates({
   create_item,
   fields,
   template_candidates = [],
+  template_field_external_id = QUEUE_FIELDS.template,
 }) {
   if (!template_candidates.length) {
     return {
@@ -451,7 +473,7 @@ async function createQueueItemWithTemplateCandidates({
   for (const candidate of template_candidates) {
     const attempt_fields = {
       ...fields,
-      [QUEUE_FIELDS.template]: candidate.field_value,
+      [template_field_external_id]: candidate.field_value,
     };
 
     try {
@@ -469,14 +491,14 @@ async function createQueueItemWithTemplateCandidates({
   }
 
   const fallback_fields = { ...fields };
-  delete fallback_fields[QUEUE_FIELDS.template];
+  delete fallback_fields[template_field_external_id];
 
   return {
     created: await create_item(APP_IDS.send_queue, fallback_fields),
     selected_candidate: null,
     template_attach_rejected: true,
     template_attach_warning:
-      "Template relation was skipped because Send Queue.template rejected the selected template reference.",
+      `Template relation was skipped because Send Queue.${template_field_external_id} rejected the selected template reference.`,
   };
 }
 
@@ -504,6 +526,7 @@ export async function buildSendQueueItem({
   delivered_at = null,
   property_type = null,
   secondary_category = null,
+  current_stage = null,
   use_case_template = null,
   personalization_tags_used: explicit_personalization_tags_used = null,
   create_item = createItem,
@@ -679,6 +702,15 @@ export async function buildSendQueueItem({
   const direct_property_type = getCategoryValue(property_item, "property-type", null);
   const resolved_property_type = direct_property_type || property_type;
   const property_type_field = resolveQueueCategoryField(QUEUE_FIELDS.property_type, resolved_property_type);
+  const resolved_current_stage = deriveQueueCurrentStage({
+    route_stage: current_stage,
+    conversation_stage: context.summary?.conversation_stage || null,
+    use_case: use_case_template,
+  });
+  const current_stage_field = resolveQueueCategoryField(
+    QUEUE_FIELDS.current_stage,
+    resolved_current_stage
+  );
 
   // Persist the queue row's explicit owner-type from the linked Property item.
   // Properties stores the normalized owner bucket on owner-type-2, while
@@ -700,6 +732,7 @@ export async function buildSendQueueItem({
     [QUEUE_FIELDS.property_type, property_type, property_type_field],
     [QUEUE_FIELDS.owner_type, resolved_owner_type, owner_type_field],
     [QUEUE_FIELDS.category, secondary_category, category_field],
+    [QUEUE_FIELDS.current_stage, resolved_current_stage, current_stage_field],
     [QUEUE_FIELDS.use_case_template, use_case_template, use_case_template_field],
   ]) {
     if (resolved.omitted && resolved.reason !== "empty") {
@@ -729,9 +762,10 @@ export async function buildSendQueueItem({
     });
   }
 
+  const template_field_external_id = getQueueTemplateFieldExternalId();
   const template_reference = resolveTemplateFieldReference({
     host_app_id: APP_IDS.send_queue,
-    host_field_external_id: QUEUE_FIELDS.template,
+    host_field_external_id: template_field_external_id,
     template_id,
     template_item,
   });
@@ -812,6 +846,9 @@ export async function buildSendQueueItem({
     ...(property_type_field.omitted ? {} : { [QUEUE_FIELDS.property_type]: property_type_field.field_value }),
     ...(owner_type_field.omitted ? {} : { [QUEUE_FIELDS.owner_type]: owner_type_field.field_value }),
     ...(category_field.omitted ? {} : { [QUEUE_FIELDS.category]: category_field.field_value }),
+    ...(current_stage_field.omitted
+      ? {}
+      : { [QUEUE_FIELDS.current_stage]: current_stage_field.field_value }),
     ...(use_case_template_field.omitted ? {} : { [QUEUE_FIELDS.use_case_template]: use_case_template_field.field_value }),
   };
 
@@ -835,6 +872,7 @@ export async function buildSendQueueItem({
     create_item,
     fields,
     template_candidates,
+    template_field_external_id,
   }));
 
   const resolved_queue_id = queue_id || null;
@@ -905,6 +943,8 @@ export async function buildSendQueueItem({
     property_type_written: !property_type_field.omitted,
     owner_type_written: !owner_type_field.omitted,
     category_written: !category_field.omitted,
+    current_stage_written: !current_stage_field.omitted,
+    current_stage_value: resolved_current_stage,
     use_case_template_written: !use_case_template_field.omitted,
     warnings: [
       ...missing_relation_warnings,

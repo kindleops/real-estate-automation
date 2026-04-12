@@ -20,8 +20,8 @@ test("linkMessageEventToBrain appends a message event to linked-message-events",
       createPodioItem(701, {
         "linked-message-events": [appRefField(9001)],
       }),
-    updateBrainItem: async (item_id, fields) => {
-      update_payload = { item_id, fields };
+    applyBrainStateUpdate: async (payload) => {
+      update_payload = payload;
       return { ok: true };
     },
   });
@@ -35,7 +35,8 @@ test("linkMessageEventToBrain appends a message event to linked-message-events",
   assert.equal(result.linked, true);
   assert.deepEqual(result.linked_message_event_ids, [9001, 9002]);
   assert.deepEqual(update_payload, {
-    item_id: 701,
+    brain_id: 701,
+    reason: "message_event_linked",
     fields: {
       "linked-message-events": [9001, 9002],
     },
@@ -50,7 +51,7 @@ test("linkMessageEventToBrain skips duplicate message event refs", async () => {
       createPodioItem(701, {
         "linked-message-events": [appRefField(9002)],
       }),
-    updateBrainItem: async () => {
+    applyBrainStateUpdate: async () => {
       update_called = true;
       return { ok: true };
     },

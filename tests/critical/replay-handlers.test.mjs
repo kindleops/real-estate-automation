@@ -205,7 +205,7 @@ test("inbound webhook suppresses underwriting follow-up when seller-stage reply 
   assert.equal(underwriting_follow_up_count, 0);
   assert.deepEqual(
     stage_updates.map((entry) => entry.stage),
-    ["Ownership", "Offer"]
+    ["Offer"]
   );
 });
 
@@ -427,6 +427,7 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
     updateMessageEventStatus: async () => {
       eventStatusUpdateCount += 1;
     },
+    findBestBrainMatch: async () => null,
     findLatestBrainByProspectId: async () => createPodioItem(701),
     findLatestBrainByMasterOwnerId: async () => null,
     updatePhoneNumberItem: async () => {
@@ -496,6 +497,7 @@ test("delivery webhook updates verification send events without queue correlatio
     updateMessageEventStatus: async () => {
       eventStatusUpdateCount += 1;
     },
+    findBestBrainMatch: async () => null,
     findLatestBrainByProspectId: async () => null,
     findLatestBrainByMasterOwnerId: async () => null,
     updatePhoneNumberItem: async () => null,
@@ -513,6 +515,75 @@ test("delivery webhook updates verification send events without queue correlatio
   assert.equal(result.matched_event_count, 1);
   assert.equal(deliveryEventCount, 1);
   assert.equal(eventStatusUpdateCount, 1);
+});
+
+test("delivery webhook resolves brain through the phone-linked brain before owner/prospect fallback", async () => {
+  const ledger = createInMemoryIdempotencyLedger();
+  const deliveryLogPayloads = [];
+
+  const outboundEvent = createPodioItem(812, {
+    "trigger-name": textField("queue-send:123"),
+    "message-id": textField("provider-phone-brain-1"),
+    "master-owner": appRefField(201),
+    "linked-seller": appRefField(301),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+    "ai-output": textField(
+      JSON.stringify({
+        queue_item_id: 123,
+        client_reference_id: "queue-123",
+        provider_message_id: "provider-phone-brain-1",
+      })
+    ),
+  });
+
+  const queueItem = createPodioItem(123, {
+    "master-owner": appRefField(201),
+    prospects: appRefField(301),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+  });
+
+  __setTextgridDeliveryTestDeps({
+    beginIdempotentProcessing: ledger.begin,
+    completeIdempotentProcessing: ledger.complete,
+    failIdempotentProcessing: ledger.fail,
+    hashIdempotencyPayload: ledger.hash,
+    info: () => {},
+    warn: () => {},
+    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
+    fetchAllItems: async () => [],
+    updateItem: async () => {},
+    logDeliveryEvent: async (payload) => {
+      deliveryLogPayloads.push(payload);
+    },
+    updateMessageEventStatus: async () => {},
+    findBestBrainMatch: async ({ phone_item_id, prospect_id, master_owner_id }) => {
+      assert.equal(phone_item_id, 401);
+      assert.equal(prospect_id, 301);
+      assert.equal(master_owner_id, 201);
+      return createPodioItem(702);
+    },
+    findLatestBrainByProspectId: async () => {
+      throw new Error("prospect_fallback_should_not_run_when_phone_brain_exists");
+    },
+    findLatestBrainByMasterOwnerId: async () => {
+      throw new Error("owner_fallback_should_not_run_when_phone_brain_exists");
+    },
+    updatePhoneNumberItem: async () => null,
+    updateBrainAfterDelivery: async () => null,
+    mapTextgridFailureBucket: () => "Other",
+  });
+
+  const result = await handleTextgridDeliveryWebhook({
+    message_id: "provider-phone-brain-1",
+    status: "delivered",
+    client_reference_id: "queue-123",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(deliveryLogPayloads[0].conversation_item_id, 702);
 });
 
 test("delivery webhook normalizes raw TextGrid sent callbacks and updates queue state", async () => {
@@ -558,6 +629,7 @@ test("delivery webhook normalizes raw TextGrid sent callbacks and updates queue 
     },
     logDeliveryEvent: async () => {},
     updateMessageEventStatus: async () => {},
+    findBestBrainMatch: async () => null,
     findLatestBrainByProspectId: async () => null,
     findLatestBrainByMasterOwnerId: async () => null,
     updatePhoneNumberItem: async () => null,
@@ -622,6 +694,7 @@ test("delivery webhook normalizes raw TextGrid delivered callbacks and confirms 
     },
     logDeliveryEvent: async () => {},
     updateMessageEventStatus: async () => {},
+    findBestBrainMatch: async () => null,
     findLatestBrainByProspectId: async () => null,
     findLatestBrainByMasterOwnerId: async () => null,
     updatePhoneNumberItem: async () => null,
@@ -685,6 +758,7 @@ test("delivery webhook suppresses future outreach on hard-bounce destination fai
     updateItem: async () => {},
     logDeliveryEvent: async () => {},
     updateMessageEventStatus: async () => {},
+    findBestBrainMatch: async () => null,
     findLatestBrainByProspectId: async () => null,
     findLatestBrainByMasterOwnerId: async () => null,
     updatePhoneNumberItem: async (item_id, payload) => {
@@ -715,6 +789,7 @@ test("delivery webhook suppresses future outreach on hard-bounce destination fai
 test("DocuSign webhook ignores replay after first contract mutation", async () => {
   const ledger = createInMemoryIdempotencyLedger();
   let contractUpdateCount = 0;
+  let brainUpdateCount = 0;
 
   __setDocusignWebhookTestDeps({
     beginIdempotentProcessing: ledger.begin,
@@ -735,8 +810,16 @@ test("DocuSign webhook ignores replay after first contract mutation", async () =
       created: true,
       closing_item_id: 9201,
     }),
+    createBuyerMatchFlow: async () => ({
+      created: true,
+      buyer_match_item_id: 9301,
+    }),
     maybeSendTitleIntro: async () => ({ sent: true }),
     syncPipelineState: async () => ({ current_stage: "Contract" }),
+    updateBrainFromExecution: async () => {
+      brainUpdateCount += 1;
+      return { ok: true, updated: true };
+    },
   });
 
   const payload = {
@@ -752,6 +835,7 @@ test("DocuSign webhook ignores replay after first contract mutation", async () =
   assert.equal(first.normalized_status, "Completed");
   assert.equal(second.duplicate, true);
   assert.equal(contractUpdateCount, 1);
+  assert.equal(brainUpdateCount, 1);
 });
 
 test("title webhook ignores replay after first state update", async () => {

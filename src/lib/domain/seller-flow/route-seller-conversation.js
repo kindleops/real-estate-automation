@@ -1,6 +1,7 @@
 import { getCategoryValue, getNumberValue } from "@/lib/providers/podio.js";
 import { formatUsd } from "@/lib/utils/money.js";
 import { extractUnderwritingSignals } from "@/lib/domain/underwriting/extract-underwriting-signals.js";
+import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
 import {
   SELLER_FLOW_STAGES,
   normalizeSellerFlowUseCase,
@@ -429,7 +430,10 @@ function derivePreviousOutboundPlan({
     };
   }
 
-  const conversation_stage = clean(context?.summary?.conversation_stage);
+  const conversation_stage = collapseConversationStageToLegacy(
+    context?.summary?.conversation_stage,
+    "Ownership"
+  );
   if (conversation_stage === "Ownership") {
     return {
       selected_use_case: "ownership_check",

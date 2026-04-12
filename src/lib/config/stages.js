@@ -6,6 +6,23 @@ export const STAGES = {
   FOLLOW_UP: "Follow-Up",
 };
 
+const LOCKED_TO_LEGACY_STAGE_MAP = Object.freeze({
+  "ownership confirmation": STAGES.OWNERSHIP,
+  "offer interest confirmation": STAGES.OFFER,
+  "seller price discovery": STAGES.OFFER,
+  "condition / timeline discovery": STAGES.QA,
+  "condition timeline discovery": STAGES.QA,
+  "offer positioning": STAGES.OFFER,
+  negotiation: STAGES.OFFER,
+  "verbal acceptance / lock": STAGES.CONTRACT,
+  "verbal acceptance lock": STAGES.CONTRACT,
+  "contract out": STAGES.CONTRACT,
+  "signed / closing": STAGES.CONTRACT,
+  "signed closing": STAGES.CONTRACT,
+  "closed / dead outcome": STAGES.FOLLOW_UP,
+  "closed dead outcome": STAGES.FOLLOW_UP,
+});
+
 export const LIFECYCLE_STAGES = {
   OWNERSHIP: STAGES.OWNERSHIP,
   OFFER: STAGES.OFFER,
@@ -39,7 +56,8 @@ export const LIFECYCLE_STAGE_LIST = [
 ];
 
 export function isValidStage(value) {
-  return STAGE_LIST.includes(String(value || "").trim());
+  const raw = String(value || "").trim();
+  return STAGE_LIST.includes(raw) || Boolean(LOCKED_TO_LEGACY_STAGE_MAP[raw.toLowerCase()]);
 }
 
 export function isValidLifecycleStage(value) {
@@ -50,6 +68,9 @@ export function normalizeStage(value, fallback = STAGES.OWNERSHIP) {
   const raw = String(value || "").trim();
 
   if (!raw) return fallback;
+
+  const collapsed_locked_stage = LOCKED_TO_LEGACY_STAGE_MAP[raw.toLowerCase()] || null;
+  if (collapsed_locked_stage) return collapsed_locked_stage;
 
   const normalized = raw.toLowerCase();
 

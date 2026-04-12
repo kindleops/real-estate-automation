@@ -59,6 +59,8 @@ function makeDeps({ executeRunResult } = {}) {
       },
       recordSystemAlertImpl: async () => {},
       resolveSystemAlertImpl: async () => {},
+      buildPodioCooldownSkipResultImpl: async () => null,
+      buildPodioBackpressureSkipResultImpl: async () => null,
     },
   };
 }

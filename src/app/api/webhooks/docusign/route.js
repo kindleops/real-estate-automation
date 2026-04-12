@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 
 import { child } from "@/lib/logging/logger.js";
 import { handleDocusignWebhook } from "@/lib/domain/contracts/handle-docusign-webhook.js";
-import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
+import { verifyDocusignConnectHmac } from "@/lib/security/docusign-hmac.js";
+import { ENV } from "@/lib/config/env.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,23 +16,21 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
-async function parseRequestBody(request) {
-  const contentType = clean(request.headers.get("content-type")).toLowerCase();
+function isProductionRuntime() {
+  return (
+    String(process.env.VERCEL_ENV ?? "").toLowerCase() === "production" ||
+    String(process.env.NODE_ENV ?? "").toLowerCase() === "production"
+  );
+}
 
-  if (contentType.includes("application/json")) {
-    return request.json().catch(() => ({}));
-  }
-
-  if (
-    contentType.includes("application/x-www-form-urlencoded") ||
-    contentType.includes("multipart/form-data")
-  ) {
-    const form = await request.formData().catch(() => null);
-    return form ? Object.fromEntries(form.entries()) : {};
-  }
-
-  const text = await request.text().catch(() => "");
-  return { raw_text: text };
+/**
+ * Returns true when HMAC verification may be skipped.
+ * Only permitted in non-production Node environments when the caller has
+ * explicitly set DOCUSIGN_WEBHOOK_SKIP_HMAC=1.  Off by default.
+ */
+function isHmacBypassAllowed() {
+  if (isProductionRuntime()) return false;
+  return clean(process.env.DOCUSIGN_WEBHOOK_SKIP_HMAC) === "1";
 }
 
 export async function GET() {
@@ -44,13 +43,39 @@ export async function GET() {
 
 export async function POST(request) {
   try {
-    const auth = requireSharedSecretAuth(request, logger, {
-      env_name: "DOCUSIGN_WEBHOOK_SECRET",
-      header_names: ["x-docusign-webhook-secret"],
-    });
-    if (!auth.authorized) return auth.response;
+    // Read raw body first — must happen before any body-consuming operation.
+    const rawBody = await request.text().catch(() => "");
 
-    const payload = await parseRequestBody(request);
+    const hmac_bypass = isHmacBypassAllowed();
+
+    if (!hmac_bypass) {
+      const secret = clean(ENV.DOCUSIGN_WEBHOOK_SECRET);
+      const hmac = verifyDocusignConnectHmac(rawBody, request.headers, secret);
+
+      if (!hmac.ok) {
+        logger.warn("docusign_webhook.hmac_rejected", {
+          reason: hmac.reason,
+          // Do not log the secret or the signature value.
+        });
+
+        return NextResponse.json(
+          { ok: false, error: "unauthorized", reason: hmac.reason },
+          { status: 401 }
+        );
+      }
+    } else {
+      logger.warn("docusign_webhook.hmac_bypass_active", {
+        note: "DOCUSIGN_WEBHOOK_SKIP_HMAC=1 — HMAC verification skipped (dev only)",
+      });
+    }
+
+    let payload = {};
+    try {
+      payload = rawBody ? JSON.parse(rawBody) : {};
+    } catch {
+      payload = {};
+    }
+
     const result = await handleDocusignWebhook(payload);
 
     return NextResponse.json(

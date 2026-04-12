@@ -11,11 +11,103 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
 const MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES = new Set([
   "buyer disposition",
   "buyer thread",
+  "conversation brain",
   "contracts",
+  "external api",
   "internal verification",
+  "manual",
   "runtime lock",
+  "send queue",
   "system alert",
+  "workflow automation",
 ]);
+
+const MESSAGE_EVENT_PROCESSED_BY_COMPAT_VALUES = new Set([
+  "manual sender",
+  "gpt 4o ai",
+  "mistral 7b ai",
+  "autoresponder",
+  "drip campaign",
+  "scheduled campaign",
+  "queue runner",
+  "send now api",
+  "system",
+  "verification harness",
+  "buyer blast",
+  "buyer blast dry run",
+  "buyer response webhook",
+  "contract document archive",
+]);
+
+const MESSAGE_EVENT_DIRECTION_COMPAT_VALUES = new Set([
+  "inbound",
+  "outbound",
+]);
+
+const MESSAGE_EVENT_EVENT_TYPE_COMPAT_VALUES = new Set([
+  "seller inbound sms",
+  "seller outbound sms",
+  "delivery update",
+  "send failure",
+  "stage transition",
+  "ai classification",
+  "manual note",
+]);
+
+const MESSAGE_EVENT_AI_ROUTE_COMPAT_VALUES = new Set([
+  "ownership check",
+  "identity",
+  "offer",
+  "objection handling",
+  "wrong number",
+  "follow up",
+  "re engagement",
+  "dispo buyer",
+  "spanish route",
+  "legal opt out",
+  "ownership confirmation",
+  "offer interest",
+  "price discovery",
+  "condition discovery",
+  "negotiation",
+  "contract push",
+  "dead lead handling",
+  "dnc",
+  "unknown",
+]);
+
+const MESSAGE_EVENT_DELIVERY_STATUS_COMPAT_VALUES = new Set([
+  "pending",
+  "sent",
+  "delivered",
+  "failed",
+  "received",
+]);
+
+const MESSAGE_EVENT_PROVIDER_DELIVERY_STATUS_COMPAT_VALUES = new Set([
+  "queued",
+  "sending",
+  "sent",
+  "delivered",
+  "failed",
+  "undelivered",
+  "unknown",
+]);
+
+const MESSAGE_EVENT_FAILURE_BUCKET_COMPAT_VALUES = new Set([
+  "carrier rejection",
+  "undelivered",
+  "rate limited",
+  "invalid number",
+  "opt out dnc",
+  "timeout",
+  "system error",
+  "other",
+  "hard bounce",
+  "soft bounce",
+]);
+
+const YES_NO_CATEGORY_COMPAT_VALUES = new Set(["yes", "no"]);
 
 const SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES = new Set([
   "8AM-9PM CT",
@@ -89,6 +181,178 @@ const SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES = new Set([
   "6AM-8AM Local",
   "5PM-8PM Local",
 ].map((value) => normalizeCategoryText(value)));
+
+const SEND_QUEUE_CURRENT_STAGE_COMPAT_VALUES = new Set([
+  "ownership confirmation",
+  "offer interest confirmation",
+  "seller price discovery",
+  "condition timeline discovery",
+  "offer positioning",
+  "negotiation",
+  "verbal acceptance lock",
+  "contract out",
+  "signed closing",
+  "closed dead outcome",
+]);
+
+const BRAIN_CONVERSATION_STAGE_COMPAT_VALUES = new Set([
+  "ownership confirmation",
+  "offer interest confirmation",
+  "seller price discovery",
+  "condition timeline discovery",
+  "offer positioning",
+  "negotiation",
+  "verbal acceptance lock",
+  "contract out",
+  "signed closing",
+  "closed dead outcome",
+]);
+
+const BRAIN_AI_ROUTE_COMPAT_VALUES = new Set([
+  "ownership confirmation",
+  "offer interest",
+  "price discovery",
+  "condition discovery",
+  "offer positioning",
+  "negotiation",
+  "objection handling",
+  "re engagement",
+  "contract push",
+  "dead lead handling",
+  "wrong number",
+  "dnc",
+  "unknown",
+]);
+
+const BRAIN_CURRENT_SELLER_STATE_COMPAT_VALUES = new Set([
+  "unconfirmed owner",
+  "confirmed owner",
+  "no longer owner",
+  "open to offer",
+  "maybe open",
+  "not interested",
+  "wants offer first",
+  "price given",
+  "no price given",
+  "condition unknown",
+  "condition known",
+  "near range",
+  "above range",
+  "negotiating",
+  "ready for contract",
+  "signed",
+  "closed",
+  "dead",
+  "dnc",
+  "wrong number",
+  "unknown",
+]);
+
+const BRAIN_FOLLOW_UP_STEP_COMPAT_VALUES = new Set([
+  "a",
+  "b",
+  "c",
+  "d",
+  "final",
+  "none",
+]);
+
+const BRAIN_LAST_INTENT_COMPAT_VALUES = new Set([
+  "ownership confirmed",
+  "ownership denied",
+  "open to offer",
+  "not interested",
+  "wants offer",
+  "asking price given",
+  "wants higher price",
+  "condition mentioned",
+  "timeline mentioned",
+  "negotiation",
+  "contract ready",
+  "wrong number",
+  "dnc",
+  "unknown",
+]);
+
+const BRAIN_STATUS_AI_MANAGED_COMPAT_VALUES = new Set([
+  "active negotiation",
+  "warm lead",
+  "hot opportunity",
+  "waiting on seller",
+  "ai follow up running",
+  "cold no response",
+  "under contract",
+  "closed",
+  "dnc",
+  "wrong number",
+  "paused",
+  "manual review",
+]);
+
+const BRAIN_FOLLOW_UP_TRIGGER_STATE_COMPAT_VALUES = new Set([
+  "ai running",
+  "waiting",
+  "paused",
+  "manual override",
+  "completed",
+  "expired",
+]);
+
+const BRAIN_EMOTIONAL_TONE_COMPAT_VALUES = new Set([
+  "calm",
+  "anxious",
+  "motivated",
+  "resistant",
+  "grieving",
+  "confused",
+  "angry",
+  "excited",
+  "indifferent",
+  "unknown",
+]);
+
+const BRAIN_RESPONSE_STYLE_COMPAT_VALUES = new Set([
+  "empathetic",
+  "direct",
+  "formal",
+  "casual",
+  "spiritual",
+  "urgent",
+  "humorous",
+  "unknown",
+]);
+
+const BRAIN_PRIMARY_OBJECTION_COMPAT_VALUES = new Set([
+  "price too low",
+  "not ready to sell",
+  "has agent",
+  "inherited dispute",
+  "market comparing",
+  "wants retail",
+  "probate pending",
+  "no objection",
+  "unknown",
+]);
+
+const BRAIN_CREATIVE_ELIGIBILITY_COMPAT_VALUES = new Set([
+  "yes",
+  "no",
+  "maybe",
+  "unknown",
+]);
+
+const BRAIN_DEAL_STRATEGY_BRANCH_COMPAT_VALUES = new Set([
+  "cash",
+  "seller finance",
+  "subject to",
+  "novation",
+  "lease option",
+  "hybrid",
+  "nurture",
+  "dnc",
+  "wrong number",
+  "unknown",
+]);
 
 function isValidSendQueueContactWindow(value) {
   return /^(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s+(?:CT|ET|MT|PT|AT|HT|Local)$/i.test(
@@ -169,6 +433,39 @@ function shouldAllowRawCategoryCompatibility(app_id, external_id, value) {
   const normalized_external_id = cleanExternalId(external_id);
   const normalized = normalizeCategoryText(value);
 
+  if (normalized_app_id === APP_IDS.message_events) {
+    if (normalized_external_id === "source-app") {
+      return MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "processed-by") {
+      return MESSAGE_EVENT_PROCESSED_BY_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "direction") {
+      return MESSAGE_EVENT_DIRECTION_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "category") {
+      return MESSAGE_EVENT_EVENT_TYPE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "ai-route") {
+      return MESSAGE_EVENT_AI_ROUTE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "status-3") {
+      return MESSAGE_EVENT_DELIVERY_STATUS_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "delivery-status") {
+      return MESSAGE_EVENT_PROVIDER_DELIVERY_STATUS_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "failure-bucket") {
+      return MESSAGE_EVENT_FAILURE_BUCKET_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "is-final-failure") {
+      return YES_NO_CATEGORY_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "is-opt-out") {
+      return YES_NO_CATEGORY_COMPAT_VALUES.has(normalized);
+    }
+  }
+
   if (normalized_app_id === APP_IDS.message_events && normalized_external_id === "source-app") {
     return MESSAGE_EVENT_SOURCE_APP_COMPAT_VALUES.has(normalized);
   }
@@ -180,7 +477,54 @@ function shouldAllowRawCategoryCompatibility(app_id, external_id, value) {
     );
   }
 
+  if (normalized_app_id === APP_IDS.send_queue && normalized_external_id === "current-stage") {
+    return SEND_QUEUE_CURRENT_STAGE_COMPAT_VALUES.has(normalized);
+  }
+
+  if (normalized_app_id === APP_IDS.ai_conversation_brain) {
+    if (normalized_external_id === "conversation-stage") {
+      return BRAIN_CONVERSATION_STAGE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "ai-route") {
+      return BRAIN_AI_ROUTE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "current-seller-state") {
+      return BRAIN_CURRENT_SELLER_STATE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "follow-up-step") {
+      return BRAIN_FOLLOW_UP_STEP_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "last-detected-intent") {
+      return BRAIN_LAST_INTENT_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "status-ai-managed") {
+      return BRAIN_STATUS_AI_MANAGED_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "follow-up-trigger-state") {
+      return BRAIN_FOLLOW_UP_TRIGGER_STATE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "category") {
+      return BRAIN_EMOTIONAL_TONE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "category-2") {
+      return BRAIN_RESPONSE_STYLE_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "category-3") {
+      return BRAIN_PRIMARY_OBJECTION_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "category-4") {
+      return BRAIN_CREATIVE_ELIGIBILITY_COMPAT_VALUES.has(normalized);
+    }
+    if (normalized_external_id === "category-5") {
+      return BRAIN_DEAL_STRATEGY_BRANCH_COMPAT_VALUES.has(normalized);
+    }
+  }
+
   return false;
+}
+
+export function shouldAllowRawCategoryCompatibilityValue(app_id, external_id, value) {
+  return shouldAllowRawCategoryCompatibility(app_id, external_id, value);
 }
 
 function cleanExternalId(value) {

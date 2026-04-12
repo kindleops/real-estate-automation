@@ -16,8 +16,10 @@ function createCandidateRecord({
   hourly_sent = 0,
   hard_pause = "No",
   risk_spike_flag = "No",
-  allowed_send_window_start_local = "08:00",
-  allowed_send_window_end_local = "20:00",
+  // Default to always-open window so market-matching tests are not time-sensitive.
+  // Tests that specifically validate send-window logic should override these.
+  allowed_send_window_start_local = "00:00",
+  allowed_send_window_end_local = "23:59",
   area_code = "",
   last_used_at = "2026-04-08T00:00:00.000Z",
 }) {

@@ -10,8 +10,10 @@ import { warn } from "@/lib/logging/logger.js";
 
 const EVENT_FIELDS = {
   message_id: "message-id",
+  provider_message_sid: "text-2",
   timestamp: "timestamp",
   direction: "direction",
+  event_type: "category",
   message_variant: "message-variant",
   master_owner: "master-owner",
   prospect: "linked-seller",
@@ -25,7 +27,7 @@ const EVENT_FIELDS = {
   source_app: "source-app",
   trigger_name: "trigger-name",
   message: "message",
-  template_selected: "template-selected",
+  template: "template",
   character_count: "character-count",
   delivery_status: "status-3",
   raw_carrier_status: "status-2",
@@ -73,7 +75,7 @@ export function buildOutboundMessageEventFields({
   selected_variant_group = null,
   selected_tone = null,
   send_result = null,
-  processed_by = "Scheduled Campaign",
+  processed_by = "Queue Runner",
   source_app = "Send Queue",
   trigger_name = "queue-send",
 } = {}) {
@@ -111,7 +113,9 @@ export function buildOutboundMessageEventFields({
 
   return {
     [EVENT_FIELDS.message_id]: resolved_message_id,
+    [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Outbound",
+    [EVENT_FIELDS.event_type]: "Seller Outbound SMS",
     [EVENT_FIELDS.timestamp]: { start: nowIso() },
     [EVENT_FIELDS.message]: String(message_body || ""),
     [EVENT_FIELDS.character_count]: String(message_body || "").length,
@@ -169,7 +173,7 @@ export function buildOutboundMessageEventFields({
       ? { [EVENT_FIELDS.conversation]: conversation_relation }
       : {}),
     ...(asArrayAppRef(template_id)
-      ? { [EVENT_FIELDS.template_selected]: asArrayAppRef(template_id) }
+      ? { [EVENT_FIELDS.template]: asArrayAppRef(template_id) }
       : {}),
     ...(latency_ms !== null && latency_ms !== undefined
       ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }

@@ -1,9 +1,6 @@
 // ─── update-brain-seller-profile.js ──────────────────────────────────────
-import { updateBrain } from "@/lib/providers/podio.js";
-
-const BRAIN_FIELDS = {
-  seller_profile: "seller-profile",
-};
+import { BRAIN_FIELDS } from "@/lib/podio/apps/ai-conversation-brain.js";
+import { applyBrainStateUpdate } from "@/lib/domain/brain/brain-authority.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -30,12 +27,16 @@ export async function updateBrainSellerProfile({
     };
   }
 
-  await updateBrain(brain_id, {
-    [BRAIN_FIELDS.seller_profile]: normalized_profile,
+  const result = await applyBrainStateUpdate({
+    brain_id,
+    reason: "brain_seller_profile_updated",
+    fields: {
+      [BRAIN_FIELDS.seller_profile]: normalized_profile,
+    },
   });
 
   return {
-    ok: true,
+    ...result,
     brain_id,
     seller_profile: normalized_profile,
   };

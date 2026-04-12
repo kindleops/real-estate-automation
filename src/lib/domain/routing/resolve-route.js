@@ -1173,7 +1173,7 @@ export function resolveRoute({
   );
 
   const existing_stage = normalizeStage(
-    getCategoryValue(brain_item, "conversation-stage", "Ownership")
+    getCategoryValue(brain_item, "conversation-stage", "Ownership Confirmation")
   );
 
   const seller_profile = getCategoryValue(brain_item, "seller-profile", null);

@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 
 import { LIFECYCLE_STAGES, STAGES } from "@/lib/config/stages.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
+import {
+  categoryField,
+  createPodioItem,
+} from "../helpers/test-helpers.js";
 
 function buildClassification(overrides = {}) {
   return {
@@ -57,6 +61,24 @@ test("motivated blank outbound routing still stays in stage 1 ownership confirma
   assert.equal(route.secondary_category, "Outbound Initial");
   assert.equal(route.template_filters.paired_with_agent_type, "Warm Professional");
   assert.equal(route.template_filters.fallback_agent_type, "Warm Professional");
+});
+
+test("live brain conversation-stage labels still collapse into the ownership routing bucket", () => {
+  const route = resolveRoute({
+    classification: buildClassification({
+      stage_hint: null,
+    }),
+    brain_item: createPodioItem(701, {
+      "conversation-stage": categoryField("Ownership Confirmation"),
+    }),
+    phone_item: null,
+    message: "",
+  });
+
+  assert.equal(route.use_case, "ownership_check");
+  assert.equal(route.stage, STAGES.OWNERSHIP);
+  assert.equal(route.lifecycle_stage, LIFECYCLE_STAGES.OWNERSHIP);
+  assert.equal(route.variant_group, "Stage 1 — Ownership Confirmation");
 });
 
 test("contract skip-ahead messaging resolves to the exact contract request flow", () => {

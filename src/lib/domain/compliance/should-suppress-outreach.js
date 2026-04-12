@@ -147,7 +147,16 @@ export function shouldSuppressOutreach({
     };
   }
 
-  if (["_ under contract", "_ closed"].includes(lower(signals.status_ai_managed))) {
+  if (
+    [
+      "_ under contract",
+      "_ closed",
+      "under contract",
+      "closed",
+      "dnc",
+      "wrong number",
+    ].includes(lower(signals.status_ai_managed))
+  ) {
     return {
       suppress: true,
       reason: "brain_status_terminal",
@@ -158,7 +167,11 @@ export function shouldSuppressOutreach({
     };
   }
 
-  if (["paused", "manual override"].includes(lower(signals.follow_up_trigger_state))) {
+  if (
+    ["paused", "manual override", "completed", "expired"].includes(
+      lower(signals.follow_up_trigger_state)
+    )
+  ) {
     return {
       suppress: true,
       reason: "follow_up_trigger_paused",

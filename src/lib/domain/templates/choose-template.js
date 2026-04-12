@@ -16,9 +16,9 @@ const TEMPLATE_FIELDS = {
   template_id: ["template-id"],
   title: ["title"],
   body: ["text", "english-translation"],
-  category: ["property-type", "category"],
-  use_case: ["use-case"],
-  stage: ["stage"],
+  category: ["property-type", "category-2", "category"],
+  use_case: ["use-case", "use-case-2"],
+  stage: ["stage-label", "stage", "stage-code"],
   language: ["language"],
   status: ["active"],
 };
@@ -58,6 +58,24 @@ function hasAnyField(item, external_ids = []) {
 function normalizeStageLabel(value) {
   const raw = normalize(value);
   if (!raw) return null;
+
+  if (raw.includes("ownership confirmation")) return "ownership";
+  if (raw.includes("offer interest")) return "offer";
+  if (raw.includes("seller price discovery")) return "offer";
+  if (raw.includes("offer positioning")) return "offer";
+  if (raw.includes("condition") || raw.includes("timeline discovery")) return "q/a";
+  if (raw.includes("negotiation")) return "offer";
+  if (
+    raw.includes("contract") ||
+    raw.includes("verbal acceptance") ||
+    raw.includes("signed") ||
+    raw.includes("closing")
+  ) {
+    return "contract";
+  }
+  if (raw.includes("follow-up") || raw.includes("follow up") || raw.includes("dead outcome")) {
+    return "follow-up";
+  }
 
   if (["ownership"].includes(raw)) return "ownership";
   if (["offer"].includes(raw)) return "offer";

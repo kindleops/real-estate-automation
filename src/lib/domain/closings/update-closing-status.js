@@ -4,7 +4,12 @@ import {
   getClosingItem,
   updateClosingItem,
 } from "@/lib/podio/apps/closings.js";
+import { getFirstAppReferenceId } from "@/lib/providers/podio.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
+import { updateBrainFromExecution } from "@/lib/domain/brain/update-brain-from-execution.js";
+import { syncContractStatus } from "@/lib/domain/contracts/sync-contract-status.js";
+import { updateTitleRoutingStatus } from "@/lib/domain/title/update-title-routing-status.js";
+import { createDealRevenueFromClosedClosing } from "@/lib/domain/revenue/create-deal-revenue-from-closed-closing.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -58,6 +63,26 @@ function isTerminalClosingStatus(status = "") {
   return normalized === "completed" || normalized === "cancelled";
 }
 
+const defaultDeps = {
+  getClosingItem,
+  updateClosingItem,
+  syncPipelineState,
+  updateBrainFromExecution,
+  syncContractStatus,
+  updateTitleRoutingStatus,
+  createDealRevenueFromClosedClosing,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
+export function __setClosingStatusTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetClosingStatusTestDeps() {
+  runtimeDeps = { ...defaultDeps };
+}
+
 export async function updateClosingStatus({
   closing_item_id = null,
   closing_item = null,
@@ -67,7 +92,7 @@ export async function updateClosingStatus({
   let resolved_closing_item = closing_item || null;
 
   if (!resolved_closing_item && closing_item_id) {
-    resolved_closing_item = await getClosingItem(closing_item_id);
+    resolved_closing_item = await runtimeDeps.getClosingItem(closing_item_id);
   }
 
   const resolved_closing_item_id =
@@ -150,9 +175,62 @@ export async function updateClosingStatus({
     payload[CLOSING_FIELDS.closed_successfully] = "No";
   }
 
-  await updateClosingItem(resolved_closing_item_id, payload);
-  const pipeline = await syncPipelineState({
+  await runtimeDeps.updateClosingItem(resolved_closing_item_id, payload);
+  const contract_item_id = getFirstAppReferenceId(
+    resolved_closing_item,
+    CLOSING_FIELDS.contract,
+    null
+  );
+  const title_routing_item_id = getFirstAppReferenceId(
+    resolved_closing_item,
+    CLOSING_FIELDS.title_routing,
+    null
+  );
+  const contract_sync =
+    normalized_status === "Completed" && contract_item_id
+      ? await runtimeDeps.syncContractStatus({
+          contract_item_id,
+          status: "Closed",
+        })
+      : normalized_status === "Cancelled" && contract_item_id
+        ? await runtimeDeps.syncContractStatus({
+            contract_item_id,
+            status: "Cancelled",
+          })
+        : null;
+  const title_sync =
+    title_routing_item_id &&
+    (normalized_status === "Completed" || normalized_status === "Cancelled")
+      ? await runtimeDeps.updateTitleRoutingStatus({
+          title_routing_item_id,
+          status: normalized_status === "Completed" ? "Closed" : "Cancelled",
+          notes:
+            clean(notes) ||
+            (normalized_status === "Completed"
+              ? "Closing completed successfully."
+              : "Closing was cancelled."),
+        })
+      : null;
+  const revenue_sync =
+    normalized_status === "Completed"
+      ? await runtimeDeps.createDealRevenueFromClosedClosing({
+          closing_item_id: resolved_closing_item_id,
+        })
+      : null;
+  const pipeline = await runtimeDeps.syncPipelineState({
     closing_item_id: resolved_closing_item_id,
+    contract_item_id,
+    title_routing_item_id,
+    deal_revenue_item_id:
+      revenue_sync?.deal_revenue_item_id || revenue_sync?.result?.deal_revenue_item_id || null,
+    notes:
+      clean(notes) ||
+      `Closing status updated to ${normalized_status || existing_status}.`,
+  });
+  const brain_update = await runtimeDeps.updateBrainFromExecution({
+    source: "closing",
+    closing_item: resolved_closing_item,
+    closing_status: normalized_status || existing_status,
     notes:
       clean(notes) ||
       `Closing status updated to ${normalized_status || existing_status}.`,
@@ -165,7 +243,11 @@ export async function updateClosingStatus({
     closing_item_id: resolved_closing_item_id,
     closing_status: normalized_status || existing_status || null,
     payload,
+    contract_sync,
+    title_sync,
+    revenue_sync,
     pipeline,
+    brain_update,
   };
 }
 

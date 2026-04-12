@@ -2181,7 +2181,7 @@ function detectStageHint(message, brain_item = null, objection = null) {
   ) return "Q/A";
 
   const existing_stage = normalizeStage(
-    getCategoryValue(brain_item, "conversation-stage", "Ownership")
+    getCategoryValue(brain_item, "conversation-stage", "Ownership Confirmation")
   );
   const text = lower(message);
 

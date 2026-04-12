@@ -1,6 +1,7 @@
 // ─── derive-context-summary.js ───────────────────────────────────────────
 import {
   getCategoryValue,
+  getDateValue,
   getFieldValues,
   getNumberValue,
   getTextValue,
@@ -44,11 +45,18 @@ function titleCaseIfShouting(value = "") {
 // so we always prefer the structured street_address sub-field and never fall back
 // to formatted.  Callers that need the full address should use formatPropertyAddress
 // in build-send-queue-item.js instead.
+// When the field is stored as a plain text type (e.g. in tests or legacy imports),
+// fall back to first.value directly.
 function extractStreetAddress(property_item) {
   const values = getFieldValues(property_item, "property-address");
   const first = values[0];
   if (!first) return "";
-  return first.street_address || first.value?.street_address || "";
+  // Prefer structured location sub-field
+  if (first.street_address) return first.street_address;
+  if (first.value?.street_address) return first.value.street_address;
+  // Fall back to plain text value (text-type field, not location-type)
+  if (typeof first.value === "string") return first.value;
+  return "";
 }
 
 function firstNonNull(...values) {
@@ -111,16 +119,38 @@ export function deriveContextSummary({
     do_not_call: getCategoryValue(phone_item, "do-not-call", "FALSE"),
     dnc_source: getCategoryValue(phone_item, "dnc-source", null),
 
-    conversation_stage: getCategoryValue(brain_item, "conversation-stage", "Ownership"),
-    brain_ai_route: getCategoryValue(brain_item, "ai-route", "Soft"),
+    conversation_stage: getCategoryValue(
+      brain_item,
+      "conversation-stage",
+      "Ownership Confirmation"
+    ),
+    brain_ai_route: getCategoryValue(brain_item, "ai-route", "Unknown"),
+    lifecycle_stage_number: getNumberValue(brain_item, "number", 1),
+    current_seller_state: getCategoryValue(brain_item, "current-seller-state", "Unknown"),
+    follow_up_step: getCategoryValue(brain_item, "follow-up-step", "None"),
+    next_follow_up_due_at: getDateValue(brain_item, "next-follow-up-due-at", null),
+    last_detected_intent: getCategoryValue(brain_item, "last-detected-intent", "Unknown"),
     language_preference: normalizeLanguage(
       getCategoryValue(brain_item, "language-preference", "English")
     ),
     seller_profile: getCategoryValue(brain_item, "seller-profile", null),
     status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
+    deal_priority_tag: getCategoryValue(brain_item, "deal-prioirty-tag", null),
     follow_up_trigger_state: getCategoryValue(brain_item, "follow-up-trigger-state", null),
     motivation_score: getNumberValue(brain_item, "seller-motivation-score", null),
+    risk_flags_ai: getCategoryValue(brain_item, "risk-flags-ai", null),
+    seller_emotional_tone: getCategoryValue(brain_item, "category", "Unknown"),
+    response_style_mode: getCategoryValue(brain_item, "category-2", "Unknown"),
+    primary_objection_type: getCategoryValue(brain_item, "category-3", "Unknown"),
+    seller_ask_price: getNumberValue(brain_item, "seller-asking-price", null),
+    cash_offer_target: getNumberValue(brain_item, "cash-offer-target", null),
+    creative_branch_eligibility: getCategoryValue(brain_item, "category-4", "Unknown"),
+    deal_strategy_branch: getCategoryValue(brain_item, "category-5", "Unknown"),
     total_messages_sent: touch_count,
+    last_message_summary_ai: getTextValue(brain_item, "transcript", ""),
+    full_conversation_summary_ai: getTextValue(brain_item, "title", ""),
+    ai_recommended_next_move: getTextValue(brain_item, "ais-recommended-next-move", ""),
+    ai_next_message: getTextValue(brain_item, "ai-next-message", ""),
     last_inbound_message: getTextValue(brain_item, "last-inbound-message", ""),
     last_outbound_message: getTextValue(brain_item, "last-outbound-message", ""),
 

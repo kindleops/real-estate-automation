@@ -2,16 +2,19 @@ import APP_IDS from "@/lib/config/app-ids.js";
 import { getAppReferenceIds } from "@/lib/providers/podio.js";
 import { getAttachedFieldSchema } from "@/lib/podio/schema.js";
 import {
+  applyBrainStateUpdate,
+  buildLinkedMessageEventsFields,
+} from "@/lib/domain/brain/brain-authority.js";
+import {
   BRAIN_FIELDS,
   getBrainItem,
-  updateBrainItem,
 } from "@/lib/podio/apps/ai-conversation-brain.js";
 
 const defaultDeps = {
   getAppReferenceIds,
   getAttachedFieldSchema,
   getBrainItem,
-  updateBrainItem,
+  applyBrainStateUpdate,
 };
 
 let runtimeDeps = { ...defaultDeps };
@@ -100,8 +103,13 @@ export async function linkMessageEventToBrain({
     resolved_message_event_id,
   ];
 
-  await runtimeDeps.updateBrainItem(resolved_brain_id, {
-    [BRAIN_FIELDS.linked_message_events]: next_message_event_ids,
+  await runtimeDeps.applyBrainStateUpdate({
+    brain_id: resolved_brain_id,
+    reason: "message_event_linked",
+    fields: buildLinkedMessageEventsFields({
+      current_message_event_ids: existing_message_event_ids,
+      message_event_id: resolved_message_event_id,
+    }),
   });
 
   return {

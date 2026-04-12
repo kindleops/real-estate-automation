@@ -9,7 +9,6 @@ import {
   getFirstAppReferenceId,
   getPhoneValue,
   getNumberValue,
-  getFirstMatchingItem,
   updateItem,
   createMessageEvent,
   PodioError,
@@ -46,6 +45,7 @@ import { deriveContextSummary } from "@/lib/domain/context/derive-context-summar
 import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
+import { findBestBrainMatch } from "@/lib/podio/apps/ai-conversation-brain.js";
 import { normalizeForQueueText } from "@/lib/domain/queue/build-send-queue-item.js";
 import { resolveTemplateFieldReference } from "@/lib/domain/templates/template-reference.js";
 import {
@@ -54,6 +54,10 @@ import {
   canonicalStageForUseCase,
   normalizeSellerFlowTone,
 } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import {
+  collapseConversationStageToLegacy,
+  deriveQueueCurrentStage,
+} from "@/lib/domain/communications-engine/state-machine.js";
 
 import { info, warn } from "@/lib/logging/logger.js";
 
@@ -88,8 +92,10 @@ const QUEUE_FIELDS = {
 
 const EVENT_FIELDS = {
   message_id: "message-id",
+  provider_message_sid: "text-2",
   timestamp: "timestamp",
   direction: "direction",
+  event_type: "category",
   message_variant: "message-variant",
   master_owner: "master-owner",
   prospect: "linked-seller",
@@ -103,7 +109,7 @@ const EVENT_FIELDS = {
   source_app: "source-app",
   trigger_name: "trigger-name",
   message: "message",
-  template_selected: "template-selected",
+  template: "template",
   character_count: "character-count",
   delivery_status: "status-3",
   raw_carrier_status: "status-2",
@@ -336,9 +342,10 @@ function deriveTemplateSecondaryCategory(property_item, owner_item, fallback = n
 }
 
 function deriveSequencePosition(stage, owner_touch_count) {
+  const normalized_stage = collapseConversationStageToLegacy(stage, stage);
   const touch_number = Math.max(1, Number(owner_touch_count || 0) + 1);
 
-  if (stage === "Offer") {
+  if (normalized_stage === "Offer") {
     if (touch_number <= 1) return "V1";
     if (touch_number === 2) return "V2";
     return "V3";
@@ -796,26 +803,16 @@ function mapFailureReasonToQueueCategory(send_result, fallback_bucket = null) {
   return "Network Error";
 }
 
-async function resolveBrainForQueue({ master_owner_id, prospect_id }) {
-  if (master_owner_id) {
-    const hit = await getFirstMatchingItem(
-      APP_IDS.ai_conversation_brain,
-      { "master-owner": master_owner_id },
-      { sort_desc: true }
-    );
-    if (hit) return hit;
-  }
-
-  if (prospect_id) {
-    const hit = await getFirstMatchingItem(
-      APP_IDS.ai_conversation_brain,
-      { prospect: prospect_id },
-      { sort_desc: true }
-    );
-    if (hit) return hit;
-  }
-
-  return null;
+async function resolveBrainForQueue({
+  phone_item_id = null,
+  master_owner_id = null,
+  prospect_id = null,
+}) {
+  return findBestBrainMatch({
+    phone_item_id,
+    prospect_id,
+    master_owner_id,
+  });
 }
 
 async function resolveQueuePropertyAndMarket({
@@ -1008,7 +1005,9 @@ export function buildFailedOutboundMessageEventFields({
 
   return {
     [EVENT_FIELDS.message_id]: resolved_message_id,
+    [EVENT_FIELDS.provider_message_sid]: send_result.message_id || null,
     [EVENT_FIELDS.direction]: "Outbound",
+    [EVENT_FIELDS.event_type]: "Send Failure",
     [EVENT_FIELDS.timestamp]: { start: nowIso() },
     [EVENT_FIELDS.message]: message_body,
     [EVENT_FIELDS.character_count]: String(message_body || "").length,
@@ -1016,7 +1015,7 @@ export function buildFailedOutboundMessageEventFields({
     [EVENT_FIELDS.raw_carrier_status]: String(send_result.error_status || send_result.status || ""),
     [EVENT_FIELDS.failure_bucket]: mapTextgridFailureBucket(send_result) || "Other",
     [EVENT_FIELDS.is_final_failure]: retry_count + 1 >= max_retries ? "Yes" : "No",
-    [EVENT_FIELDS.processed_by]: "Scheduled Campaign",
+    [EVENT_FIELDS.processed_by]: "Queue Runner",
     [EVENT_FIELDS.source_app]: "Send Queue",
     [EVENT_FIELDS.trigger_name]:
       queue_item_id ? buildQueueSendFailedTriggerName(queue_item_id) : "queue-send-failed",
@@ -1067,7 +1066,7 @@ export function buildFailedOutboundMessageEventFields({
       ? { [EVENT_FIELDS.conversation]: asArrayAppRef(conversation_item_id) }
       : {}),
     ...(asArrayAppRef(template_id)
-      ? { [EVENT_FIELDS.template_selected]: asArrayAppRef(template_id) }
+      ? { [EVENT_FIELDS.template]: asArrayAppRef(template_id) }
       : {}),
     ...(latency_ms !== null && latency_ms !== undefined
       ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }
@@ -1254,6 +1253,13 @@ export async function finalizeSuccessfulQueueSend({
       message_body,
       template_id,
       current_total_messages_sent,
+      conversation_stage: deriveQueueCurrentStage({
+        conversation_stage: getCategoryValue(brain_item, "conversation-stage", null),
+        use_case: selected_use_case || template_use_case || null,
+      }),
+      current_follow_up_step: getCategoryValue(brain_item, "follow-up-step", null),
+      status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
+      now,
     });
   } catch (error) {
     bookkeeping_errors.push(
@@ -1310,6 +1316,7 @@ export async function processSendQueueItem(queue_item_id) {
     [initial_phone_item, initial_brain_item] = await Promise.all([
       initial_phone_item_id ? safeGetItem(initial_phone_item_id) : Promise.resolve(null),
       resolveBrainForQueue({
+        phone_item_id: initial_phone_item_id,
         master_owner_id: initial_master_owner_id,
         prospect_id: initial_prospect_id,
       }),
@@ -1556,7 +1563,7 @@ export async function processSendQueueItem(queue_item_id) {
 
   const brain_item = initial_brain_item
     ? initial_brain_item
-    : await resolveBrainForQueue({ master_owner_id, prospect_id });
+    : await resolveBrainForQueue({ phone_item_id, master_owner_id, prospect_id });
   const brain_id = brain_item?.item_id ?? null;
 
   const suppression = shouldSuppressOutreach({

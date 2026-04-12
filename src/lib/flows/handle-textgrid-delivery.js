@@ -10,6 +10,7 @@ import {
 } from "@/lib/providers/podio.js";
 import { getCategoryOptionId } from "@/lib/podio/schema.js";
 import {
+  findBestBrainMatch,
   findLatestBrainByMasterOwnerId,
   findLatestBrainByProspectId,
 } from "@/lib/podio/apps/ai-conversation-brain.js";
@@ -66,6 +67,7 @@ const defaultDeps = {
   getFirstAppReferenceId,
   getCategoryValue,
   updateItem,
+  findBestBrainMatch,
   findLatestBrainByMasterOwnerId,
   findLatestBrainByProspectId,
   updatePhoneNumberItem,
@@ -443,6 +445,11 @@ async function resolveBrainForEvent(event_item) {
     EVENT_FIELDS.prospect,
     null
   );
+  const phone_item_id = runtimeDeps.getFirstAppReferenceId(
+    event_item,
+    EVENT_FIELDS.phone_number,
+    null
+  );
   const master_owner_id = runtimeDeps.getFirstAppReferenceId(
     event_item,
     EVENT_FIELDS.master_owner,
@@ -450,6 +457,13 @@ async function resolveBrainForEvent(event_item) {
   );
 
   return (
+    (runtimeDeps.findBestBrainMatch
+      ? await runtimeDeps.findBestBrainMatch({
+          phone_item_id,
+          prospect_id,
+          master_owner_id,
+        })
+      : null) ||
     (prospect_id ? await runtimeDeps.findLatestBrainByProspectId(prospect_id) : null) ||
     (master_owner_id ? await runtimeDeps.findLatestBrainByMasterOwnerId(master_owner_id) : null) ||
     null
@@ -458,6 +472,7 @@ async function resolveBrainForEvent(event_item) {
 
 async function resolveBrainForRefs({
   conversation_item_id = null,
+  phone_item_id = null,
   prospect_id = null,
   master_owner_id = null,
 } = {}) {
@@ -466,6 +481,13 @@ async function resolveBrainForRefs({
   }
 
   return (
+    (runtimeDeps.findBestBrainMatch
+      ? await runtimeDeps.findBestBrainMatch({
+          phone_item_id,
+          prospect_id,
+          master_owner_id,
+        })
+      : null) ||
     (prospect_id ? await runtimeDeps.findLatestBrainByProspectId(prospect_id) : null) ||
     (master_owner_id ? await runtimeDeps.findLatestBrainByMasterOwnerId(master_owner_id) : null) ||
     null
@@ -780,11 +802,15 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
     const primary_prospect_id =
       runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.prospect, null) ||
       runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.prospects, null);
+    const primary_phone_item_id =
+      runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.phone_number, null) ||
+      runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.phone_number, null);
     const primary_conversation_item_id =
       runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.conversation, null) ||
       null;
     const primary_brain_item = await resolveBrainForRefs({
       conversation_item_id: primary_conversation_item_id,
+      phone_item_id: primary_phone_item_id,
       prospect_id: primary_prospect_id,
       master_owner_id: primary_master_owner_id,
     });

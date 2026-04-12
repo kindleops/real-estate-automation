@@ -1,35 +1,28 @@
 // ─── update-brain-after-inbound.js ───────────────────────────────────────
 import {
-  BRAIN_FIELDS,
-  updateBrainItem,
-} from "@/lib/podio/apps/ai-conversation-brain.js";
-import { toPodioDateField } from "@/lib/utils/dates.js";
+  applyBrainStateUpdate,
+  buildInboundBrainStateFields,
+} from "@/lib/domain/brain/brain-authority.js";
 
 export async function updateBrainAfterInbound({
   brain_id = null,
   message_body = "",
   follow_up_trigger_state = "AI Running",
+  deterministic_state = null,
+  extra_fields = {},
+  now = new Date(),
 } = {}) {
-  if (!brain_id) {
-    return {
-      ok: false,
-      reason: "missing_brain_id",
-    };
-  }
-
-  const fields = {
-    [BRAIN_FIELDS.last_inbound_message]: String(message_body || ""),
-    [BRAIN_FIELDS.last_contact_timestamp]: toPodioDateField(new Date()),
-    [BRAIN_FIELDS.follow_up_trigger_state]: follow_up_trigger_state,
-  };
-
-  await updateBrainItem(brain_id, fields);
-
-  return {
-    ok: true,
+  return applyBrainStateUpdate({
     brain_id,
-    updated_fields: fields,
-  };
+    reason: "inbound_message_received",
+    fields: buildInboundBrainStateFields({
+      message_body,
+      follow_up_trigger_state,
+      deterministic_state,
+      extra_fields,
+      now,
+    }),
+  });
 }
 
 export default updateBrainAfterInbound;

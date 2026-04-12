@@ -378,7 +378,8 @@ export async function queueOutboundMessage({
       language: language || context?.summary?.language_preference || "English",
       objection: null,
       emotion: "calm",
-      stage_hint: context?.summary?.conversation_stage || "Ownership",
+      stage_hint:
+        context?.summary?.conversation_stage || "Ownership Confirmation",
       compliance_flag: null,
       positive_signals: [],
       confidence: 1,
@@ -770,6 +771,7 @@ export async function queueOutboundMessage({
     // matching option in the Send Queue schema (e.g. stale supplement).
     property_type: selected_template?.category_primary ?? resolved_category ?? null,
     secondary_category: resolved_secondary_category,
+    current_stage: route?.stage || context?.summary?.conversation_stage || null,
     use_case_template:
       normalizeSellerFlowUseCase(selected_template?.use_case || resolved_use_case) || null,
     personalization_tags_used: rendered_placeholders,

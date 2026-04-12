@@ -55,7 +55,7 @@ function normalizeMessageEvent(item) {
     market_id: getFirstAppReferenceId(item, "market", null),
     conversation_item_id: getFirstAppReferenceId(item, "conversation", null),
     template_id:
-      getFirstAppReferenceId(item, "template-selected", null) ??
+      getFirstAppReferenceId(item, "template", null) ??
       metadata?.template_id ??
       null,
     metadata,

@@ -4,8 +4,10 @@ import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-t
 
 const EVENT_FIELDS = {
   message_id: "message-id",
+  provider_message_sid: "text-2",
   timestamp: "timestamp",
   direction: "direction",
+  event_type: "category",
   master_owner: "master-owner",
   prospect: "linked-seller",
   property: "property",
@@ -26,6 +28,27 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function asArrayAppRef(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
+}
+
+const defaultDeps = {
+  createMessageEvent,
+  getCategoryValue,
+  linkMessageEventToBrain,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
+export function __setLogInboundMessageEventTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetLogInboundMessageEventTestDeps() {
+  runtimeDeps = { ...defaultDeps };
+}
+
 export async function logInboundMessageEvent({
   brain_item = null,
   conversation_item_id = null,
@@ -42,12 +65,14 @@ export async function logInboundMessageEvent({
   source_app = "External API",
   trigger_name = "textgrid-inbound",
 } = {}) {
-  const ai_route = getCategoryValue(brain_item, "ai-route", null);
+  const ai_route = runtimeDeps.getCategoryValue(brain_item, "ai-route", null);
   const normalized_message = String(message_body || "");
 
   const fields = {
     [EVENT_FIELDS.message_id]: provider_message_id || null,
+    [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Inbound",
+    [EVENT_FIELDS.event_type]: "Seller Inbound SMS",
     [EVENT_FIELDS.timestamp]: { start: received_at || nowIso() },
     [EVENT_FIELDS.message]: normalized_message,
     [EVENT_FIELDS.character_count]: normalized_message.length,
@@ -56,20 +81,34 @@ export async function logInboundMessageEvent({
     [EVENT_FIELDS.processed_by]: processed_by,
     [EVENT_FIELDS.source_app]: source_app,
     [EVENT_FIELDS.trigger_name]: trigger_name,
-    ...(master_owner_id ? { [EVENT_FIELDS.master_owner]: master_owner_id } : {}),
-    ...(prospect_id ? { [EVENT_FIELDS.prospect]: prospect_id } : {}),
-    ...(property_id ? { [EVENT_FIELDS.property]: property_id } : {}),
-    ...(phone_item_id ? { [EVENT_FIELDS.phone_number]: phone_item_id } : {}),
-    ...(inbound_number_item_id ? { [EVENT_FIELDS.textgrid_number]: inbound_number_item_id } : {}),
-    ...((conversation_item_id || brain_item?.item_id)
-      ? { [EVENT_FIELDS.conversation]: conversation_item_id || brain_item?.item_id }
+    ...(asArrayAppRef(master_owner_id)
+      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
+      : {}),
+    ...(asArrayAppRef(prospect_id)
+      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
+      : {}),
+    ...(asArrayAppRef(property_id)
+      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
+      : {}),
+    ...(asArrayAppRef(phone_item_id)
+      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
+      : {}),
+    ...(asArrayAppRef(inbound_number_item_id)
+      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(inbound_number_item_id) }
+      : {}),
+    ...(asArrayAppRef(conversation_item_id || brain_item?.item_id)
+      ? {
+          [EVENT_FIELDS.conversation]: asArrayAppRef(
+            conversation_item_id || brain_item?.item_id
+          ),
+        }
       : {}),
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
   };
 
-  const created = await createMessageEvent(fields);
+  const created = await runtimeDeps.createMessageEvent(fields);
 
-  await linkMessageEventToBrain({
+  await runtimeDeps.linkMessageEventToBrain({
     brain_item,
     brain_id: conversation_item_id || brain_item?.item_id || null,
     message_event_id: created?.item_id ?? null,

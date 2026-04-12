@@ -26,6 +26,10 @@ const TEMPLATE_FILTER_ALIAS_MAP = Object.freeze({
   }),
 });
 
+function getTemplateSecondaryCategoryFieldExternalId() {
+  return "category-2";
+}
+
 const TEMPLATE_LOOKUP_USE_CASE_ALIASES = Object.freeze({
   ask_timeline: Object.freeze([
     "text_me_later_specific",
@@ -159,9 +163,14 @@ function normalizeTemplateFilters({
   paired_with_agent_type = null,
   active = "Yes",
 }) {
+  const secondary_category_external_id = getTemplateSecondaryCategoryFieldExternalId();
+
   return {
     category: getTemplateCategoryValue("property-type", category),
-    secondary_category: getTemplateCategoryValue("category", secondary_category),
+    secondary_category: getTemplateCategoryValue(
+      secondary_category_external_id,
+      secondary_category
+    ),
     use_case: getTemplateCategoryValue("use-case", use_case),
     variant_group: getTemplateCategoryValue("stage", variant_group),
     tone: getTemplateCategoryValue("tone", tone),
@@ -196,6 +205,7 @@ function buildFilterPayload({
   paired_with_agent_type = null,
   active = "Yes",
 }) {
+  const secondary_category_external_id = getTemplateSecondaryCategoryFieldExternalId();
   const normalized = normalizeTemplateFilters({
     category,
     secondary_category,
@@ -212,7 +222,9 @@ function buildFilterPayload({
   const filters = {};
 
   if (normalized.category) filters["property-type"] = normalized.category;
-  if (normalized.secondary_category) filters["category"] = normalized.secondary_category;
+  if (normalized.secondary_category) {
+    filters[secondary_category_external_id] = normalized.secondary_category;
+  }
   if (normalized.use_case) filters["use-case"] = normalized.use_case;
   if (normalized.variant_group) filters["stage"] = normalized.variant_group;
   if (normalized.tone) filters["tone"] = normalized.tone;

@@ -64,6 +64,7 @@ import {
   getTextValue,
   normalizeLanguage,
 } from "@/lib/providers/podio.js";
+import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
 import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
 import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
 import { child, info, warn } from "@/lib/logging/logger.js";
@@ -911,9 +912,10 @@ function deriveTemplateSecondaryCategory(property_item, owner_item, fallback = n
 }
 
 function deriveSequencePosition(stage, owner_touch_count) {
+  const normalized_stage = collapseConversationStageToLegacy(stage, stage);
   const touch_number = Math.max(1, Number(owner_touch_count || 0) + 1);
 
-  if (stage === "Offer") {
+  if (normalized_stage === "Offer") {
     if (touch_number <= 1) return "V1";
     if (touch_number === 2) return "V2";
     return "V3";

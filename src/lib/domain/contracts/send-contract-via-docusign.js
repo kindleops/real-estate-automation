@@ -4,15 +4,12 @@ import {
   getContractItem,
   updateContractItem,
 } from "@/lib/podio/apps/contracts.js";
-import { createEnvelope, sendEnvelope } from "@/lib/providers/docusign.js";
+import { getEnvelope, sendEnvelope } from "@/lib/providers/docusign.js";
+import { createDocusignEnvelopeFromContract } from "@/lib/domain/contracts/create-docusign-envelope-from-contract.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 
 function clean(value) {
   return String(value ?? "").trim();
-}
-
-function safeArray(value) {
-  return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
 function nowIso() {
@@ -43,50 +40,16 @@ function buildDefaultSubject(contract_item) {
   );
 }
 
-function normalizeDocuments(documents = []) {
-  return safeArray(documents)
-    .map((doc, index) => ({
-      document_id:
-        clean(doc.document_id) ||
-        clean(doc.id) ||
-        String(index + 1),
-      name:
-        clean(doc.name) ||
-        `Contract ${index + 1}`,
-      file_base64:
-        clean(doc.file_base64) ||
-        clean(doc.base64) ||
-        "",
-      file_extension:
-        clean(doc.file_extension) ||
-        clean(doc.extension) ||
-        "pdf",
-    }))
-    .filter((doc) => doc.file_base64);
-}
-
-function normalizeSigners(signers = []) {
-  return safeArray(signers)
-    .map((signer, index) => ({
-      signer_id:
-        clean(signer.signer_id) ||
-        clean(signer.id) ||
-        String(index + 1),
-      name: clean(signer.name),
-      email: clean(signer.email),
-      routing_order: clean(signer.routing_order) || String(index + 1),
-      role_name: clean(signer.role_name) || "",
-      recipient_type: clean(signer.recipient_type) || "signer",
-    }))
-    .filter((signer) => signer.name && signer.email);
-}
-
 export async function sendContractViaDocusign({
   contract_item_id = null,
   contract_item = null,
   subject = null,
   documents = [],
+  recipients = [],
   signers = [],
+  seller_recipient = null,
+  buyer_recipient = null,
+  internal_cc = [],
   template_id = null,
   email_blurb = "",
   metadata = {},
@@ -112,41 +75,19 @@ export async function sendContractViaDocusign({
     };
   }
 
-  const normalized_documents = normalizeDocuments(documents);
-  const normalized_signers = normalizeSigners(signers);
-
-  if (!normalized_documents.length) {
-    return {
-      ok: false,
-      sent: false,
-      reason: "missing_documents",
-      contract_item_id: resolved_contract_item_id,
-    };
-  }
-
-  if (!normalized_signers.length) {
-    return {
-      ok: false,
-      sent: false,
-      reason: "missing_signers",
-      contract_item_id: resolved_contract_item_id,
-    };
-  }
-
-  const resolved_subject =
-    clean(subject) ||
-    buildDefaultSubject(resolved_contract_item);
-
-  const envelope_result = await createEnvelope({
-    subject: resolved_subject,
-    documents: normalized_documents,
-    signers: normalized_signers,
+  const envelope_result = await createDocusignEnvelopeFromContract({
+    contract_item_id: resolved_contract_item_id,
+    contract_item: resolved_contract_item,
+    subject: clean(subject) || buildDefaultSubject(resolved_contract_item),
+    documents,
+    recipients,
+    signers,
+    seller_recipient,
+    buyer_recipient,
+    internal_cc,
     template_id,
     email_blurb,
-    metadata: {
-      contract_item_id: resolved_contract_item_id,
-      ...(metadata && typeof metadata === "object" ? metadata : {}),
-    },
+    metadata,
     dry_run,
   });
 
@@ -176,15 +117,45 @@ export async function sendContractViaDocusign({
     };
   }
 
-  await updateContractItem(resolved_contract_item_id, {
-    [CONTRACT_FIELDS.contract_status]: dry_run ? "Draft" : "Sent",
-    [CONTRACT_FIELDS.docusign_envelope_id]:
-      send_result?.envelope_id ||
-      envelope_result?.envelope_id ||
-      undefined,
-    [CONTRACT_FIELDS.contract_sent_timestamp]:
-      dry_run ? undefined : { start: nowIso() },
-  });
+  const envelope_status =
+    !dry_run && send_result?.ok
+      ? await getEnvelope({
+          envelope_id:
+            send_result?.envelope_id ||
+            envelope_result?.envelope_id ||
+            null,
+          dry_run: false,
+        })
+      : null;
+
+  const resolved_envelope_id =
+    send_result?.envelope_id ||
+    envelope_result?.envelope_id ||
+    null;
+  const resolved_signing_link =
+    send_result?.signing_link ||
+    envelope_result?.signing_link ||
+    envelope_status?.signing_link ||
+    null;
+  const resolved_sent_at =
+    send_result?.timestamps?.sent_at ||
+    envelope_status?.timestamps?.sent_at ||
+    nowIso();
+
+  if (!dry_run) {
+    const contract_update = {
+      [CONTRACT_FIELDS.contract_status]: "Sent",
+      [CONTRACT_FIELDS.docusign_envelope_id]: resolved_envelope_id || undefined,
+      [CONTRACT_FIELDS.contract_sent_timestamp]: { start: resolved_sent_at },
+    };
+
+    if (resolved_signing_link) {
+      contract_update[CONTRACT_FIELDS.docusign_signing_link] = resolved_signing_link;
+    }
+
+    await updateContractItem(resolved_contract_item_id, contract_update);
+  }
+
   const pipeline = await syncPipelineState({
     contract_item_id: resolved_contract_item_id,
     notes: dry_run
@@ -197,13 +168,26 @@ export async function sendContractViaDocusign({
     sent: true,
     reason: dry_run ? "docusign_dry_run_completed" : "contract_sent_via_docusign",
     contract_item_id: resolved_contract_item_id,
-    envelope_id:
-      send_result?.envelope_id ||
-      envelope_result?.envelope_id ||
+    envelope_id: resolved_envelope_id,
+    send_status:
+      envelope_status?.status ||
+      send_result?.status ||
+      envelope_result?.status ||
+      null,
+    recipient_summary:
+      envelope_status?.recipient_summary ||
+      envelope_result?.recipient_summary ||
+      null,
+    signing_link: resolved_signing_link,
+    timestamps:
+      envelope_status?.timestamps ||
+      send_result?.timestamps ||
+      envelope_result?.timestamps ||
       null,
     pipeline,
     envelope_result,
     send_result,
+    envelope_status,
   };
 }
 

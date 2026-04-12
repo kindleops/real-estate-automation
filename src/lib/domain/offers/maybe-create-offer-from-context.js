@@ -3,6 +3,7 @@ import { createOffer } from "@/lib/domain/offers/create-offer.js";
 import { selectOfferStrategy } from "@/lib/domain/offers/select-offer-strategy.js";
 import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { getCategoryValue, getNumberValue } from "@/lib/providers/podio.js";
+import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -29,7 +30,10 @@ function shouldCreateOffer({
 } = {}) {
   const objection = classification?.objection || null;
   const emotion = classification?.emotion || null;
-  const stage = route?.stage || context?.summary?.conversation_stage || "Ownership";
+  const stage = collapseConversationStageToLegacy(
+    route?.stage || context?.summary?.conversation_stage || "Ownership",
+    "Ownership"
+  );
   const use_case = normalizeSellerFlowUseCase(route?.use_case) || route?.use_case || null;
   const msg = clean(message);
 

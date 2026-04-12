@@ -12,6 +12,17 @@ import {
 const APP_ID = APP_IDS.templates;
 const MAX_FETCH_LIMIT = 200;
 
+function firstPresentCategory(item, external_ids = [], fallback = null) {
+  for (const external_id of external_ids) {
+    const value = getCategoryValue(item, external_id, null);
+    if (value !== null && value !== undefined && String(value).trim() !== "") {
+      return value;
+    }
+  }
+
+  return fallback;
+}
+
 function safeArray(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
@@ -25,8 +36,12 @@ export function normalizeTemplateItem(item) {
     raw: item,
     template_id: getNumberValue(item, "template-id", null),
     title: getTextValue(item, "title", "") || cleanTemplateTitle(item),
-    use_case: getCategoryValue(item, "use-case", null),
-    variant_group: getCategoryValue(item, "stage", null),
+    use_case: firstPresentCategory(item, ["use-case", "use-case-2"], null),
+    use_case_label: getCategoryValue(item, "use-case-2", null),
+    canonical_routing_slug: getCategoryValue(item, "use-case", null),
+    variant_group: firstPresentCategory(item, ["stage", "stage-label"], null),
+    stage_code: getCategoryValue(item, "stage-code", null),
+    stage_label: getCategoryValue(item, "stage-label", null),
     tone: getCategoryValue(item, "tone", null),
     gender_variant: getCategoryValue(item, "gender-variant", null),
     language: getCategoryValue(item, "language", "English"),
@@ -37,7 +52,7 @@ export function normalizeTemplateItem(item) {
     active: getCategoryValue(item, "active", "No"),
     is_ownership_check: getCategoryValue(item, "is-ownership-check", "No"),
     category_primary: getCategoryValue(item, "property-type", null),
-    category_secondary: getCategoryValue(item, "category", null),
+    category_secondary: firstPresentCategory(item, ["category-2", "category"], null),
     personalization_tags: getCategoryValues(item, "personalization-tags", []),
     deliverability_score: getNumberValue(item, "deliverability-score", 0),
     spam_risk: getNumberValue(item, "spam-risk", null),

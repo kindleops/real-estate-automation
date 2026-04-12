@@ -88,7 +88,7 @@ export async function maybeCreateTitleRoutingFromSignedContract({
   webhook_result = null,
   title_company_item_id = null,
   title_routing_id = null,
-  routing_status = "Not Routed",
+  routing_status = "Routed",
   source = "DocuSign Webhook",
   notes = "",
 } = {}) {

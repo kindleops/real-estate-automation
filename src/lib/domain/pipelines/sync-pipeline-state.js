@@ -149,7 +149,7 @@ function normalizeEngine(value = "Acquisitions") {
   if (raw.includes("closing")) return "Closings";
   if (raw.includes("buyer")) return "Buyer Match";
   if (raw.includes("revenue")) return "Deal Revenue";
-  return "Acquisitions ";
+  return "Acquisitions";
 }
 
 function buildPipelineId({
@@ -427,6 +427,19 @@ function deriveStageState(records = {}) {
     };
   }
 
+  if (title_status_lower === "closed" || contract_status_lower === "closed") {
+    return {
+      current_stage: "Closed",
+      pipeline_status: "Closed Won",
+      automation_status: "Complete",
+      current_engine: "Deal Revenue",
+      blocked: "No",
+      escalation_needed: "No",
+      won_lost_reason: "Closed",
+      next_system_action: "Confirm revenue posting and archive the pipeline.",
+    };
+  }
+
   if (
     closing_status_lower === "cancelled" ||
     title_status_lower === "cancelled" ||
@@ -624,6 +637,42 @@ function deriveStageState(records = {}) {
         blocker_type
           ? `Resolve title blocker: ${blocker_type}.`
           : "Monitor title milestones and clear conditions.",
+    };
+  }
+
+  if (contract_status_lower === "clear to close") {
+    return {
+      current_stage: "Clear to Close",
+      pipeline_status: "Active",
+      automation_status: "Running",
+      current_engine: "Closings",
+      blocked: "No",
+      escalation_needed: "No",
+      next_system_action: "Schedule the closing and confirm funds/docs.",
+    };
+  }
+
+  if (contract_status_lower === "opened") {
+    return {
+      current_stage: "Title Reviewing",
+      pipeline_status: "Active",
+      automation_status: "Running",
+      current_engine: "Title Routing",
+      blocked: "No",
+      escalation_needed: "No",
+      next_system_action: "Monitor title milestones and clear conditions.",
+    };
+  }
+
+  if (contract_status_lower === "sent to title") {
+    return {
+      current_stage: "Routed to Title",
+      pipeline_status: "Active",
+      automation_status: "Running",
+      current_engine: "Title Routing",
+      blocked: "No",
+      escalation_needed: "No",
+      next_system_action: "Confirm title file opened and track title milestones.",
     };
   }
 

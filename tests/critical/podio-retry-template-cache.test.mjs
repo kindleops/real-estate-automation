@@ -395,6 +395,82 @@ test("template normalization keeps missing spam risk as null instead of forcing 
   assert.equal(normalized.spam_risk, null);
 });
 
+test("template normalization reads live Communications Engine fields", () => {
+  const normalized = normalizeTemplateItem({
+    item_id: 9002,
+    fields: [
+      {
+        external_id: "template-id",
+        values: [{ value: 321 }],
+      },
+      {
+        external_id: "use-case",
+        values: [{ value: { text: "ownership_check" } }],
+      },
+      {
+        external_id: "use-case-2",
+        values: [{ value: { text: "ownership_check" } }],
+      },
+      {
+        external_id: "stage",
+        values: [{ value: { text: "Stage 1 — Ownership Confirmation" } }],
+      },
+      {
+        external_id: "stage-label",
+        values: [{ value: { text: "Ownership Confirmation" } }],
+      },
+      {
+        external_id: "stage-code",
+        values: [{ value: { text: "ownership_confirmation" } }],
+      },
+      {
+        external_id: "category-2",
+        values: [{ value: { text: "Outreach" } }],
+      },
+      {
+        external_id: "text",
+        values: [{ value: "Hi {{seller_first_name}}" }],
+      },
+      {
+        external_id: "active",
+        values: [{ value: { text: "Yes" } }],
+      },
+    ],
+  });
+
+  assert.equal(normalized.template_id, 321);
+  assert.equal(normalized.use_case, "ownership_check");
+  assert.equal(normalized.use_case_label, "ownership_check");
+  assert.equal(normalized.canonical_routing_slug, "ownership_check");
+  assert.equal(normalized.variant_group, "Stage 1 — Ownership Confirmation");
+  assert.equal(normalized.stage_label, "Ownership Confirmation");
+  assert.equal(normalized.stage_code, "ownership_confirmation");
+  assert.equal(normalized.category_secondary, "Outreach");
+});
+
+test("template candidate loader uses the live category-2 field for secondary category filters", async () => {
+  const filter_sets = [];
+
+  const candidates = await loadTemplateCandidates({
+    category: "Residential",
+    secondary_category: "Outbound Initial",
+    use_case: "ownership_check",
+    language: "English",
+    paired_with_agent_type: "Warm Professional",
+    remote_fetcher: async (filter_set) => {
+      filter_sets.push(filter_set);
+      return [];
+    },
+    local_fetcher: () => [],
+  });
+
+  assert.deepEqual(candidates, []);
+  assert.ok(
+    filter_sets.some((filter_set) => filter_set["category-2"] === "Outbound Initial"),
+    "expected at least one Podio filter set to target Templates::category-2"
+  );
+});
+
 test("template loader prefers active Podio templates over local fallbacks", async () => {
   const selected = await loadTemplate({
     category: "Residential",

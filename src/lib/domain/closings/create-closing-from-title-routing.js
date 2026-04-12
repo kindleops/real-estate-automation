@@ -10,6 +10,7 @@ import {
 import {
   TITLE_ROUTING_FIELDS,
   getTitleRoutingItem,
+  updateTitleRoutingItem,
 } from "@/lib/podio/apps/title-routing.js";
 import { getDateValue, getFirstAppReferenceId } from "@/lib/providers/podio.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
@@ -86,6 +87,24 @@ function normalizeClosingStatus(value = "Not Scheduled") {
   return "Not Scheduled";
 }
 
+const defaultDeps = {
+  getTitleRoutingItem,
+  getContractItem,
+  createClosingItem,
+  updateTitleRoutingItem,
+  syncPipelineState,
+};
+
+let runtimeDeps = { ...defaultDeps };
+
+export function __setCreateClosingFromTitleRoutingTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
+}
+
+export function __resetCreateClosingFromTitleRoutingTestDeps() {
+  runtimeDeps = { ...defaultDeps };
+}
+
 export async function createClosingFromTitleRouting({
   title_routing_item_id = null,
   title_routing_item = null,
@@ -97,7 +116,9 @@ export async function createClosingFromTitleRouting({
   let resolved_title_routing_item = title_routing_item || null;
 
   if (!resolved_title_routing_item && title_routing_item_id) {
-    resolved_title_routing_item = await getTitleRoutingItem(title_routing_item_id);
+    resolved_title_routing_item = await runtimeDeps.getTitleRoutingItem(
+      title_routing_item_id
+    );
   }
 
   const resolved_title_routing_item_id =
@@ -117,7 +138,7 @@ export async function createClosingFromTitleRouting({
     title_routing_item: resolved_title_routing_item,
   });
   const contract_item = refs.contract_item_id
-    ? await getContractItem(refs.contract_item_id).catch(() => null)
+    ? await runtimeDeps.getContractItem(refs.contract_item_id).catch(() => null)
     : null;
   const buyer_match_item_id = getFirstAppReferenceId(
     contract_item,
@@ -132,10 +153,15 @@ export async function createClosingFromTitleRouting({
       property_id: refs.property_id,
     });
 
+  const normalized_requested_status = normalizeClosingStatus(closing_status);
+  const normalized_closing_status =
+    normalized_requested_status === "Not Scheduled" && refs.closing_date_time
+      ? "Scheduled"
+      : normalized_requested_status;
   const payload = {
     [CLOSING_FIELDS.closing_id]: generated_closing_id,
     [CLOSING_FIELDS.closing_title]: generated_closing_id,
-    [CLOSING_FIELDS.closing_status]: normalizeClosingStatus(closing_status),
+    [CLOSING_FIELDS.closing_status]: normalized_closing_status,
     [CLOSING_FIELDS.title_routing]: asAppRef(resolved_title_routing_item_id),
     ...(refs.contract_item_id
       ? { [CLOSING_FIELDS.contract]: asAppRef(refs.contract_item_id) }
@@ -168,8 +194,11 @@ export async function createClosingFromTitleRouting({
     ) || undefined,
   };
 
-  const created = await createClosingItem(payload);
-  const pipeline = await syncPipelineState({
+  const created = await runtimeDeps.createClosingItem(payload);
+  await runtimeDeps.updateTitleRoutingItem(resolved_title_routing_item_id, {
+    [TITLE_ROUTING_FIELDS.closing]: asAppRef(created?.item_id || null),
+  });
+  const pipeline = await runtimeDeps.syncPipelineState({
     contract_item_id: refs.contract_item_id,
     title_routing_item_id: resolved_title_routing_item_id,
     closing_item_id: created?.item_id || null,
@@ -188,6 +217,7 @@ export async function createClosingFromTitleRouting({
     closing_item_id: created?.item_id || null,
     closing_id: generated_closing_id,
     title_routing_item_id: resolved_title_routing_item_id,
+    closing_status: normalized_closing_status,
     pipeline,
     payload,
     raw: created,
