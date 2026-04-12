@@ -374,22 +374,18 @@ function resolveContactWindowField(contact_window) {
     return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
   }
 
-  // Allow through values that match the canonical time-range format even when the
-  // local schema supplement has no matching option ID.  schema.js normalizePodioFieldMap
-  // has a compat bypass (shouldAllowRawCategoryCompatibility) that accepts these strings
-  // as raw text — Podio stores them and rounds-trips them back as the real option text.
-  if (CONTACT_WINDOW_PATTERN.test(raw)) {
-    return { field_value: raw, category_option_id: null, omitted: false, reason: null };
-  }
+  // Podio rejects raw contact-window strings unless they map to a real category
+  // option id.  Omit the field when the schema cannot resolve the option so queue
+  // creation remains non-blocking.
+  const reason = CONTACT_WINDOW_PATTERN.test(raw)
+    ? "formatted_value_missing_option_id"
+    : "no_matching_category_option_in_schema";
 
-  // No option ID found and value doesn't match the canonical format.  Omit to
-  // prevent a Podio 400 error.  The queue runner allows sending when contact-window
-  // is absent.
   return {
     field_value: undefined,
     category_option_id: null,
     omitted: true,
-    reason: "no_matching_category_option_in_schema",
+    reason,
   };
 }
 
@@ -879,9 +875,22 @@ export async function buildSendQueueItem({
   const queue_sequence_value = created?.item_id ? Number(created.item_id) : null;
 
   if (created?.item_id && queue_sequence_value) {
-    await update_item(created.item_id, {
-      [QUEUE_FIELDS.queue_sequence]: queue_sequence_value,
-    });
+    try {
+      await update_item(created.item_id, {
+        [QUEUE_FIELDS.queue_sequence]: queue_sequence_value,
+      });
+    } catch (error) {
+      warn("queue.sequence_write_failed_non_blocking", {
+        queue_item_id: created.item_id,
+        queue_sequence: queue_sequence_value,
+        message: error?.message ?? null,
+        podio_status:
+          error?.status ??
+          error?.response?.status ??
+          error?.cause?.status ??
+          null,
+      });
+    }
   }
 
   const template_app_field_written =

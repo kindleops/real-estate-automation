@@ -64,14 +64,42 @@ export async function loadContext({
     create_brain_if_missing,
   });
 
-  return withTimeout(
-    _loadContextInner({
-      normalized_phone,
-      create_brain_if_missing,
-    }),
-    CONTEXT_LOAD_TIMEOUT_MS,
-    "loadContext"
-  );
+  console.log("➡️ entering load-context", {
+    owner_id: null,
+    inbound_from: normalized_phone,
+    create_brain_if_missing,
+  });
+
+  try {
+    const context = await withTimeout(
+      _loadContextInner({
+        normalized_phone,
+        create_brain_if_missing,
+      }),
+      CONTEXT_LOAD_TIMEOUT_MS,
+      "loadContext"
+    );
+
+    console.log("⬅️ exiting load-context", {
+      owner_id: context?.ids?.owner_id ?? null,
+      master_owner_id: context?.ids?.master_owner_id ?? null,
+      found: context?.found ?? false,
+    });
+
+    return context;
+  } catch (error) {
+    console.error("💥 load-context failed", {
+      owner_id: null,
+      inbound_from: normalized_phone,
+      message: error?.message ?? null,
+      podio_status:
+        error?.status ??
+        error?.response?.status ??
+        error?.cause?.status ??
+        null,
+    });
+    throw error;
+  }
 }
 
 async function _loadContextInner({

@@ -77,6 +77,16 @@ export async function loadRecentEvents({
   prospect_id = null,
   limit = DEFAULT_LIMIT,
 } = {}, deps = {}) {
+  const trace = {
+    owner_id: master_owner_id ?? null,
+    phone_item_id: phone_item_id ?? null,
+    master_owner_id: master_owner_id ?? null,
+    prospect_id: prospect_id ?? null,
+    limit,
+  };
+
+  console.log("➡️ entering load-recent-events", trace);
+
   const {
     filterAppItemsImpl = filterAppItems,
   } = deps;
@@ -100,54 +110,81 @@ export async function loadRecentEvents({
     });
   }
 
-  if (!queries.length) {
-    return {
-      ok: true,
-      count: 0,
-      events: [],
-    };
-  }
+  try {
+    if (!queries.length) {
+      const empty_result = {
+        ok: true,
+        count: 0,
+        events: [],
+      };
 
-  const seen = new Set();
-  const deduped = [];
-  const page_size = Math.max(Number(limit) || DEFAULT_LIMIT, DEFAULT_LIMIT);
+      console.log("⬅️ exiting load-recent-events", {
+        owner_id: trace.owner_id,
+        count: empty_result.count,
+      });
 
-  for (const query of queries) {
-    const response = await filterAppItemsImpl(
-      APP_IDS.message_events,
-      query.filters,
-      {
-        limit: page_size,
-        offset: 0,
-        sort_by: "timestamp",
-        sort_desc: true,
-        cache_ttl_ms: MESSAGE_EVENT_CACHE_TTL_MS,
+      return empty_result;
+    }
+
+    const seen = new Set();
+    const deduped = [];
+    const page_size = Math.max(Number(limit) || DEFAULT_LIMIT, DEFAULT_LIMIT);
+
+    for (const query of queries) {
+      const response = await filterAppItemsImpl(
+        APP_IDS.message_events,
+        query.filters,
+        {
+          limit: page_size,
+          offset: 0,
+          sort_by: "timestamp",
+          sort_desc: true,
+          cache_ttl_ms: MESSAGE_EVENT_CACHE_TTL_MS,
+        }
+      );
+
+      const items = Array.isArray(response?.items) ? response.items : [];
+
+      for (const item of items) {
+        const key = item?.item_id;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
       }
-    );
 
-    const items = Array.isArray(response?.items) ? response.items : [];
-
-    for (const item of items) {
-      const key = item?.item_id;
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      deduped.push(item);
+      if (deduped.length >= limit) {
+        break;
+      }
     }
 
-    if (deduped.length >= limit) {
-      break;
-    }
+    const events = sortByTimestampDesc(deduped)
+      .slice(0, limit)
+      .map(normalizeMessageEvent);
+
+    const result = {
+      ok: true,
+      count: events.length,
+      events,
+    };
+
+    console.log("⬅️ exiting load-recent-events", {
+      owner_id: trace.owner_id,
+      count: result.count,
+    });
+
+    return result;
+  } catch (error) {
+    console.error("💥 load-recent-events failed", {
+      ...trace,
+      message: error?.message ?? null,
+      podio_status:
+        error?.status ??
+        error?.response?.status ??
+        error?.cause?.status ??
+        null,
+    });
+    throw error;
   }
-
-  const events = sortByTimestampDesc(deduped)
-    .slice(0, limit)
-    .map(normalizeMessageEvent);
-
-  return {
-    ok: true,
-    count: events.length,
-    events,
-  };
 }
 
 export default loadRecentEvents;

@@ -16,6 +16,43 @@ const logger = child({
   module: "providers.podio",
 });
 
+function toDebugHeaders(headers = null) {
+  if (!headers) return null;
+  if (typeof headers?.toJSON === "function") {
+    return headers.toJSON();
+  }
+  if (typeof headers === "object") {
+    return { ...headers };
+  }
+  return headers;
+}
+
+function sanitizeDebugHeaders(headers = null) {
+  const normalized = toDebugHeaders(headers);
+  if (!normalized || typeof normalized !== "object") return normalized;
+
+  const cloned = { ...normalized };
+  for (const key of Object.keys(cloned)) {
+    if (String(key).toLowerCase() === "authorization") {
+      cloned[key] = "[redacted]";
+    }
+  }
+
+  return cloned;
+}
+
+function logPodioAxiosFailure(err, fallback = {}) {
+  console.error("🚨 PODIO REQUEST FAILED", {
+    url: err?.config?.url ?? fallback.url ?? null,
+    method: err?.config?.method ?? fallback.method ?? null,
+    data: err?.config?.data ?? fallback.data ?? null,
+    params: err?.config?.params ?? fallback.params ?? null,
+    headers: sanitizeDebugHeaders(err?.config?.headers ?? fallback.headers ?? null),
+    response_status: err?.response?.status ?? null,
+    response_data: err?.response?.data ?? null,
+  });
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // CONFIG & ENV VALIDATION
 // ══════════════════════════════════════════════════════════════════════════
@@ -193,15 +230,25 @@ async function _doRefresh() {
     password: PODIO_PASSWORD,
   });
 
-  const res = await axios.post(PODIO_OAUTH_URL, form, {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    timeout: REQUEST_TIMEOUT_MS,
-  });
+  try {
+    const res = await axios.post(PODIO_OAUTH_URL, form, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: REQUEST_TIMEOUT_MS,
+    });
 
-  _access_token = res.data.access_token;
-  _expires_at = Date.now() + res.data.expires_in * 1000;
+    _access_token = res.data.access_token;
+    _expires_at = Date.now() + res.data.expires_in * 1000;
 
-  return _access_token;
+    return _access_token;
+  } catch (err) {
+    logPodioAxiosFailure(err, {
+      url: PODIO_OAUTH_URL,
+      method: "post",
+      data: form.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+    throw err;
+  }
 }
 
 async function getToken() {
@@ -1154,6 +1201,14 @@ async function _executeWithRetry(buildConfig, attempt = 0) {
     });
     return response;
   } catch (err) {
+    logPodioAxiosFailure(err, {
+      url: config.url,
+      method: config.method,
+      data: config.data ?? null,
+      params: config.params ?? null,
+      headers: config.headers ?? null,
+    });
+
     const retry_after_seconds = getPodioRetryAfterSeconds(err, null);
     const retryable = isRetryablePodioRequestError(err);
     const rate_limited = isPodioRateLimitError(err);

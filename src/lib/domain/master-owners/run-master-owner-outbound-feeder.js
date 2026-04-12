@@ -2083,6 +2083,69 @@ function buildOwnerContext({
   };
 }
 
+async function queueOwnerFallbackMinimal({
+  context,
+  outbound_number,
+  schedule,
+  resolved_timezone,
+  resolved_contact_window,
+  send_priority,
+  message_type,
+  touch_number,
+  queue_id,
+  owner_item,
+  selected_phone_record,
+  error,
+  log = logger,
+}) {
+  const master_owner_id = owner_item?.item_id ?? null;
+  const diagnostics = serializeFeederError(error);
+
+  console.warn("⚠️ evaluation failed, falling back to minimal mode", {
+    owner_id: master_owner_id,
+    podio_status: diagnostics.podio_status,
+    podio_path: diagnostics.podio_path,
+    message: diagnostics.message,
+  });
+
+  log.warn("master_owner_feeder.queue_write_fallback_started", {
+    master_owner_id,
+    phone_item_id: selected_phone_record?.phone_item_id ?? null,
+    textgrid_number_item_id: outbound_number?.textgrid_number_item_id ?? null,
+    error: diagnostics,
+  });
+
+  const queue_result = await buildSendQueueItem({
+    context,
+    rendered_message_text: null,
+    template_id: null,
+    template_item: null,
+    defer_message_resolution: true,
+    textgrid_number_item_id: outbound_number?.textgrid_number_item_id ?? null,
+    scheduled_for_local: { start: schedule.scheduled_for_local },
+    scheduled_for_utc: { start: schedule.scheduled_for_utc },
+    timezone: resolved_timezone,
+    contact_window: resolved_contact_window,
+    send_priority,
+    message_type,
+    max_retries: 3,
+    queue_status: "Queued",
+    dnc_check: "✅ Cleared",
+    delivery_confirmed: "⏳ Pending",
+    touch_number,
+    queue_id,
+  });
+
+  log.info("master_owner_feeder.queue_write_fallback_completed", {
+    master_owner_id,
+    phone_item_id: selected_phone_record?.phone_item_id ?? null,
+    textgrid_number_item_id: outbound_number?.textgrid_number_item_id ?? null,
+    queue_item_id: queue_result?.queue_item_id ?? null,
+  });
+
+  return queue_result;
+}
+
 function buildSyntheticClassification({ owner_item, phone_item, stage_hint, language }) {
   return {
     message: "",
@@ -3285,47 +3348,97 @@ async function evaluateOwner({
     selected_phone_record.phone_item_id,
     touch_number,
   ].join(":");
+  const queue_message_type =
+    effective_follow_up_plan
+      ? "Follow-Up"
+      : deriveQueueMessageType(
+          route?.stage || stage_hint,
+          route?.lifecycle_stage || null
+        );
 
-  const queue_result = await buildSendQueueItem({
-    context,
-    rendered_message_text,
-    template_id: selected_template.item_id,
-    template_item: selected_template,
-    defer_message_resolution: false,
-    textgrid_number_item_id: outbound_number.textgrid_number_item_id,
-    scheduled_for_local: { start: schedule.scheduled_for_local },
-    scheduled_for_utc: { start: schedule.scheduled_for_utc },
-    timezone: resolved_timezone,
-    contact_window: resolved_contact_window,
-    send_priority,
-    message_type:
-      effective_follow_up_plan
-        ? "Follow-Up"
-        : deriveQueueMessageType(
-            route?.stage || stage_hint,
-            route?.lifecycle_stage || null
-          ),
-    max_retries: 3,
-    queue_status: "Queued",
-    dnc_check: "✅ Cleared",
-    delivery_confirmed: "⏳ Pending",
-    touch_number,
-    queue_id: idempotency_queue_id,
-    property_type: primary_category || null,
-    secondary_category: secondary_category || null,
-    use_case_template: selected_template?.use_case || null,
-  });
+  try {
+    const queue_result = await buildSendQueueItem({
+      context,
+      rendered_message_text,
+      template_id: selected_template.item_id,
+      template_item: selected_template,
+      defer_message_resolution: false,
+      textgrid_number_item_id: outbound_number.textgrid_number_item_id,
+      scheduled_for_local: { start: schedule.scheduled_for_local },
+      scheduled_for_utc: { start: schedule.scheduled_for_utc },
+      timezone: resolved_timezone,
+      contact_window: resolved_contact_window,
+      send_priority,
+      message_type: queue_message_type,
+      max_retries: 3,
+      queue_status: "Queued",
+      dnc_check: "✅ Cleared",
+      delivery_confirmed: "⏳ Pending",
+      touch_number,
+      queue_id: idempotency_queue_id,
+      property_type: primary_category || null,
+      secondary_category: secondary_category || null,
+      use_case_template: selected_template?.use_case || null,
+    });
 
-  return {
-    ok: true,
-    skipped: false,
-    dry_run: false,
-    reason: "master_owner_touch_queued",
-    owner: owner_summary,
-    plan,
-    queue_item_id: queue_result?.queue_item_id || null,
-    queue_result,
-  };
+    return {
+      ok: true,
+      skipped: false,
+      dry_run: false,
+      reason: "master_owner_touch_queued",
+      owner: owner_summary,
+      plan,
+      queue_item_id: queue_result?.queue_item_id || null,
+      queue_result,
+    };
+  } catch (error) {
+    try {
+      const queue_result = await queueOwnerFallbackMinimal({
+        context,
+        outbound_number,
+        schedule,
+        resolved_timezone,
+        resolved_contact_window,
+        send_priority,
+        message_type: queue_message_type,
+        touch_number,
+        queue_id: idempotency_queue_id,
+        owner_item,
+        selected_phone_record,
+        error,
+        log,
+      });
+
+      return {
+        ok: true,
+        skipped: false,
+        dry_run: false,
+        reason: "master_owner_touch_queued_fallback",
+        owner: owner_summary,
+        plan: {
+          ...plan,
+          deferred_template_resolution: true,
+          fallback_mode: true,
+          allow_queue: true,
+        },
+        queue_item_id: queue_result?.queue_item_id || null,
+        queue_result,
+        fallback_mode: true,
+        allow_queue: true,
+        diagnostics: {
+          queue_write_error: serializeFeederError(error),
+        },
+      };
+    } catch (fallback_error) {
+      log.warn("master_owner_feeder.queue_write_fallback_failed", {
+        master_owner_id,
+        phone_item_id: selected_phone_record.phone_item_id,
+        initial_error: serializeFeederError(error),
+        fallback_error: serializeFeederError(fallback_error),
+      });
+      throw error;
+    }
+  }
 }
 
 async function resolveMasterOwnerSource({

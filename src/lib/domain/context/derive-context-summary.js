@@ -79,6 +79,19 @@ export function deriveContextSummary({
   market_item = null,
   touch_count = 0,
 } = {}) {
+  const trace = {
+    owner_id:
+      master_owner_item?.item_id ??
+      owner_item?.item_id ??
+      prospect_item?.item_id ??
+      null,
+    phone_item_id: phone_item?.item_id ?? null,
+    brain_item_id: brain_item?.item_id ?? null,
+    property_item_id: property_item?.item_id ?? null,
+  };
+
+  console.log("➡️ entering derive-context-summary", trace);
+
   const owner_name =
     firstNonNull(
       getTextValue(master_owner_item, "owner-full-name", ""),
@@ -100,85 +113,107 @@ export function deriveContextSummary({
     ) || "";
   const raw_property_city = getTextValue(property_item, "city", "") || "";
 
-  return {
-    phone_item_id: phone_item?.item_id ?? null,
-    brain_item_id: brain_item?.item_id ?? null,
-    master_owner_item_id: master_owner_item?.item_id ?? null,
-    owner_item_id: owner_item?.item_id ?? null,
-    prospect_item_id: prospect_item?.item_id ?? null,
-    property_item_id: property_item?.item_id ?? null,
-    agent_item_id: agent_item?.item_id ?? null,
-    market_item_id: market_item?.item_id ?? null,
+  try {
+    const summary = {
+      phone_item_id: phone_item?.item_id ?? null,
+      brain_item_id: brain_item?.item_id ?? null,
+      master_owner_item_id: master_owner_item?.item_id ?? null,
+      owner_item_id: owner_item?.item_id ?? null,
+      prospect_item_id: prospect_item?.item_id ?? null,
+      property_item_id: property_item?.item_id ?? null,
+      agent_item_id: agent_item?.item_id ?? null,
+      market_item_id: market_item?.item_id ?? null,
 
-    phone_hidden: getTextValue(phone_item, "phone-hidden", ""),
-    canonical_e164: getTextValue(phone_item, "canonical-e164", ""),
-    phone_activity_status: getCategoryValue(phone_item, "phone-activity-status", "Unknown"),
-    phone_usage_2_months: getCategoryValue(phone_item, "phone-usage-2-months", null),
-    phone_usage_12_months: getCategoryValue(phone_item, "phone-usage-12-months", null),
-    engagement_tier: getCategoryValue(phone_item, "engagement-tier", null),
-    do_not_call: getCategoryValue(phone_item, "do-not-call", "FALSE"),
-    dnc_source: getCategoryValue(phone_item, "dnc-source", null),
+      phone_hidden: getTextValue(phone_item, "phone-hidden", ""),
+      canonical_e164: getTextValue(phone_item, "canonical-e164", ""),
+      phone_activity_status: getCategoryValue(phone_item, "phone-activity-status", "Unknown"),
+      phone_usage_2_months: getCategoryValue(phone_item, "phone-usage-2-months", null),
+      phone_usage_12_months: getCategoryValue(phone_item, "phone-usage-12-months", null),
+      engagement_tier: getCategoryValue(phone_item, "engagement-tier", null),
+      do_not_call: getCategoryValue(phone_item, "do-not-call", "FALSE"),
+      dnc_source: getCategoryValue(phone_item, "dnc-source", null),
 
-    conversation_stage: getCategoryValue(
-      brain_item,
-      "conversation-stage",
-      "Ownership Confirmation"
-    ),
-    brain_ai_route: getCategoryValue(brain_item, "ai-route", "Unknown"),
-    lifecycle_stage_number: getNumberValue(brain_item, "number", 1),
-    current_seller_state: getCategoryValue(brain_item, "current-seller-state", "Unknown"),
-    follow_up_step: getCategoryValue(brain_item, "follow-up-step", "None"),
-    next_follow_up_due_at: getDateValue(brain_item, "next-follow-up-due-at", null),
-    last_detected_intent: getCategoryValue(brain_item, "last-detected-intent", "Unknown"),
-    language_preference: normalizeLanguage(
-      getCategoryValue(brain_item, "language-preference", "English")
-    ),
-    seller_profile: getCategoryValue(brain_item, "seller-profile", null),
-    status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
-    deal_priority_tag: getCategoryValue(brain_item, "deal-prioirty-tag", null),
-    follow_up_trigger_state: getCategoryValue(brain_item, "follow-up-trigger-state", null),
-    motivation_score: getNumberValue(brain_item, "seller-motivation-score", null),
-    risk_flags_ai: getCategoryValue(brain_item, "risk-flags-ai", null),
-    seller_emotional_tone: getCategoryValue(brain_item, "category", "Unknown"),
-    response_style_mode: getCategoryValue(brain_item, "category-2", "Unknown"),
-    primary_objection_type: getCategoryValue(brain_item, "category-3", "Unknown"),
-    seller_ask_price: getNumberValue(brain_item, "seller-asking-price", null),
-    cash_offer_target: getNumberValue(brain_item, "cash-offer-target", null),
-    creative_branch_eligibility: getCategoryValue(brain_item, "category-4", "Unknown"),
-    deal_strategy_branch: getCategoryValue(brain_item, "category-5", "Unknown"),
-    total_messages_sent: touch_count,
-    last_message_summary_ai: getTextValue(brain_item, "transcript", ""),
-    full_conversation_summary_ai: getTextValue(brain_item, "title", ""),
-    ai_recommended_next_move: getTextValue(brain_item, "ais-recommended-next-move", ""),
-    ai_next_message: getTextValue(brain_item, "ai-next-message", ""),
-    last_inbound_message: getTextValue(brain_item, "last-inbound-message", ""),
-    last_outbound_message: getTextValue(brain_item, "last-outbound-message", ""),
+      conversation_stage: getCategoryValue(
+        brain_item,
+        "conversation-stage",
+        "Ownership Confirmation"
+      ),
+      brain_ai_route: getCategoryValue(brain_item, "ai-route", "Unknown"),
+      lifecycle_stage_number: getNumberValue(brain_item, "number", 1),
+      current_seller_state: getCategoryValue(brain_item, "current-seller-state", "Unknown"),
+      follow_up_step: getCategoryValue(brain_item, "follow-up-step", "None"),
+      next_follow_up_due_at: getDateValue(brain_item, "next-follow-up-due-at", null),
+      last_detected_intent: getCategoryValue(brain_item, "last-detected-intent", "Unknown"),
+      language_preference: normalizeLanguage(
+        getCategoryValue(brain_item, "language-preference", "English")
+      ),
+      seller_profile: getCategoryValue(brain_item, "seller-profile", null),
+      status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
+      deal_priority_tag: getCategoryValue(brain_item, "deal-prioirty-tag", null),
+      follow_up_trigger_state: getCategoryValue(brain_item, "follow-up-trigger-state", null),
+      motivation_score: getNumberValue(brain_item, "seller-motivation-score", null),
+      risk_flags_ai: getCategoryValue(brain_item, "risk-flags-ai", null),
+      seller_emotional_tone: getCategoryValue(brain_item, "category", "Unknown"),
+      response_style_mode: getCategoryValue(brain_item, "category-2", "Unknown"),
+      primary_objection_type: getCategoryValue(brain_item, "category-3", "Unknown"),
+      seller_ask_price: getNumberValue(brain_item, "seller-asking-price", null),
+      cash_offer_target: getNumberValue(brain_item, "cash-offer-target", null),
+      creative_branch_eligibility: getCategoryValue(brain_item, "category-4", "Unknown"),
+      deal_strategy_branch: getCategoryValue(brain_item, "category-5", "Unknown"),
+      total_messages_sent: touch_count,
+      last_message_summary_ai: getTextValue(brain_item, "transcript", ""),
+      full_conversation_summary_ai: getTextValue(brain_item, "title", ""),
+      ai_recommended_next_move: getTextValue(brain_item, "ais-recommended-next-move", ""),
+      ai_next_message: getTextValue(brain_item, "ai-next-message", ""),
+      last_inbound_message: getTextValue(brain_item, "last-inbound-message", ""),
+      last_outbound_message: getTextValue(brain_item, "last-outbound-message", ""),
 
-    owner_name,
-    seller_first_name,
-    contact_window: getCategoryValue(master_owner_item, "best-contact-window", null),
+      owner_name,
+      seller_first_name,
+      contact_window: getCategoryValue(master_owner_item, "best-contact-window", null),
 
-    property_address: titleCaseIfShouting(raw_property_address),
-    property_city: titleCaseIfShouting(raw_property_city),
-    property_state: getTextValue(property_item, "state", "") || "",
+      property_address: titleCaseIfShouting(raw_property_address),
+      property_city: titleCaseIfShouting(raw_property_city),
+      property_state: getTextValue(property_item, "state", "") || "",
 
-    agent_name:
-      firstNonNull(
-        getTextValue(agent_item, "title", ""),
-        getTextValue(agent_item, "agent-name", "")
-      ) || "",
-    agent_first_name:
-      firstNonNull(
-        getTextValue(agent_item, "first-name", ""),
-        clean(getTextValue(agent_item, "title", "")).split(" ")[0],
-        clean(getTextValue(agent_item, "agent-name", "")).split(" ")[0]
-      ) || "",
+      agent_name:
+        firstNonNull(
+          getTextValue(agent_item, "title", ""),
+          getTextValue(agent_item, "agent-name", "")
+        ) || "",
+      agent_first_name:
+        firstNonNull(
+          getTextValue(agent_item, "first-name", ""),
+          clean(getTextValue(agent_item, "title", "")).split(" ")[0],
+          clean(getTextValue(agent_item, "agent-name", "")).split(" ")[0]
+        ) || "",
 
-    market_name: getTextValue(market_item, "title", ""),
-    market_state: getTextValue(market_item, "state", ""),
-    market_timezone: getTextValue(market_item, "timezone", ""),
-    market_area_code: getTextValue(market_item, "area-code", ""),
-  };
+      market_name: getTextValue(market_item, "title", ""),
+      market_state: getTextValue(market_item, "state", ""),
+      market_timezone: getTextValue(market_item, "timezone", ""),
+      market_area_code: getTextValue(market_item, "area-code", ""),
+    };
+
+    console.log("⬅️ exiting derive-context-summary", {
+      owner_id: trace.owner_id,
+      conversation_stage: summary.conversation_stage,
+      language_preference: summary.language_preference,
+      property_item_id: summary.property_item_id,
+    });
+
+    return summary;
+  } catch (error) {
+    console.error("💥 derive-context-summary failed", {
+      ...trace,
+      message: error?.message ?? null,
+      podio_status:
+        error?.status ??
+        error?.response?.status ??
+        error?.cause?.status ??
+        null,
+    });
+    throw error;
+  }
 }
 
 export default deriveContextSummary;
