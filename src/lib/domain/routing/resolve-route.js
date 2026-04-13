@@ -5,6 +5,7 @@ import {
   normalizeStage,
   safeCategoryEquals,
 } from "@/lib/providers/podio.js";
+import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
 import {
   LIFECYCLE_STAGES,
   STAGES,
@@ -1298,6 +1299,22 @@ export function resolveRoute({
         seller_profile,
         primary_category: resolved_primary_category,
       });
+  const template_selector = buildTemplateSelectorInput({
+    template_selector: {
+      use_case,
+      language,
+      property_type_scope: resolved_primary_category,
+      deal_strategy: getCategoryValue(brain_item, "category-5", null),
+      touch_type: is_initial_ownership_outbound ? "First Touch" : "Follow-Up",
+    },
+    use_case,
+    language,
+    touch_number: is_initial_ownership_outbound ? 1 : 2,
+    message_type: is_initial_ownership_outbound ? "Cold Outbound" : "Follow-Up",
+    category: resolved_primary_category,
+    secondary_category,
+    sequence_position,
+  });
 
   const next_move = is_initial_ownership_outbound
     ? "Confirm ownership cleanly before moving deeper."
@@ -1331,6 +1348,7 @@ export function resolveRoute({
     next_move,
     primary_category: resolved_primary_category,
     secondary_category,
+    template_selector,
     sequence_position,
     seller_profile,
     phone_activity_status:
@@ -1345,6 +1363,7 @@ export function resolveRoute({
       tone: resolved_tone,
       gender_variant: "Neutral",
       language,
+      template_selector,
       sequence_position,
       paired_with_agent_type: resolved_template_agent_type,
       fallback_agent_type: resolved_fallback_agent_type,

@@ -580,7 +580,7 @@ export async function maybeQueueUnderwritingFollowUp({
   route = null,
   context = null,
   message = "",
-  create_brain_if_missing = true,
+  create_brain_if_missing = false,
   queue_status = "Queued",
   created_by = "Underwriting Follow-Up Engine",
   queue_message = queueOutboundMessage,

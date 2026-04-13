@@ -103,13 +103,17 @@ test("queueOutboundMessage uses explicit message_text override without forcing t
 
 test("queueOutboundMessage enables stage-based Podio template fallback for live selection", async () => {
   let load_template_args = null;
+  let load_context_args = null;
 
   const result = await queueOutboundMessage(
     {
       phone: "12087034955",
     },
     {
-      loadContextImpl: async () => buildContext(),
+      loadContextImpl: async (args) => {
+        load_context_args = args;
+        return buildContext();
+      },
       resolveRouteImpl: () => ({
         use_case: "ownership_check",
         variant_group: "Stage 1 — Ownership Confirmation",
@@ -146,5 +150,6 @@ test("queueOutboundMessage enables stage-based Podio template fallback for live 
   );
 
   assert.equal(result.ok, true);
+  assert.equal(load_context_args?.create_brain_if_missing, false);
   assert.equal(load_template_args?.allow_variant_group_fallback, true);
 });

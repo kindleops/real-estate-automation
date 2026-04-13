@@ -1141,6 +1141,7 @@ export function buildPipelinePayload({
 export async function syncPipelineState({
   pipeline_item_id = null,
   pipeline_id = null,
+  create_if_missing = true,
   property_id = null,
   master_owner_id = null,
   prospect_id = null,
@@ -1181,6 +1182,22 @@ export async function syncPipelineState({
     buyer_match_item_id,
     deal_revenue_item_id,
   });
+
+  if (!existing_pipeline?.item_id && !create_if_missing) {
+    return {
+      ok: true,
+      created: false,
+      updated: false,
+      reason: "pipeline_not_created",
+      pipeline_item_id: null,
+      pipeline_id: clean(pipeline_id) || null,
+      current_stage: clean(stage) || null,
+      pipeline_status: clean(pipeline_status) || null,
+      automation_status: clean(automation_status) || null,
+      current_engine: clean(current_engine) || null,
+      payload: null,
+    };
+  }
 
   const identifiers = mergeIdentifiers(existing_pipeline, {
     property_id,

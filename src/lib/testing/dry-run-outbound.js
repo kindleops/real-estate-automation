@@ -38,7 +38,7 @@ export async function dryRunOutbound({
 
   const context = await loadContext({
     inbound_from: normalized_phone,
-    create_brain_if_missing: true,
+    create_brain_if_missing: false,
   });
 
   if (!context?.found) {

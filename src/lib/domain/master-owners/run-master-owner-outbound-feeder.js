@@ -19,6 +19,7 @@ import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
+import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
 import {
   renderTemplate,
 } from "@/lib/domain/templates/render-template.js";
@@ -353,13 +354,47 @@ function buildTemplateSelectionInputs({
   context = null,
   rotation_key = null,
 } = {}) {
+  const resolved_category = effective_follow_up_plan?.category || primary_category;
+  const resolved_secondary_category =
+    effective_follow_up_plan?.secondary_category ?? secondary_category;
+  const resolved_use_case = is_first_touch
+    ? "ownership_check"
+    : (effective_follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check");
+  const resolved_sequence_position = is_first_touch ? "1st Touch" : sequence_position;
+  const resolved_message_type = is_first_touch ? "Cold Outbound" : "Follow-Up";
+  const template_selector = buildTemplateSelectorInput({
+    template_selector: {
+      ...(route?.template_selector || {}),
+      use_case: resolved_use_case,
+      language,
+      property_type_scope:
+        effective_follow_up_plan?.property_type_scope ||
+        route?.template_selector?.property_type_scope ||
+        null,
+      deal_strategy:
+        effective_follow_up_plan?.deal_strategy ||
+        route?.template_selector?.deal_strategy ||
+        null,
+      touch_type: is_first_touch ? "First Touch" : "Follow-Up",
+    },
+    use_case: resolved_use_case,
+    language,
+    touch_number: is_first_touch ? 1 : 2,
+    message_type: resolved_message_type,
+    category: resolved_category,
+    secondary_category: resolved_secondary_category,
+    sequence_position: resolved_sequence_position,
+    route,
+    context,
+    strict_touch_one_podio_only: Boolean(is_first_touch),
+  });
+
   return {
-    category: effective_follow_up_plan?.category || primary_category,
-    secondary_category: effective_follow_up_plan?.secondary_category ?? secondary_category,
+    template_selector,
+    category: resolved_category,
+    secondary_category: resolved_secondary_category,
     // First-touch always clamped to Stage 1 ownership regardless of route output.
-    use_case: is_first_touch
-      ? "ownership_check"
-      : (effective_follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check"),
+    use_case: resolved_use_case,
     variant_group: is_first_touch
       ? "Stage 1 — Ownership Confirmation"
       : (effective_follow_up_plan?.variant_group || route?.variant_group || "Stage 1 — Ownership Confirmation"),
@@ -368,7 +403,12 @@ function buildTemplateSelectionInputs({
       : (effective_follow_up_plan?.tone || route?.tone || "Warm"),
     gender_variant: "Neutral",
     language,
-    sequence_position: is_first_touch ? "1st Touch" : sequence_position,
+    sequence_position: resolved_sequence_position,
+    touch_type: template_selector.touch_type,
+    touch_number: is_first_touch ? 1 : 2,
+    message_type: resolved_message_type,
+    property_type_scope: template_selector.property_type_scope,
+    deal_strategy: template_selector.deal_strategy,
     paired_with_agent_type: is_first_touch
       ? "Warm Professional"
       : (effective_follow_up_plan?.paired_with_agent_type ||
@@ -398,6 +438,7 @@ function summarizeTemplateSelectionInputs({
   is_first_touch = false,
 } = {}) {
   return {
+    template_selector: template_selection_inputs.template_selector || null,
     category: template_selection_inputs.category || null,
     secondary_category: template_selection_inputs.secondary_category || null,
     use_case: template_selection_inputs.use_case || null,
@@ -4269,7 +4310,7 @@ export async function runMasterOwnerOutboundFeeder({
   source_view_id = null,
   source_view_name = null,
   now = nowIso(),
-  create_brain_if_missing = !dry_run,
+  create_brain_if_missing = false,
   test_mode = false,
 } = {}) {
   const effective_limit = test_mode

@@ -274,7 +274,7 @@ test("Podio backpressure helper activates for low remaining budget without requi
   resetPodioRateLimitObservability();
 });
 
-test("template loader falls back to generic same-use-case templates when category matching fails", async () => {
+test("template loader no longer requires category filters when same-use-case templates exist", async () => {
   const calls = [];
   const generic_template = {
     item_id: 7001,
@@ -311,8 +311,8 @@ test("template loader falls back to generic same-use-case templates when categor
     fallback_agent_type: "Warm Professional",
     remote_fetcher: async (filter_set) => {
       calls.push(filter_set);
-      if (filter_set["property-type"] || filter_set.category_primary) return [];
       if (filter_set["use-case"] === "ownership_check") return [generic_template];
+      if (!filter_set["use-case"] && filter_set.active === "Yes") return [generic_template];
       return [];
     },
     local_fetcher: () => [],
@@ -320,11 +320,14 @@ test("template loader falls back to generic same-use-case templates when categor
 
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].item_id, 7001);
-  assert.ok(calls.some((filter_set) => filter_set["property-type"] === "Residential"));
-  assert.ok(calls.some((filter_set) => !filter_set["property-type"]));
+  assert.ok(calls.some((filter_set) => filter_set["use-case"] === "ownership_check"));
+  assert.ok(
+    calls.every((filter_set) => !filter_set["property-type"] && !filter_set.category_primary),
+    "selector should not depend on property/category filters for a same-use-case match"
+  );
 });
 
-test("template loader accepts legacy stage labels and templates without spam risk values", async () => {
+test("template loader accepts legacy stage labels as metadata and templates without spam risk values", async () => {
   const calls = [];
   const candidates = await loadTemplateCandidates({
     category: "Residential",
@@ -342,12 +345,13 @@ test("template loader accepts legacy stage labels and templates without spam ris
     allow_variant_group_fallback: true,
     remote_fetcher: async (filter_set) => {
       calls.push(filter_set);
-      if (!filter_set.stage) return [];
+      if (!filter_set["use-case"] && filter_set.active !== "Yes") return [];
       return [
         {
           item_id: 8001,
           use_case: "ownership_check",
-          variant_group: filter_set.stage,
+          variant_group: "Stage 1 — Ownership Confirmation",
+          stage_label: "Ownership Confirmation",
           tone: "Warm",
           gender_variant: "Neutral",
           language: "English",
@@ -370,10 +374,9 @@ test("template loader accepts legacy stage labels and templates without spam ris
 
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].item_id, 8001);
+  assert.equal(candidates[0].spam_risk, null);
   assert.ok(
-    calls.some(
-      (filter_set) => filter_set.stage === "Stage 1 — Ownership Confirmation"
-    )
+    calls.some((filter_set) => filter_set["use-case"] === "ownership_check")
   );
 });
 
@@ -458,7 +461,7 @@ test("template normalization reads live Communications Engine fields", () => {
   assert.equal(normalized.category_secondary, "Outreach");
 });
 
-test("template candidate loader uses the live category-2 field for secondary category filters", async () => {
+test("template candidate loader does not require secondary category filters for selection", async () => {
   const filter_sets = [];
 
   const candidates = await loadTemplateCandidates({
@@ -476,8 +479,8 @@ test("template candidate loader uses the live category-2 field for secondary cat
 
   assert.deepEqual(candidates, []);
   assert.ok(
-    filter_sets.some((filter_set) => filter_set["category-2"] === "Outbound Initial"),
-    "expected at least one Podio filter set to target Templates::category-2"
+    filter_sets.every((filter_set) => !filter_set["category-2"]),
+    "secondary category should remain metadata-only and not be required in Podio filter sets"
   );
 });
 
@@ -565,7 +568,7 @@ test("template loader falls back to local templates when Podio template fetch fa
   assert.equal(selected?.template_fallback_reason, "podio_template_fetch_failed");
 });
 
-test("template loader uses stage-based Podio fallback before local templates when enabled", async () => {
+test("template loader prefers exact-use-case Podio templates over local templates instead of stage-only fallback", async () => {
   const selected = await loadTemplate({
     category: "Residential",
     use_case: "ownership_check",
@@ -577,13 +580,13 @@ test("template loader uses stage-based Podio fallback before local templates whe
     context: buildTemplateContext(),
     allow_variant_group_fallback: true,
     remote_fetcher: async (filter_set) => {
-      if (!filter_set.stage || filter_set["use-case"]) return [];
+      if (filter_set["use-case"] !== "ownership_check") return [];
       return [
         {
           item_id: 9201,
           source: "podio",
-          use_case: null,
-          variant_group: filter_set.stage,
+          use_case: "ownership_check",
+          variant_group: "Stage 9 — Wrong Metadata",
           tone: "Warm",
           gender_variant: "Neutral",
           language: "English",

@@ -1057,8 +1057,7 @@ export function routeSellerConversation({
       current_stage: previous_stage,
       detected_intent,
       selected_use_case,
-      template_use_case: null,
-      template_lookup_use_case: null,
+      template_use_case: selected_use_case,
       selected_variant_group: variantGroupForUseCase(selected_use_case),
       selected_tone: chooseConversationalTone({
         classification,
@@ -1135,18 +1134,18 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "Open to Selling") {
+    const selected_use_case = "asking_price";
     return buildPlan({
       detected_language,
       current_stage: previous_stage,
       detected_intent,
-      selected_use_case: "asking_price",
-      template_use_case: null,
-      template_lookup_use_case: null,
+      selected_use_case,
+      template_use_case: selected_use_case,
       selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.ASKING_PRICE),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
-        selected_use_case: "asking_price",
+        selected_use_case,
       }),
       next_expected_stage: SELLER_FLOW_STAGES.ASKING_PRICE,
       reasoning_summary: "Seller is open to selling, so the next text asks what number they have in mind instead of repeating the selling question.",
@@ -1155,18 +1154,18 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "Ownership Confirmed") {
+    const selected_use_case = "consider_selling";
     return buildPlan({
       detected_language,
       current_stage: previous_stage,
       detected_intent,
-      selected_use_case: "consider_selling",
-      template_use_case: null,
-      template_lookup_use_case: null,
+      selected_use_case,
+      template_use_case: selected_use_case,
       selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.CONSIDER_SELLING),
       selected_tone: chooseConversationalTone({
         classification,
         previous_tone,
-        selected_use_case: "consider_selling",
+        selected_use_case,
       }),
       next_expected_stage: SELLER_FLOW_STAGES.CONSIDER_SELLING,
       reasoning_summary: "Seller confirmed ownership, so the next text checks openness to selling before asking price.",

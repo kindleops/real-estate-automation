@@ -1,6 +1,14 @@
 import APP_IDS from "@/lib/config/app-ids.js";
 import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import {
+  canonicalizeTemplateUseCase,
+  normalizeTemplateDealStrategy,
+  normalizeTemplatePropertyTypeScope,
+  normalizeTemplateSelectorUseCase,
+  normalizeTemplateTouchType,
+  summarizeTemplateSelectorMetadata,
+} from "@/lib/domain/templates/template-selector.js";
+import {
   getItem,
   updateItem,
   filterAppItems,
@@ -73,17 +81,22 @@ function readTemplateCategory(item, external_ids = [], labels = [], fallback = n
 }
 
 function deriveTemplateUseCase(item, variant_group = null) {
-  const use_case_label = getCategoryValue(item, "use-case-2", null);
+  const selector_use_case = readTemplateCategory(
+    item,
+    ["use-case-2", "use-case"],
+    ["Use Case"],
+    null
+  );
   const canonical_routing_slug = getCategoryValue(item, "use-case", null);
   const canonical_slug_root =
     clean(canonical_routing_slug).split("__").filter(Boolean)[0] || null;
 
   return (
-    normalizeSellerFlowUseCase(
-      use_case_label || canonical_slug_root || canonical_routing_slug,
+    canonicalizeTemplateUseCase(
+      selector_use_case || canonical_slug_root || canonical_routing_slug,
       variant_group
     ) ||
-    use_case_label ||
+    selector_use_case ||
     canonical_slug_root ||
     canonical_routing_slug ||
     null
@@ -106,6 +119,60 @@ export function normalizeTemplateItem(item) {
     ["Property Type Scope", "Property Type"],
     null
   );
+  const selector_use_case =
+    readTemplateCategory(item, ["use-case-2", "use-case"], ["Use Case"], null) ||
+    use_case_label ||
+    canonical_routing_slug ||
+    null;
+  const stage_label = readTemplateCategory(item, ["stage-label"], ["Stage Label"], null);
+  const sequence_position = readTemplateCategory(
+    item,
+    ["sequence-position"],
+    ["Sequence Position"],
+    null
+  );
+  const is_first_touch = readTemplateCategory(
+    item,
+    ["is-first-touch", "first-touch"],
+    ["Is First Touch", "First Touch"],
+    null
+  );
+  const category_secondary = firstPresentCategory(item, ["category-2", "category"], null);
+  const partial_template = {
+    raw: item,
+    selector_use_case,
+    variant_group,
+    stage_label,
+    sequence_position,
+    is_first_touch,
+    property_type_scope,
+    category_primary: property_type_scope,
+    category_secondary,
+    tone: getCategoryValue(item, "tone", null),
+    gender_variant: getCategoryValue(item, "gender-variant", null),
+    paired_with_agent_type: getCategoryValue(item, "paired-with-agent-type", null),
+  };
+  const normalized_property_type_scope = normalizeTemplatePropertyTypeScope(partial_template);
+  const canonical_use_case =
+    normalizeSellerFlowUseCase(selector_use_case, variant_group) ||
+    deriveTemplateUseCase(item, variant_group);
+  const normalized_touch_type = normalizeTemplateTouchType({
+    ...partial_template,
+    use_case: canonical_use_case,
+    property_type_scope: normalized_property_type_scope,
+  });
+  const normalized_deal_strategy = normalizeTemplateDealStrategy({
+    ...partial_template,
+    use_case: canonical_use_case,
+    property_type_scope: normalized_property_type_scope,
+  });
+  const selection_metadata = summarizeTemplateSelectorMetadata({
+    ...partial_template,
+    use_case: canonical_use_case,
+    property_type_scope: normalized_property_type_scope,
+    stage_code: getCategoryValue(item, "stage-code", null),
+    canonical_routing_slug,
+  });
 
   return {
     item_id: item?.item_id || null,
@@ -113,35 +180,29 @@ export function normalizeTemplateItem(item) {
     raw: item,
     template_id: getNumberValue(item, "template-id", null),
     title: getTextValue(item, "title", "") || cleanTemplateTitle(item),
-    use_case: deriveTemplateUseCase(item, variant_group),
+    use_case: canonical_use_case,
+    selector_use_case,
+    canonical_use_case,
     use_case_label,
     canonical_routing_slug,
     variant_group,
     stage_code: getCategoryValue(item, "stage-code", null),
-    stage_label: readTemplateCategory(item, ["stage-label"], ["Stage Label"], null),
-    tone: getCategoryValue(item, "tone", null),
-    gender_variant: getCategoryValue(item, "gender-variant", null),
+    stage_label,
+    tone: partial_template.tone,
+    gender_variant: partial_template.gender_variant,
     language: getCategoryValue(item, "language", "English"),
-    sequence_position: readTemplateCategory(
-      item,
-      ["sequence-position"],
-      ["Sequence Position"],
-      null
-    ),
-    paired_with_agent_type: getCategoryValue(item, "paired-with-agent-type", null),
+    sequence_position,
+    paired_with_agent_type: partial_template.paired_with_agent_type,
     text: getTextValue(item, "text", ""),
     english_translation: getTextValue(item, "english-translation", ""),
     active: getCategoryValue(item, "active", "No"),
-    is_first_touch: readTemplateCategory(
-      item,
-      ["is-first-touch", "first-touch"],
-      ["Is First Touch", "First Touch"],
-      null
-    ),
+    is_first_touch,
     is_ownership_check: getCategoryValue(item, "is-ownership-check", "No"),
-    property_type_scope,
-    category_primary: property_type_scope,
-    category_secondary: firstPresentCategory(item, ["category-2", "category"], null),
+    property_type_scope: normalized_property_type_scope,
+    category_primary: normalized_property_type_scope,
+    category_secondary,
+    touch_type: normalized_touch_type,
+    deal_strategy: normalized_deal_strategy,
     personalization_tags: getCategoryValues(item, "personalization-tags", []),
     deliverability_score: getNumberValue(item, "deliverability-score", 0),
     spam_risk: getNumberValue(item, "spam-risk", null),
@@ -153,6 +214,7 @@ export function normalizeTemplateItem(item) {
     version: getNumberValue(item, "version", 1),
     last_used:
       fields.find((f) => f?.external_id === "last-used")?.values?.[0]?.start || null,
+    selection_metadata,
   };
 }
 

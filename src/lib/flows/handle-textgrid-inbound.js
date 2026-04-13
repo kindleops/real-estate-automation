@@ -1,5 +1,6 @@
 // ─── handle-textgrid-inbound.js ──────────────────────────────────────────
 import { loadContext } from "@/lib/domain/context/load-context.js";
+import { createBrain } from "@/lib/domain/context/resolve-brain.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { normalizeInboundTextgridPhone } from "@/lib/providers/textgrid.js";
@@ -14,6 +15,10 @@ import { maybeQueueUnderwritingFollowUp } from "@/lib/domain/underwriting/maybe-
 import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/maybe-create-contract-from-accepted-offer.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
+import {
+  normalizeSellerFlowUseCase,
+  SELLER_FLOW_STAGES,
+} from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { updateMasterOwnerAfterInbound } from "@/lib/domain/master-owners/update-master-owner-after-inbound.js";
 import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
 import { cancelPendingQueueItemsForOwner } from "@/lib/domain/queue/cancel-pending-queue-items.js";
@@ -30,6 +35,7 @@ import { info, warn } from "@/lib/logging/logger.js";
 
 const defaultDeps = {
   loadContext,
+  createBrain,
   classify,
   resolveRoute,
   normalizeInboundTextgridPhone,
@@ -170,6 +176,64 @@ function safeWarn(event, meta = {}) {
   try { runtimeDeps.warn(event, meta); } catch {}
 }
 
+const PRE_PIPELINE_USE_CASES = new Set([
+  SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+  SELLER_FLOW_STAGES.OWNERSHIP_CHECK_FOLLOW_UP,
+  SELLER_FLOW_STAGES.CONSIDER_SELLING,
+  SELLER_FLOW_STAGES.CONSIDER_SELLING_FOLLOW_UP,
+  SELLER_FLOW_STAGES.WRONG_PERSON,
+  SELLER_FLOW_STAGES.WHO_IS_THIS,
+  SELLER_FLOW_STAGES.HOW_GOT_NUMBER,
+  SELLER_FLOW_STAGES.NOT_INTERESTED,
+  SELLER_FLOW_STAGES.STOP_OR_OPT_OUT,
+  SELLER_FLOW_STAGES.REENGAGEMENT,
+]);
+
+function shouldCreateBrainForInbound({
+  brain_id = null,
+  seller_stage_reply = null,
+} = {}) {
+  if (brain_id) return false;
+
+  const plan = seller_stage_reply?.plan || null;
+  const selected_use_case = normalizeSellerFlowUseCase(
+    plan?.selected_use_case,
+    plan?.selected_variant_group
+  );
+
+  return (
+    plan?.detected_intent === "Ownership Confirmed" &&
+    selected_use_case === SELLER_FLOW_STAGES.CONSIDER_SELLING
+  );
+}
+
+function shouldCreatePipelineForInbound({
+  seller_stage_reply = null,
+  route = null,
+  active_offer_item_id = null,
+  contract_item_id = null,
+} = {}) {
+  if (active_offer_item_id || contract_item_id) return true;
+
+  const seller_stage_use_case = normalizeSellerFlowUseCase(
+    seller_stage_reply?.plan?.selected_use_case,
+    seller_stage_reply?.plan?.selected_variant_group
+  );
+
+  if (seller_stage_use_case === SELLER_FLOW_STAGES.ASKING_PRICE) {
+    return true;
+  }
+
+  const routed_use_case = normalizeSellerFlowUseCase(
+    route?.use_case,
+    route?.variant_group
+  );
+
+  if (!routed_use_case) return false;
+
+  return !PRE_PIPELINE_USE_CASES.has(routed_use_case);
+}
+
 export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
   const { inbound_debug_stage = null } = opts;
 
@@ -287,7 +351,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     try {
       context = await runtimeDeps.loadContext({
         inbound_from,
-        create_brain_if_missing: true,
+        create_brain_if_missing: false,
       });
     } catch (err) {
       return buildInboundStepFailure("textgrid_inbound_failed_brain_lookup", err);
@@ -323,8 +387,8 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       return not_found_result;
     }
 
-    const brain_item = context.items?.brain_item || null;
-    const brain_id = context.ids?.brain_item_id || null;
+    let brain_item = context.items?.brain_item || null;
+    let brain_id = context.ids?.brain_item_id || null;
     const master_owner_id = context.ids?.master_owner_id || null;
     const prospect_id = context.ids?.prospect_id || null;
     const property_id = context.ids?.property_id || null;
@@ -436,18 +500,20 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // Write brain activity, master-owner timestamps, and stage/language/profile
     // updates in parallel.
     try {
-      await runtimeDeps.updateBrainAfterInbound({
-        brain_id,
-        message_body,
-        follow_up_trigger_state:
-          deterministic_state?.follow_up_trigger_state || "AI Running",
-        deterministic_state,
-      });
-
       await runtimeDeps.updateMasterOwnerAfterInbound({
         master_owner_id,
         received_at: new Date().toISOString(),
       });
+
+      if (brain_id) {
+        await runtimeDeps.updateBrainAfterInbound({
+          brain_id,
+          message_body,
+          follow_up_trigger_state:
+            deterministic_state?.follow_up_trigger_state || "AI Running",
+          deterministic_state,
+        });
+      }
     } catch (err) {
       return buildInboundStepFailure("textgrid_inbound_failed_prospect_resolution", err);
     }
@@ -528,7 +594,40 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         existing_offer,
       });
 
-      if (seller_stage_reply?.brain_stage) {
+      if (shouldCreateBrainForInbound({ brain_id, seller_stage_reply })) {
+        brain_item = await runtimeDeps.createBrain({
+          master_owner_id,
+          prospect_id,
+          property_id,
+          phone_item_id,
+        });
+        brain_id = brain_item?.item_id || null;
+
+        if (brain_id) {
+          context.items = {
+            ...(context.items || {}),
+            brain_item,
+          };
+          context.ids = {
+            ...(context.ids || {}),
+            brain_item_id: brain_id,
+          };
+          context.summary = {
+            ...(context.summary || {}),
+            brain_item_id: brain_id,
+          };
+
+          await runtimeDeps.updateBrainAfterInbound({
+            brain_id,
+            message_body,
+            follow_up_trigger_state:
+              deterministic_state?.follow_up_trigger_state || "AI Running",
+            deterministic_state,
+          });
+        }
+      }
+
+      if (seller_stage_reply?.brain_stage && brain_id) {
         await runtimeDeps.updateBrainStage({ brain_id, stage: seller_stage_reply.brain_stage });
       }
 
@@ -583,6 +682,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       });
 
       pipeline = await runtimeDeps.syncPipelineState({
+        create_if_missing: shouldCreatePipelineForInbound({
+          seller_stage_reply,
+          route,
+          active_offer_item_id,
+          contract_item_id: contract?.contract_item_id || null,
+        }),
         property_id,
         master_owner_id,
         prospect_id,

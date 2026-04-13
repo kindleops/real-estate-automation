@@ -6,6 +6,7 @@ import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
 import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
 import {
   resolveQueueSchedule,
   resolveSchedulingContactWindow,
@@ -264,7 +265,7 @@ export async function queueOutboundMessage({
   inbound_from,
   phone = null,
   seed_message = "",
-  create_brain_if_missing = true,
+  create_brain_if_missing = false,
 
   // Optional overrides
   category = null,
@@ -272,11 +273,15 @@ export async function queueOutboundMessage({
   use_case = null,
   template_lookup_use_case = undefined,
   template_lookup_secondary_category = undefined,
+  template_selector = null,
   variant_group = null,
   tone = null,
   gender_variant = "Neutral",
   language = null,
   sequence_position = null,
+  touch_type = null,
+  property_type_scope = null,
+  deal_strategy = null,
   paired_with_agent_type = null,
   fallback_agent_type = null,
   lifecycle_stage = null,
@@ -492,11 +497,51 @@ export async function queueOutboundMessage({
     is_first_contact:
       resolved_message_type === "Cold Outbound" && resolved_touch_number <= 1,
   });
+  const resolved_template_selector = buildTemplateSelectorInput({
+    template_selector: {
+      ...(route?.template_selector || {}),
+      ...(template_selector || {}),
+      use_case:
+        clean(template_selector?.use_case) ||
+        resolved_template_lookup_use_case,
+      language:
+        clean(template_selector?.language) ||
+        resolved_language,
+      property_type_scope:
+        clean(template_selector?.property_type_scope) ||
+        property_type_scope ||
+        route?.template_selector?.property_type_scope ||
+        null,
+      deal_strategy:
+        clean(template_selector?.deal_strategy) ||
+        deal_strategy ||
+        route?.template_selector?.deal_strategy ||
+        null,
+      touch_type:
+        clean(template_selector?.touch_type) ||
+        touch_type ||
+        route?.template_selector?.touch_type ||
+        null,
+    },
+    use_case: resolved_template_lookup_use_case,
+    language: resolved_language,
+    property_type_scope,
+    deal_strategy,
+    touch_type,
+    touch_number: resolved_touch_number,
+    message_type: resolved_message_type,
+    category: resolved_category,
+    secondary_category: resolved_template_lookup_secondary_category,
+    sequence_position: resolved_sequence_position,
+    route,
+    context,
+  });
 
   let selected_template = template_item || null;
 
   if (!selected_template && !template_id && !message_override) {
     selected_template = await loadTemplateImpl({
+      template_selector: resolved_template_selector,
       category: resolved_category,
       secondary_category: resolved_template_lookup_secondary_category,
       use_case: resolved_template_lookup_use_case,
@@ -505,6 +550,11 @@ export async function queueOutboundMessage({
       gender_variant,
       language: resolved_language,
       sequence_position: resolved_sequence_position,
+      touch_type: resolved_template_selector.touch_type,
+      touch_number: resolved_touch_number,
+      message_type: resolved_message_type,
+      property_type_scope: resolved_template_selector.property_type_scope,
+      deal_strategy: resolved_template_selector.deal_strategy,
       paired_with_agent_type: resolved_agent_type,
       recently_used_template_ids:
         context?.recent?.recently_used_template_ids || [],
@@ -525,6 +575,7 @@ export async function queueOutboundMessage({
       language: resolved_language,
       category: resolved_category,
       secondary_category: resolved_template_lookup_secondary_category,
+      template_selector: resolved_template_selector,
       sequence_position: resolved_sequence_position,
       paired_with_agent_type: resolved_agent_type,
     });

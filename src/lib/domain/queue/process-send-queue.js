@@ -42,6 +42,7 @@ import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
+import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
 import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
@@ -574,8 +575,23 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     route?.lifecycle_stage || route?.stage || stage_hint || "no-stage",
     message_variant_seed || "no-seed",
   ].join(":");
+  const resolved_message_type =
+    route?.stage === "Ownership" && touch_count <= 1 ? "Cold Outbound" : "Follow-Up";
+  const template_selector = buildTemplateSelectorInput({
+    template_selector: route?.template_selector || null,
+    use_case: route?.use_case || "ownership_check",
+    language,
+    touch_number: touch_count,
+    message_type: resolved_message_type,
+    category: primary_category,
+    secondary_category,
+    sequence_position,
+    route,
+    context,
+  });
 
   const selected_template = await loadTemplate({
+    template_selector,
     category: primary_category,
     secondary_category,
     use_case: route?.use_case || "ownership_check",
@@ -584,6 +600,11 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     gender_variant: "Neutral",
     language,
     sequence_position,
+    touch_type: template_selector.touch_type,
+    touch_number: touch_count,
+    message_type: resolved_message_type,
+    property_type_scope: template_selector.property_type_scope,
+    deal_strategy: template_selector.deal_strategy,
     paired_with_agent_type:
       route?.template_filters?.paired_with_agent_type || route?.persona || "Warm Professional",
     recently_used_template_ids: context?.recent?.recently_used_template_ids || [],
@@ -604,6 +625,7 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
           use_case: route?.use_case || "ownership_check",
           variant_group: route?.variant_group || "Stage 1 — Ownership Confirmation",
           language,
+          template_selector,
           tone: route?.tone || "Warm",
           sequence_position,
           category: primary_category,

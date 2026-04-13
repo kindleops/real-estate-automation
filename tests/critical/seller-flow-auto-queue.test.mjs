@@ -53,7 +53,7 @@ function buildContext({
   };
 }
 
-test("seller-stage auto queue uses blank-use-case template lookup for stage 2 and agent latency schedule", async () => {
+test("seller-stage auto queue uses the resolved stage-2 use case for template lookup and agent latency schedule", async () => {
   const queue_calls = [];
 
   const result = await maybeQueueSellerStageReply({
@@ -85,7 +85,7 @@ test("seller-stage auto queue uses blank-use-case template lookup for stage 2 an
   assert.equal(result.response_window.max_minutes, 14);
   assert.equal(queue_calls.length, 1);
   assert.equal(queue_calls[0].use_case, "consider_selling");
-  assert.equal(queue_calls[0].template_lookup_use_case, null);
+  assert.equal(queue_calls[0].template_lookup_use_case, "consider_selling");
   assert.equal(queue_calls[0].template_lookup_secondary_category, null);
   assert.equal(queue_calls[0].variant_group, "Stage 2 Consider Selling");
   assert.equal(queue_calls[0].send_priority, "_ Normal");

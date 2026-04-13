@@ -5,17 +5,16 @@
  *  1. ReferenceError: market_id is not defined — market_item?.item_id was never
  *     assigned to a named variable in evaluateOwner; market_id was used in the
  *     plan object without a prior const declaration.
- *  2. invalid_first_touch_template_selected (7 rows) — loadTemplate searched by
- *     use_case only (no variant_group constraint), so templates with the right
- *     use_case but a later-stage / follow-up variant_group could score higher and
- *     be returned.  The allowed_variant_groups filter now restricts the candidate
- *     pool before scoring so only Stage-1 templates are eligible.
+ *  2. invalid_first_touch_template_selected (7 rows) — selector drift used to
+ *     let legacy stage metadata either block valid Stage 1 templates or pick the
+ *     wrong record. The selector now keys off core fields instead: active,
+ *     use_case, touch_type / is_first_touch, language, and property scope.
  *
  * Covered:
- *  1. allowed_variant_groups filters follow-up templates out of the candidate pool.
- *  2. allowed_variant_groups filters Stage 2+ templates out of the candidate pool.
- *  3. Stage-1 templates with null variant_group are always permitted (untagged safe).
- *  4. Without allowed_variant_groups the non-Stage-1 template can win (control).
+ *  1. Metadata-only variant_group values do not block valid Touch 1 templates.
+ *  2. Stage-1 templates with null variant_group are still permitted.
+ *  3. Strict Touch 1 still requires ownership_check + first-touch truth.
+ *  4. Without strict Touch 1, higher-performing legacy variants can still win.
  *  5. market_id is correctly derived from market_item — buildOwnerContext returns it.
  *  6. The final guard now emits no_valid_first_touch_template when it fires (not
  *     invalid_first_touch_template_selected).
@@ -88,7 +87,7 @@ async function noRemoteFetch() {
 
 // ── 1. allowed_variant_groups filters follow-up templates out ─────────────────
 
-test("allowed_variant_groups: follow-up variant_group template is excluded from candidates", async () => {
+test("metadata-only variant_group does not exclude a valid Touch 1 template", async () => {
   const stage1_template = makeLocalTemplate(
     "t-stage1",
     "ownership_check",
@@ -107,7 +106,6 @@ test("allowed_variant_groups: follow-up variant_group template is excluded from 
     language: "English",
     remote_fetcher: noRemoteFetch,
     local_fetcher: makeLocalFetcher([stage1_template, followup_template]),
-    allowed_variant_groups: FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
   });
 
   const returned_ids = candidates.map((c) => c.item_id);
@@ -115,16 +113,15 @@ test("allowed_variant_groups: follow-up variant_group template is excluded from 
     returned_ids.includes("t-stage1"),
     "Stage-1 template must be in the candidate pool"
   );
-  assert.equal(
+  assert.ok(
     returned_ids.includes("t-followup"),
-    false,
-    "Follow-up variant_group template must be excluded by allowed_variant_groups"
+    "follow-up-labeled variant metadata must not block a valid ownership_check first-touch template"
   );
 });
 
 // ── 2. allowed_variant_groups filters Stage 2+ templates out ─────────────────
 
-test("allowed_variant_groups: Stage 4 and Stage 5 variant_group templates are excluded", async () => {
+test("legacy Stage 4 and Stage 5 variant_group labels are informational for Touch 1 selection", async () => {
   const stage1 = makeLocalTemplate("t-s1", "ownership_check", "Stage 1 — Ownership Confirmation", 0);
   const stage4 = makeLocalTemplate("t-s4", "ownership_check", "Stage 4A — Confirm Basics", 50);
   const stage5 = makeLocalTemplate("t-s5", "ownership_check", "Stage 5 — Offer Reveal", 50);
@@ -134,18 +131,17 @@ test("allowed_variant_groups: Stage 4 and Stage 5 variant_group templates are ex
     language: "English",
     remote_fetcher: noRemoteFetch,
     local_fetcher: makeLocalFetcher([stage1, stage4, stage5]),
-    allowed_variant_groups: FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
   });
 
   const returned_ids = candidates.map((c) => c.item_id);
   assert.ok(returned_ids.includes("t-s1"), "Stage-1 template must survive filtering");
-  assert.equal(returned_ids.includes("t-s4"), false, "Stage 4 template must be excluded");
-  assert.equal(returned_ids.includes("t-s5"), false, "Stage 5 template must be excluded");
+  assert.ok(returned_ids.includes("t-s4"), "Stage 4 metadata must not exclude a valid template");
+  assert.ok(returned_ids.includes("t-s5"), "Stage 5 metadata must not exclude a valid template");
 });
 
 // ── 3. templates with null variant_group are always permitted ─────────────────
 
-test("allowed_variant_groups: template with null variant_group is always included", async () => {
+test("null or mismatched variant_group metadata does not block a valid Touch 1 template", async () => {
   const null_variant = makeLocalTemplate("t-null-vg", "ownership_check", null, 0);
   const stage1 = makeLocalTemplate("t-s1", "ownership_check", "Stage 1 — Ownership Confirmation", 0);
   const bad_variant = makeLocalTemplate("t-bad", "ownership_check", "Stage 6 — Close", 50);
@@ -155,13 +151,12 @@ test("allowed_variant_groups: template with null variant_group is always include
     language: "English",
     remote_fetcher: noRemoteFetch,
     local_fetcher: makeLocalFetcher([null_variant, stage1, bad_variant]),
-    allowed_variant_groups: FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
   });
 
   const returned_ids = candidates.map((c) => c.item_id);
   assert.ok(returned_ids.includes("t-null-vg"), "null variant_group must always be permitted");
   assert.ok(returned_ids.includes("t-s1"), "Stage-1 must also be permitted");
-  assert.equal(returned_ids.includes("t-bad"), false, "Stage-6 variant must be excluded");
+  assert.ok(returned_ids.includes("t-bad"), "Stage-6 metadata must not exclude a valid template");
 });
 
 test("strict first-touch filtering requires ownership_check and Is First Touch, not a Stage 1 label", async () => {

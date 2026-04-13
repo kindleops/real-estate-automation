@@ -160,11 +160,8 @@ function scoreTemplate(template, desired) {
 
   if (desired_category_norm) {
     if (category_norm === desired_category_norm) {
-      score += 150;
-      reasons.push("category_match");
-    } else if (title_norm.includes(desired_category_norm)) {
-      score += 60;
-      reasons.push("category_in_title");
+      score += 8;
+      reasons.push("category_metadata_match");
     }
   }
 
@@ -175,9 +172,6 @@ function scoreTemplate(template, desired) {
     if (use_case_norm === desired_message_type_norm) {
       score += 140;
       reasons.push("message_type_match");
-    } else if (title_norm.includes(desired_message_type_norm)) {
-      score += 60;
-      reasons.push("message_type_in_title");
     }
   }
 
@@ -186,11 +180,8 @@ function scoreTemplate(template, desired) {
 
   if (desired_stage_norm) {
     if (stage_norm === desired_stage_norm) {
-      score += 120;
-      reasons.push("stage_match");
-    } else if (title_norm.includes(desired_stage_norm)) {
-      score += 40;
-      reasons.push("stage_in_title");
+      score += 5;
+      reasons.push("stage_metadata_match");
     }
   }
 

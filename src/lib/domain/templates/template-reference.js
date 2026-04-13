@@ -88,9 +88,16 @@ export function getTemplateSelectionDetails({
       clean(template_item?.name) ||
       clean(template_item?.raw?.title) ||
       null,
+    selected_template_selector_use_case:
+      clean(template_item?.selector_use_case) || null,
     selected_template_use_case: clean(template_item?.use_case) || null,
+    selected_template_touch_type: clean(template_item?.touch_type) || null,
     selected_template_variant_group: clean(template_item?.variant_group) || null,
     selected_template_language: clean(template_item?.language) || null,
+    selected_template_property_type_scope:
+      clean(template_item?.property_type_scope) || null,
+    selected_template_deal_strategy:
+      clean(template_item?.deal_strategy) || null,
     selected_template_tone: clean(template_item?.tone) || null,
     selected_template_selection_diagnostics:
       template_item?.template_selection_diagnostics || null,
