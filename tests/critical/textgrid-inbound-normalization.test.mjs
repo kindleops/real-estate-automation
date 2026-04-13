@@ -56,7 +56,7 @@ test("inbound handler accepts raw Twilio/TextGrid payload and logs inbound event
     resolveRoute: () => ({ stage: "Ownership", use_case: "ownership_check", seller_profile: null }),
     logInboundMessageEvent: async (payload) => {
       logged_payload = payload;
-      return { item_id: 991 };
+      return { item_id: payload.record_item_id || 991 };
     },
     updateBrainAfterInbound: async () => {},
     updateMasterOwnerAfterInbound: async () => ({ ok: true }),
@@ -90,8 +90,18 @@ test("inbound handler accepts raw Twilio/TextGrid payload and logs inbound event
   assert.equal(result.message_id, "SM123");
   assert.equal(result.inbound_from, "+15551230001");
   assert.equal(result.body, "Yes, I own it");
+
+  // record_item_id from idempotency is passed to logInboundMessageEvent
+  assert.ok(logged_payload.record_item_id, "record_item_id should be passed from idempotency");
+
+  // actual seller text is passed as message_body
+  assert.equal(logged_payload.message_body, "Yes, I own it");
   assert.equal(logged_payload.provider_message_id, "SM123");
   assert.equal(logged_payload.received_at, "2026-04-08T00:00:00.000Z");
   assert.equal(logged_payload.processed_by, "Manual Sender");
   assert.equal(logged_payload.source_app, "External API");
+
+  // processing metadata is passed
+  assert.ok(logged_payload.processing_metadata, "processing_metadata should be provided");
+  assert.equal(logged_payload.processing_metadata.provider, "textgrid");
 });

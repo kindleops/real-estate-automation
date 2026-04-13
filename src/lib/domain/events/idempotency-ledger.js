@@ -139,6 +139,7 @@ export async function beginIdempotentProcessing({
       "source-app": "External API",
       "message": buildRecordMessage(normalized_scope, normalized_key, summary),
       "ai-output": JSON.stringify(next_meta),
+      "processing-metadata": JSON.stringify(next_meta),
     });
 
     return {
@@ -168,6 +169,16 @@ export async function beginIdempotentProcessing({
       last_error: null,
       attempts: 1,
     }),
+    "processing-metadata": JSON.stringify({
+      ...metadata,
+      scope: normalized_scope,
+      key: normalized_key,
+      status: "processing",
+      started_at,
+      completed_at: null,
+      last_error: null,
+      attempts: 1,
+    }),
   });
 
   return {
@@ -186,6 +197,7 @@ export async function completeIdempotentProcessing({
   key = null,
   summary = "",
   metadata = {},
+  skip_content_fields = false,
 } = {}) {
   if (!record_item_id) {
     return {
@@ -195,20 +207,27 @@ export async function completeIdempotentProcessing({
   }
 
   const completed_at = nowIso();
+  const processing_meta = JSON.stringify({
+    ...metadata,
+    scope: clean(scope),
+    key: clean(key),
+    status: "completed",
+    completed_at,
+  });
 
-  await updateMessageEvent(record_item_id, {
+  const fields = {
     "timestamp": { start: completed_at },
     "trigger-name": buildTriggerName(scope),
     "source-app": "External API",
-    "message": buildRecordMessage(scope, key, summary),
-    "ai-output": JSON.stringify({
-      ...metadata,
-      scope: clean(scope),
-      key: clean(key),
-      status: "completed",
-      completed_at,
-    }),
-  });
+    "processing-metadata": processing_meta,
+  };
+
+  if (!skip_content_fields) {
+    fields["message"] = buildRecordMessage(scope, key, summary);
+    fields["ai-output"] = processing_meta;
+  }
+
+  await updateMessageEvent(record_item_id, fields);
 
   return {
     ok: true,
@@ -223,6 +242,7 @@ export async function failIdempotentProcessing({
   key = null,
   error = null,
   metadata = {},
+  skip_content_fields = false,
 } = {}) {
   if (!record_item_id) {
     return {
@@ -237,20 +257,28 @@ export async function failIdempotentProcessing({
     clean(error) ||
     "unknown_error";
 
-  await updateMessageEvent(record_item_id, {
+  const processing_meta = JSON.stringify({
+    ...metadata,
+    scope: clean(scope),
+    key: clean(key),
+    status: "failed",
+    failed_at,
+    last_error: error_message,
+  });
+
+  const fields = {
     "timestamp": { start: failed_at },
     "trigger-name": buildTriggerName(scope),
     "source-app": "External API",
-    "message": buildRecordMessage(scope, key, `Failed ${clean(scope)} event ${clean(key)}`),
-    "ai-output": JSON.stringify({
-      ...metadata,
-      scope: clean(scope),
-      key: clean(key),
-      status: "failed",
-      failed_at,
-      last_error: error_message,
-    }),
-  });
+    "processing-metadata": processing_meta,
+  };
+
+  if (!skip_content_fields) {
+    fields["message"] = buildRecordMessage(scope, key, `Failed ${clean(scope)} event ${clean(key)}`);
+    fields["ai-output"] = processing_meta;
+  }
+
+  await updateMessageEvent(record_item_id, fields);
 
   return {
     ok: true,

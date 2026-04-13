@@ -354,6 +354,132 @@ test("strict Touch 1 Podio mode rejects explicitly multifamily-only scope for a 
   );
 });
 
+test("strict Touch 1 Podio fetch stays broad and does not hard-filter by property, stage, or metadata drift", async () => {
+  const filter_calls = [];
+  const valid_template = {
+    ...makeLocalTemplate("podio-broad-fetch", "ownership_check", "Ownership Confirmation", 20),
+    source: "podio",
+  };
+
+  const candidates = await loadTemplateCandidates({
+    category: "Residential",
+    secondary_category: "Outreach",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    tone: "Warm",
+    language: "English",
+    paired_with_agent_type: "Warm Professional",
+    property_type_scope: "Residential",
+    strict_touch_one_podio_only: true,
+    remote_fetcher: async (filter_set) => {
+      filter_calls.push(filter_set);
+      const filter_keys = Object.keys(filter_set).sort();
+      if (filter_keys.length === 1 && filter_set.active === "Yes") {
+        return [valid_template];
+      }
+      return [];
+    },
+    local_fetcher: makeLocalFetcher([]),
+  });
+
+  assert.equal(candidates[0]?.item_id, "podio-broad-fetch");
+  assert.ok(
+    filter_calls.some(
+      (filter_set) =>
+        Object.keys(filter_set).length === 1 && filter_set.active === "Yes"
+    ),
+    "strict Touch 1 must include a broad active-only Podio sweep"
+  );
+
+  for (const filter_set of filter_calls) {
+    assert.equal(
+      "property-type-scope" in filter_set,
+      false,
+      "Touch 1 Podio fetch must not hard-filter by property-type-scope"
+    );
+    assert.equal("stage" in filter_set, false, "Touch 1 Podio fetch must not hard-filter by stage");
+    assert.equal(
+      "stage-label" in filter_set,
+      false,
+      "Touch 1 Podio fetch must not hard-filter by stage-label"
+    );
+    assert.equal(
+      "stage-code" in filter_set,
+      false,
+      "Touch 1 Podio fetch must not hard-filter by stage-code"
+    );
+    assert.equal("category" in filter_set, false, "Touch 1 Podio fetch must not hard-filter by category");
+    assert.equal(
+      "category-2" in filter_set,
+      false,
+      "Touch 1 Podio fetch must not hard-filter by secondary category"
+    );
+    assert.equal(
+      "canonical-routing-slug" in filter_set,
+      false,
+      "Touch 1 Podio fetch must not hard-filter by canonical routing slug"
+    );
+    assert.equal("tone" in filter_set, false, "Touch 1 Podio fetch must not hard-filter by tone");
+    assert.equal(
+      "paired-with-agent-type" in filter_set,
+      false,
+      "Touch 1 Podio fetch must not hard-filter by paired-with-agent-type"
+    );
+  }
+});
+
+test("strict Touch 1 Podio active-only sweep can recover a valid ownership template from later pages", async () => {
+  const valid_template = {
+    ...makeLocalTemplate("podio-page-2", "ownership_check", "Ownership Confirmation", 30),
+    source: "podio",
+  };
+  const fetch_calls = [];
+
+  const candidates = await loadTemplateCandidates({
+    use_case: "ownership_check",
+    language: "English",
+    strict_touch_one_podio_only: true,
+    remote_fetcher: async (filter_set, options = {}) => {
+      fetch_calls.push({
+        filter_set,
+        fetch_limit: options?.fetch_limit ?? null,
+        fetch_offset: options?.fetch_offset ?? 0,
+      });
+
+      const is_active_only =
+        Object.keys(filter_set).length === 1 && filter_set.active === "Yes";
+
+      if (!is_active_only) return [];
+
+      if ((options?.fetch_offset ?? 0) === 0) {
+        return Array.from({ length: 200 }, (_, index) => ({
+          ...makeLocalTemplate(`noise-${index}`, "asking_price", "Stage 3 Asking Price", 0),
+          source: "podio",
+          is_first_touch: "No",
+        }));
+      }
+
+      if ((options?.fetch_offset ?? 0) === 200) {
+        return [valid_template];
+      }
+
+      return [];
+    },
+    local_fetcher: makeLocalFetcher([]),
+  });
+
+  assert.equal(candidates[0]?.item_id, "podio-page-2");
+  assert.ok(
+    fetch_calls.some(
+      (call) =>
+        Object.keys(call.filter_set).length === 1 &&
+        call.filter_set.active === "Yes" &&
+        call.fetch_offset === 200
+    ),
+    "strict Touch 1 should continue the active-only Podio sweep onto later pages"
+  );
+});
+
 test("strict Touch 1 Podio mode throws NO_STAGE_1_TEMPLATE_FOUND when Podio has no valid Stage 1 template", async () => {
   await assert.rejects(
     () =>

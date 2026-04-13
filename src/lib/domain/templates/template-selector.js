@@ -326,6 +326,30 @@ export function normalizeTemplateTouchType(template = null) {
   return TEMPLATE_TOUCH_TYPES.ANY;
 }
 
+export function readExplicitFirstTouchValue(template = null) {
+  return (
+    clean(
+      readTemplateValue(
+        template,
+        {
+          direct_values: [
+            template?.is_first_touch,
+            template?.is_first_contact,
+            template?.first_touch,
+          ],
+          raw_external_ids: ["is-first-touch", "first-touch"],
+          raw_labels: ["Is First Touch", "First Touch"],
+        },
+        null
+      )
+    ) || null
+  );
+}
+
+export function isExplicitFirstTouch(template = null) {
+  return isTruthyYes(readExplicitFirstTouchValue(template));
+}
+
 export function normalizePropertyTypeScope(value = null) {
   return clean(value) || null;
 }
@@ -387,24 +411,10 @@ export function isPropertyTypeScopeCompatible({
   requested_property_type_scope = null,
   template_property_type_scope = null,
 } = {}) {
-  const requested = normalizeRequestedPropertyTypeScope({
-    property_type_scope: requested_property_type_scope,
-  });
-  const template_scope = normalizePropertyTypeScope(template_property_type_scope);
-
-  if (!requested || !template_scope) return true;
-
-  if (safeCategoryEquals(requested, template_scope)) return true;
-
-  if (isResidentialScope(requested) || isResidentialAnyScope(requested)) {
-    return !isMultifamilyScope(template_scope);
-  }
-
-  if (isMultifamilyScope(requested)) {
-    return isMultifamilyScope(template_scope);
-  }
-
-  return true;
+  return describePropertyTypeScopeCompatibility({
+    requested_property_type_scope,
+    template_property_type_scope,
+  }).compatible;
 }
 
 export function scorePropertyTypeScopeMatch({
@@ -433,6 +443,104 @@ export function scorePropertyTypeScopeMatch({
   }
 
   return 45;
+}
+
+export function describePropertyTypeScopeCompatibility({
+  requested_property_type_scope = null,
+  template_property_type_scope = null,
+} = {}) {
+  const requested = normalizeRequestedPropertyTypeScope({
+    property_type_scope: requested_property_type_scope,
+  });
+  const template_scope = normalizePropertyTypeScope(template_property_type_scope);
+
+  if (!requested && !template_scope) {
+    return {
+      compatible: true,
+      reason: "requested_and_template_scope_missing",
+      requested_scope: null,
+      template_scope: null,
+    };
+  }
+
+  if (!requested) {
+    return {
+      compatible: true,
+      reason: "requested_scope_missing",
+      requested_scope: null,
+      template_scope,
+    };
+  }
+
+  if (!template_scope) {
+    return {
+      compatible: true,
+      reason: "template_scope_missing",
+      requested_scope: requested,
+      template_scope: null,
+    };
+  }
+
+  if (safeCategoryEquals(requested, template_scope)) {
+    return {
+      compatible: true,
+      reason: "exact_scope_match",
+      requested_scope: requested,
+      template_scope,
+    };
+  }
+
+  if (isResidentialScope(requested) || isResidentialAnyScope(requested)) {
+    if (isResidentialAnyScope(template_scope)) {
+      return {
+        compatible: true,
+        reason: "any_residential_match",
+        requested_scope: requested,
+        template_scope,
+      };
+    }
+
+    if (isResidentialScope(template_scope)) {
+      return {
+        compatible: true,
+        reason: "residential_scope_family_match",
+        requested_scope: requested,
+        template_scope,
+      };
+    }
+
+    return {
+      compatible: false,
+      reason: "residential_scope_rejected_multifamily_only",
+      requested_scope: requested,
+      template_scope,
+    };
+  }
+
+  if (isMultifamilyScope(requested)) {
+    if (isMultifamilyScope(template_scope)) {
+      return {
+        compatible: true,
+        reason: "multifamily_scope_family_match",
+        requested_scope: requested,
+        template_scope,
+      };
+    }
+
+    return {
+      compatible: false,
+      reason: "multifamily_scope_incompatible",
+      requested_scope: requested,
+      template_scope,
+    };
+  }
+
+  return {
+    compatible: true,
+    reason: "scope_compatibility_default_pass",
+    requested_scope: requested,
+    template_scope,
+  };
 }
 
 export function normalizeDealStrategyValue(value = null) {

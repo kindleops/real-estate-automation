@@ -4,10 +4,12 @@ import { LOCAL_TEMPLATE_CANDIDATES } from "@/lib/domain/templates/local-template
 import {
   buildTemplateSelectorInput,
   canonicalizeTemplateUseCase,
+  describePropertyTypeScopeCompatibility,
   expandSelectorUseCases,
   isDealStrategyCompatible,
-  isPropertyTypeScopeCompatible,
+  isExplicitFirstTouch,
   normalizeSelectorText,
+  readExplicitFirstTouchValue,
   normalizeTemplateDealStrategy,
   normalizeTemplatePropertyTypeScope,
   normalizeTemplateSelectorUseCase,
@@ -26,6 +28,8 @@ const HARD_SPAM_RISK_CUTOFF = 35;
 const TEMPLATE_APP_ID = APP_IDS.templates;
 const TEMPLATE_BATCH_CACHE = new Map();
 const TEMPLATE_BATCH_CACHE_TTL_MS = 2 * 60_000;
+const TOUCH_ONE_ACTIVE_SWEEP_PAGE_LIMIT = 200;
+const TOUCH_ONE_ACTIVE_SWEEP_MAX_PAGES = 5;
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -75,9 +79,15 @@ export async function fetchTemplatesCached(
     fetcher = fetchTemplates,
     cache = TEMPLATE_BATCH_CACHE,
     cache_ttl_ms = TEMPLATE_BATCH_CACHE_TTL_MS,
+    fetch_limit = null,
+    fetch_offset = 0,
   } = {}
 ) {
-  const cache_key = stableTemplateBatchCacheKey(filter_set);
+  const cache_key = stableTemplateBatchCacheKey({
+    ...filter_set,
+    __fetch_limit: fetch_limit ?? null,
+    __fetch_offset: fetch_offset ?? 0,
+  });
   const cached = cache.get(cache_key);
 
   if (
@@ -88,7 +98,11 @@ export async function fetchTemplatesCached(
     return cached.value;
   }
 
-  const batch = await fetcher(filter_set);
+  const batch = await fetcher(
+    filter_set,
+    Number.isFinite(Number(fetch_limit)) ? Number(fetch_limit) : undefined,
+    Number.isFinite(Number(fetch_offset)) ? Number(fetch_offset) : 0
+  );
   cache.set(cache_key, {
     value: batch,
     expires_at: Date.now() + Math.max(Number(cache_ttl_ms) || 0, 0),
@@ -114,23 +128,73 @@ function dedupeTemplates(templates = []) {
   });
 }
 
-function buildRemoteFilterSets({ use_case_candidates = [] } = {}) {
-  const filters = [];
+function buildRemoteFilterRequests({
+  selector_input = null,
+  use_case_candidates = [],
+  strict_touch_one_podio_only = false,
+} = {}) {
+  const active_value = getTemplateCategoryValue("active", "Yes") || "Yes";
+  const requested_use_case = clean(selector_input?.use_case) || null;
+  const requests = [];
 
-  for (const use_case of use_case_candidates) {
-    filters.push({
-      "use-case": getTemplateCategoryValue("use-case", use_case) || use_case,
-      active: getTemplateCategoryValue("active", "Yes") || "Yes",
+  const addRequest = (label, filter_set = {}, options = {}) => {
+    requests.push({
+      label,
+      filter_set,
+      paginate: Boolean(options.paginate),
+    });
+  };
+
+  if (
+    strict_touch_one_podio_only &&
+    safeCategoryEquals(requested_use_case, "ownership_check") &&
+    selector_input?.touch_type === TEMPLATE_TOUCH_TYPES.FIRST_TOUCH
+  ) {
+    addRequest("touch_one_use_case_template_first_touch", {
+      "use-case-2": requested_use_case,
+      "is-first-touch": "Yes",
+      active: active_value,
+    });
+    addRequest("touch_one_use_case_legacy_first_touch", {
+      "use-case": getTemplateCategoryValue("use-case", requested_use_case) || requested_use_case,
+      "is-first-touch": "Yes",
+      active: active_value,
+    });
+    addRequest("touch_one_use_case_template", {
+      "use-case-2": requested_use_case,
+      active: active_value,
+    });
+    addRequest("touch_one_use_case_legacy", {
+      "use-case": getTemplateCategoryValue("use-case", requested_use_case) || requested_use_case,
+      active: active_value,
+    });
+    addRequest(
+      "touch_one_active_only",
+      {
+        active: active_value,
+      },
+      { paginate: true }
+    );
+  } else {
+    for (const use_case of use_case_candidates) {
+      addRequest(`use_case_template:${use_case}`, {
+        "use-case-2": use_case,
+        active: active_value,
+      });
+      addRequest(`use_case_legacy:${use_case}`, {
+        "use-case": getTemplateCategoryValue("use-case", use_case) || use_case,
+        active: active_value,
+      });
+    }
+
+    addRequest("active_only", {
+      active: active_value,
     });
   }
 
-  filters.push({
-    active: getTemplateCategoryValue("active", "Yes") || "Yes",
-  });
-
   const seen = new Set();
-  return filters.filter((filter_set) => {
-    const key = stableTemplateBatchCacheKey(filter_set);
+  return requests.filter((request) => {
+    const key = stableTemplateBatchCacheKey(request.filter_set);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -168,6 +232,10 @@ function createTemplateResolutionDiagnostics() {
     podio_filter_validation_failures: 0,
     podio_batches_with_results: 0,
     podio_candidates_considered: 0,
+    podio_raw_candidates_loaded: 0,
+    podio_prefetch_candidates_excluded: 0,
+    podio_prefetch_candidates_survived: 0,
+    podio_filter_requests: [],
     local_candidates_considered: 0,
     selected_bucket_source: null,
   };
@@ -180,6 +248,14 @@ function summarizeTemplateResolutionDiagnostics(diagnostics = {}) {
       diagnostics.podio_filter_validation_failures || 0,
     podio_batches_with_results: diagnostics.podio_batches_with_results || 0,
     podio_candidates_considered: diagnostics.podio_candidates_considered || 0,
+    podio_raw_candidates_loaded: diagnostics.podio_raw_candidates_loaded || 0,
+    podio_prefetch_candidates_excluded:
+      diagnostics.podio_prefetch_candidates_excluded || 0,
+    podio_prefetch_candidates_survived:
+      diagnostics.podio_prefetch_candidates_survived || 0,
+    podio_filter_requests: Array.isArray(diagnostics.podio_filter_requests)
+      ? diagnostics.podio_filter_requests
+      : [],
     local_candidates_considered: diagnostics.local_candidates_considered || 0,
     selected_bucket_source: diagnostics.selected_bucket_source || null,
   };
@@ -310,6 +386,41 @@ function buildUseCaseMatch(template = null, requested_use_case = null) {
   };
 }
 
+function evaluateTouchOnePrefetchCandidate(template = null, selector_input = null) {
+  const template_use_case = normalizeTemplateSelectorUseCase(template);
+  const canonical_use_case = canonicalizeTemplateUseCase(
+    template_use_case,
+    template?.variant_group || template?.stage_label || null
+  );
+  const explicit_is_first_touch = readExplicitFirstTouchValue(template);
+  const property_type_scope = normalizeTemplatePropertyTypeScope(template);
+  const prefetch_rejection_reasons = [];
+
+  if (!safeCategoryEquals(template?.active, "Yes")) {
+    prefetch_rejection_reasons.push("inactive");
+  }
+
+  if (
+    !safeCategoryEquals(template_use_case, selector_input?.use_case || null) &&
+    !safeCategoryEquals(canonical_use_case, selector_input?.use_case || null)
+  ) {
+    prefetch_rejection_reasons.push("use_case_mismatch");
+  }
+
+  if (!isExplicitFirstTouch(template)) {
+    prefetch_rejection_reasons.push("is_first_touch_mismatch");
+  }
+
+  return {
+    ...template,
+    selector_use_case: template_use_case,
+    canonical_use_case,
+    explicit_is_first_touch,
+    property_type_scope,
+    prefetch_rejection_reasons,
+  };
+}
+
 function isTouchTypeCompatible(template_touch_type = TEMPLATE_TOUCH_TYPES.ANY, requested_touch_type = TEMPLATE_TOUCH_TYPES.ANY) {
   if (requested_touch_type === TEMPLATE_TOUCH_TYPES.ANY) return true;
   if (template_touch_type === requested_touch_type) return true;
@@ -359,6 +470,7 @@ function evaluateTemplateCandidate(
   );
   const touch_type = normalizeTemplateTouchType(template);
   const property_type_scope = normalizeTemplatePropertyTypeScope(template);
+  const explicit_is_first_touch = readExplicitFirstTouchValue(template);
   const deal_strategy = normalizeTemplateDealStrategy({
     ...template,
     use_case: template_use_case || template?.use_case || null,
@@ -374,6 +486,10 @@ function evaluateTemplateCandidate(
   const rejection_reasons = [];
   const operational_rejection_reasons = [];
   const recently_used = new Set(recently_used_template_ids.filter(Boolean));
+  const property_type_scope_compatibility = describePropertyTypeScopeCompatibility({
+    requested_property_type_scope: selector_input?.property_type_scope || null,
+    template_property_type_scope: property_type_scope,
+  });
 
   if (!safeCategoryEquals(template?.active, "Yes")) {
     rejection_reasons.push("inactive");
@@ -388,12 +504,7 @@ function evaluateTemplateCandidate(
     rejection_reasons.push("touch_type_mismatch");
   }
 
-  if (
-    !isPropertyTypeScopeCompatible({
-      requested_property_type_scope: selector_input?.property_type_scope || null,
-      template_property_type_scope: property_type_scope,
-    })
-  ) {
+  if (!property_type_scope_compatibility.compatible) {
     rejection_reasons.push("property_type_scope_incompatible");
   }
 
@@ -449,6 +560,8 @@ function evaluateTemplateCandidate(
     canonical_use_case,
     touch_type,
     property_type_scope,
+    explicit_is_first_touch,
+    property_type_scope_match_reason: property_type_scope_compatibility.reason,
     deal_strategy,
     selection_metadata: metadata,
     rejection_reasons,
@@ -473,12 +586,18 @@ function buildCandidateAudit(candidate = null) {
     active: clean(candidate?.active) || null,
     use_case: clean(candidate?.selector_use_case || candidate?.use_case) || null,
     canonical_use_case: clean(candidate?.canonical_use_case) || null,
+    explicit_is_first_touch: clean(candidate?.explicit_is_first_touch) || null,
     touch_type: clean(candidate?.touch_type) || null,
     language: clean(candidate?.language) || null,
     property_type_scope: clean(candidate?.property_type_scope) || null,
+    property_type_scope_match_reason:
+      clean(candidate?.property_type_scope_match_reason) || null,
     deal_strategy: clean(candidate?.deal_strategy) || null,
     sequence_position: clean(candidate?.sequence_position) || null,
     stage_label: clean(candidate?.stage_label || candidate?.variant_group) || null,
+    prefetch_rejection_reasons: Array.isArray(candidate?.prefetch_rejection_reasons)
+      ? candidate.prefetch_rejection_reasons
+      : [],
     rejection_reasons: Array.isArray(candidate?.rejection_reasons)
       ? candidate.rejection_reasons
       : [],
@@ -489,53 +608,186 @@ function buildCandidateAudit(candidate = null) {
   };
 }
 
+function logTemplatePrefetchAudit({
+  source = "podio",
+  selector_input = null,
+  filter_requests = [],
+  raw_candidates = [],
+  prefetch_candidates = [],
+  context = null,
+  strict_touch_one_podio_only = false,
+} = {}) {
+  if (source !== "podio") return null;
+
+  const owner_id = context?.ids?.master_owner_id ?? context?.ids?.owner_id ?? null;
+  const payload = {
+    owner_id,
+    source,
+    requested_core_selector: selector_input,
+    filter_requests,
+    raw_candidate_count: raw_candidates.length,
+    raw_candidate_ids: raw_candidates.map((candidate) => candidate?.item_id).filter(Boolean),
+    prefetch_excluded_count: Math.max(raw_candidates.length - prefetch_candidates.length, 0),
+    prefetch_survivor_count: prefetch_candidates.length,
+    prefetch_survivor_ids: prefetch_candidates
+      .map((candidate) => candidate?.item_id)
+      .filter(Boolean),
+    prefetch_candidates: raw_candidates.map((candidate) => ({
+      template_id: candidate?.item_id ?? null,
+      active: clean(candidate?.active) || null,
+      use_case: clean(candidate?.selector_use_case || candidate?.use_case) || null,
+      canonical_use_case: clean(candidate?.canonical_use_case) || null,
+      explicit_is_first_touch: clean(candidate?.explicit_is_first_touch) || null,
+      language: clean(candidate?.language) || null,
+      property_type_scope: clean(candidate?.property_type_scope) || null,
+      prefetch_rejection_reasons: Array.isArray(candidate?.prefetch_rejection_reasons)
+        ? candidate.prefetch_rejection_reasons
+        : [],
+    })),
+  };
+
+  info("template.podio_prefetch_audit", payload);
+
+  if (strict_touch_one_podio_only) {
+    info("template.touch_one_prefetch_audit", payload);
+  }
+
+  return payload;
+}
+
 async function collectSourceCandidates({
   source = "podio",
-  filter_sets = [],
+  filter_requests = [],
+  selector_input = null,
+  strict_touch_one_podio_only = false,
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
   diagnostics = null,
+  context = null,
 } = {}) {
   let all_candidates = [];
+  const filter_request_audit = [];
 
-  for (const filter_set of filter_sets) {
-    let batch = [];
+  for (const request of filter_requests) {
+    const filter_set = request?.filter_set || {};
+    const paginate = Boolean(source === "podio" && request?.paginate);
+    const page_limit = paginate ? TOUCH_ONE_ACTIVE_SWEEP_PAGE_LIMIT : null;
+    let offset = 0;
+    let page_number = 0;
 
-    if (source === "podio") {
-      try {
-        batch = await remote_fetcher(filter_set);
-        batch = withTemplateSource(batch, "podio");
-      } catch (error) {
-        if (isTemplateFilterValidationError(error)) {
-          if (diagnostics) diagnostics.podio_filter_validation_failures += 1;
-          batch = [];
-        } else {
-          if (diagnostics) diagnostics.podio_fetch_failures += 1;
+    while (true) {
+      let batch = [];
+      let status = "ok";
+      let error_type = null;
+      let error_message = null;
+
+      if (source === "podio") {
+        try {
+          batch = await remote_fetcher(filter_set, {
+            fetch_limit: page_limit,
+            fetch_offset: offset,
+          });
+          batch = withTemplateSource(batch, "podio");
+        } catch (error) {
+          if (isTemplateFilterValidationError(error)) {
+            if (diagnostics) diagnostics.podio_filter_validation_failures += 1;
+            status = "validation_failed";
+            error_type = "filter_validation_failed";
+          } else {
+            if (diagnostics) diagnostics.podio_fetch_failures += 1;
+            status = "fetch_failed";
+            error_type = "fetch_failed";
+          }
+
+          error_message = clean(error?.message) || null;
           batch = [];
         }
+      } else {
+        batch = withTemplateSource(local_fetcher(filter_set), "local_registry");
       }
-    } else {
-      batch = withTemplateSource(local_fetcher(filter_set), "local_registry");
-    }
 
-    if (diagnostics && source === "podio" && batch.length > 0) {
-      diagnostics.podio_batches_with_results += 1;
-    }
+      if (diagnostics && source === "podio" && batch.length > 0) {
+        diagnostics.podio_batches_with_results += 1;
+      }
 
-    all_candidates.push(...batch);
+      filter_request_audit.push({
+        label: request?.label || null,
+        filter_set,
+        fetch_limit: page_limit,
+        fetch_offset: offset,
+        page_number,
+        returned_count: batch.length,
+        status,
+        error_type,
+        error_message,
+      });
+
+      all_candidates.push(...batch);
+
+      if (!paginate) break;
+      if (status !== "ok") break;
+      if (batch.length < TOUCH_ONE_ACTIVE_SWEEP_PAGE_LIMIT) break;
+
+      page_number += 1;
+      offset += TOUCH_ONE_ACTIVE_SWEEP_PAGE_LIMIT;
+
+      if (page_number >= TOUCH_ONE_ACTIVE_SWEEP_MAX_PAGES) {
+        filter_request_audit.push({
+          label: request?.label || null,
+          filter_set,
+          fetch_limit: page_limit,
+          fetch_offset: offset,
+          page_number,
+          returned_count: 0,
+          status: "pagination_cap_reached",
+          error_type: null,
+          error_message: null,
+        });
+        break;
+      }
+    }
   }
 
-  all_candidates = dedupeTemplates(all_candidates);
+  const raw_candidates = dedupeTemplates(all_candidates);
+  const prefetch_candidates = strict_touch_one_podio_only
+    ? raw_candidates
+        .map((template) => evaluateTouchOnePrefetchCandidate(template, selector_input))
+        .filter((candidate) => candidate.prefetch_rejection_reasons.length === 0)
+    : raw_candidates;
+  const raw_prefetch_candidates = strict_touch_one_podio_only
+    ? raw_candidates.map((template) => evaluateTouchOnePrefetchCandidate(template, selector_input))
+    : raw_candidates;
 
   if (diagnostics) {
     if (source === "podio") {
-      diagnostics.podio_candidates_considered += all_candidates.length;
+      diagnostics.podio_raw_candidates_loaded += raw_candidates.length;
+      diagnostics.podio_prefetch_candidates_excluded += Math.max(
+        raw_candidates.length - prefetch_candidates.length,
+        0
+      );
+      diagnostics.podio_prefetch_candidates_survived += prefetch_candidates.length;
+      diagnostics.podio_filter_requests.push(...filter_request_audit);
+      diagnostics.podio_candidates_considered += prefetch_candidates.length;
     } else {
-      diagnostics.local_candidates_considered += all_candidates.length;
+      diagnostics.local_candidates_considered += prefetch_candidates.length;
     }
   }
 
-  return all_candidates;
+  const prefetch_audit_payload = logTemplatePrefetchAudit({
+    source,
+    selector_input,
+    filter_requests: filter_request_audit,
+    raw_candidates: raw_prefetch_candidates,
+    prefetch_candidates,
+    context,
+    strict_touch_one_podio_only,
+  });
+
+  return {
+    raw_candidates: raw_prefetch_candidates,
+    candidates: prefetch_candidates,
+    prefetch_audit_payload,
+  };
 }
 
 function logTemplateSelectorAudit({
@@ -574,12 +826,16 @@ function logTemplateSelectorAudit({
         template_id: candidate?.item_id ?? null,
         active: clean(candidate?.active) || null,
         use_case: clean(candidate?.selector_use_case || candidate?.use_case) || null,
-        is_first_touch:
-          candidate?.touch_type === TEMPLATE_TOUCH_TYPES.FIRST_TOUCH ? "Yes" : "No",
+        is_first_touch: clean(candidate?.explicit_is_first_touch) || "No",
         language: clean(candidate?.language) || null,
         property_type_scope: clean(candidate?.property_type_scope) || null,
+        property_type_scope_match_reason:
+          clean(candidate?.property_type_scope_match_reason) || null,
         sequence_position: clean(candidate?.sequence_position) || null,
         stage_label: clean(candidate?.stage_label || candidate?.variant_group) || null,
+        prefetch_rejection_reasons: Array.isArray(candidate?.prefetch_rejection_reasons)
+          ? candidate.prefetch_rejection_reasons
+          : [],
         rejection_reasons: Array.isArray(candidate?.rejection_reasons)
           ? candidate.rejection_reasons
           : [],
@@ -596,7 +852,7 @@ function logTemplateSelectorAudit({
 
 async function evaluateSourceSelection({
   source = "podio",
-  filter_sets = [],
+  filter_requests = [],
   selector_input = null,
   recently_used_template_ids = [],
   context = null,
@@ -606,13 +862,17 @@ async function evaluateSourceSelection({
   local_fetcher = fetchLocalTemplates,
   diagnostics = null,
 } = {}) {
-  const candidates = await collectSourceCandidates({
+  const collected = await collectSourceCandidates({
     source,
-    filter_sets,
+    filter_requests,
+    selector_input,
+    strict_touch_one_podio_only,
     remote_fetcher,
     local_fetcher,
     diagnostics,
+    context,
   });
+  const candidates = collected.candidates;
 
   const evaluated = candidates
     .map((template) =>
@@ -645,9 +905,11 @@ async function evaluateSourceSelection({
   });
 
   return {
+    raw_candidates: collected.raw_candidates,
     candidates: evaluated,
     survivors,
     audit_payload,
+    prefetch_audit_payload: collected.prefetch_audit_payload,
   };
 }
 
@@ -706,19 +968,22 @@ export async function loadTemplateCandidates({
   const use_case_candidates = requested_use_cases.flatMap((requested) =>
     expandSelectorUseCases(requested, variant_group)
   );
-  const filter_sets = buildRemoteFilterSets({
+  const filter_requests = buildRemoteFilterRequests({
+    selector_input,
     use_case_candidates,
+    strict_touch_one_podio_only,
   });
   const sources = strict_touch_one_podio_only
     ? ["podio"]
     : ["podio", "local_registry"];
 
   let last_audit_payload = null;
+  let last_prefetch_audit_payload = null;
 
   for (const source of sources) {
     const result = await evaluateSourceSelection({
       source,
-      filter_sets,
+      filter_requests,
       selector_input,
       recently_used_template_ids,
       context,
@@ -730,6 +995,7 @@ export async function loadTemplateCandidates({
     });
 
     last_audit_payload = result.audit_payload;
+    last_prefetch_audit_payload = result.prefetch_audit_payload;
 
     if (result.survivors.length) {
       resolution_diagnostics.selected_bucket_source = source;
@@ -767,9 +1033,16 @@ export async function loadTemplateCandidates({
         resolution: summarizeTemplateResolutionDiagnostics(resolution_diagnostics),
         audit_summary: {
           source,
+          raw_candidate_count: Array.isArray(result.raw_candidates)
+            ? result.raw_candidates.length
+            : 0,
           total_candidates: result.candidates.length,
           survivor_count: result.survivors.length,
           rejection_counts: countRejectionReasons(result.candidates, "rejection_reasons"),
+          prefetch_rejection_counts: countRejectionReasons(
+            result.raw_candidates,
+            "prefetch_rejection_reasons"
+          ),
           operational_rejection_counts: countRejectionReasons(
             result.candidates,
             "operational_rejection_reasons"
@@ -794,6 +1067,8 @@ export async function loadTemplateCandidates({
     selection_diagnostics: summarizeTemplateResolutionDiagnostics(
       resolution_diagnostics
     ),
+    filter_requests,
+    prefetch_audit_payload: last_prefetch_audit_payload,
     audit_payload: last_audit_payload,
   };
 

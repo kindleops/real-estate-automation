@@ -462,6 +462,15 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
         referenced_app_ids: [],
         options: [],
       },
+      "processing-metadata": {
+        ...(BASE_MESSAGE_EVENTS_SCHEMA?.fields?.["processing-metadata"] || {}),
+        label: "Processing Metadata JSON",
+        type: "text",
+        multiple: false,
+        allowed_currencies: null,
+        referenced_app_ids: [],
+        options: [],
+      },
       "prior-message-id": {
         ...(BASE_MESSAGE_EVENTS_SCHEMA?.fields?.["prior-message-id"] || {}),
         label: "Prior Message ID",

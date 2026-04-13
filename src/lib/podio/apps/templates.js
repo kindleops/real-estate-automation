@@ -9,13 +9,17 @@ import {
   summarizeTemplateSelectorMetadata,
 } from "@/lib/domain/templates/template-selector.js";
 import {
+  getAttachedAppSchema,
+  normalizePodioFieldValue,
+} from "@/lib/podio/schema.js";
+import {
   getItem,
   updateItem,
-  filterAppItems,
   getCategoryValue,
   getCategoryValues,
   getNumberValue,
   getTextValue,
+  podioRequest,
 } from "@/lib/providers/podio.js";
 
 const APP_ID = APP_IDS.templates;
@@ -38,6 +42,35 @@ function safeArray(value) {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function normalizeTemplateFilterMap(filters = {}) {
+  const app_schema = getAttachedAppSchema(APP_ID);
+  const normalized = {};
+
+  for (const [external_id, raw_value] of Object.entries(filters || {})) {
+    if (!clean(external_id)) continue;
+
+    if (app_schema?.fields?.[external_id]) {
+      normalized[external_id] = normalizePodioFieldValue(APP_ID, external_id, raw_value);
+      continue;
+    }
+
+    // The live Templates app has a few newer selector fields that may lag the
+    // attached schema snapshot. Passing them through keeps Podio filtering
+    // usable during schema drift instead of failing before selection runs.
+    normalized[external_id] = raw_value;
+  }
+
+  return normalized;
+}
+
+async function filterTemplateItems(filters = {}, limit = MAX_FETCH_LIMIT, offset = 0) {
+  return podioRequest("post", `/item/app/${APP_ID}/filter/`, {
+    filters: normalizeTemplateFilterMap(filters),
+    limit,
+    offset,
+  });
 }
 
 function normalizeFieldLabel(value) {
@@ -231,15 +264,15 @@ export async function updateTemplateItem(item_id, fields = {}, revision = null) 
 }
 
 export async function findTemplates(filters = {}, limit = MAX_FETCH_LIMIT, offset = 0) {
-  return filterAppItems(APP_ID, filters, { limit, offset });
+  return filterTemplateItems(filters, limit, offset);
 }
 
 export async function findActiveTemplates(limit = MAX_FETCH_LIMIT, offset = 0) {
-  return filterAppItems(APP_ID, { active: "Yes" }, { limit, offset });
+  return filterTemplateItems({ active: "Yes" }, limit, offset);
 }
 
 export async function fetchTemplates(filters = {}, limit = MAX_FETCH_LIMIT, offset = 0) {
-  const res = await filterAppItems(APP_ID, filters, { limit, offset });
+  const res = await filterTemplateItems(filters, limit, offset);
   return safeArray(res?.items).map(normalizeTemplateItem);
 }
 

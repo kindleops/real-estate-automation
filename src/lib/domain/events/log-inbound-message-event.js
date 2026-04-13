@@ -1,5 +1,5 @@
 // ─── log-inbound-message-event.js ────────────────────────────────────────
-import { createMessageEvent, getCategoryValue } from "@/lib/providers/podio.js";
+import { createMessageEvent, updateMessageEvent, getCategoryValue } from "@/lib/providers/podio.js";
 import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
 
 const EVENT_FIELDS = {
@@ -22,6 +22,8 @@ const EVENT_FIELDS = {
   character_count: "character-count",
   delivery_status: "status-3",
   raw_carrier_status: "status-2",
+  ai_output: "ai-output",
+  processing_metadata: "processing-metadata",
 };
 
 function nowIso() {
@@ -35,6 +37,7 @@ function asArrayAppRef(value) {
 
 const defaultDeps = {
   createMessageEvent,
+  updateMessageEvent,
   getCategoryValue,
   linkMessageEventToBrain,
 };
@@ -50,6 +53,7 @@ export function __resetLogInboundMessageEventTestDeps() {
 }
 
 export async function logInboundMessageEvent({
+  record_item_id = null,
   brain_item = null,
   conversation_item_id = null,
   master_owner_id = null,
@@ -64,12 +68,12 @@ export async function logInboundMessageEvent({
   processed_by = "Manual Sender",
   source_app = "External API",
   trigger_name = "textgrid-inbound",
+  processing_metadata = null,
 } = {}) {
   const ai_route = runtimeDeps.getCategoryValue(brain_item, "ai-route", null);
   const normalized_message = String(message_body || "");
 
   const fields = {
-    [EVENT_FIELDS.message_id]: provider_message_id || null,
     [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Inbound",
     [EVENT_FIELDS.event_type]: "Seller Inbound SMS",
@@ -81,6 +85,7 @@ export async function logInboundMessageEvent({
     [EVENT_FIELDS.processed_by]: processed_by,
     [EVENT_FIELDS.source_app]: source_app,
     [EVENT_FIELDS.trigger_name]: trigger_name,
+    [EVENT_FIELDS.ai_output]: "",
     ...(asArrayAppRef(master_owner_id)
       ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
       : {}),
@@ -106,7 +111,24 @@ export async function logInboundMessageEvent({
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
   };
 
-  const created = await runtimeDeps.createMessageEvent(fields);
+  if (processing_metadata) {
+    fields[EVENT_FIELDS.processing_metadata] =
+      typeof processing_metadata === "string"
+        ? processing_metadata
+        : JSON.stringify(processing_metadata);
+  }
+
+  let created;
+  if (record_item_id) {
+    // Update the existing idempotency record with actual event data.
+    // Preserve message-id (idempotency key) so dedup lookup still works.
+    await runtimeDeps.updateMessageEvent(record_item_id, fields);
+    created = { item_id: record_item_id };
+  } else {
+    // Fallback: create a new record (no idempotency record to enrich).
+    fields[EVENT_FIELDS.message_id] = provider_message_id || null;
+    created = await runtimeDeps.createMessageEvent(fields);
+  }
 
   await runtimeDeps.linkMessageEventToBrain({
     brain_item,

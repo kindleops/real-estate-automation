@@ -1519,6 +1519,10 @@ export function createMessageEvent(fields = {}) {
   return createItem(APP_IDS.message_events, fields);
 }
 
+export function updateMessageEvent(item_id, fields = {}, revision = null) {
+  return updateItem(item_id, fields, revision);
+}
+
 export function updateBrain(item_id, fields = {}, revision = null) {
   return updateItem(item_id, fields, revision);
 }
@@ -1732,6 +1736,7 @@ export default {
   getFirstMatchingItem,
   findByField,
   createMessageEvent,
+  updateMessageEvent,
   updateBrain,
   getFieldMap,
   getField,

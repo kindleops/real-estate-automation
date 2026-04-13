@@ -406,11 +406,14 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     }
 
     // ── SEGMENT: message_event_create ─────────────────────────────────────
-    // Log the inbound message event to Podio before classification so the
-    // record exists regardless of routing outcome.
+    // Enrich the idempotency record with actual inbound event data so Podio
+    // contains exactly one Message Events row per inbound SMS with the real
+    // seller message text, correct character count, and proper linkages.
     const inbound_number_item_id = null;
+    let message_event_enriched = false;
     try {
       await runtimeDeps.logInboundMessageEvent({
+        record_item_id: idempotency.record_item_id,
         brain_item,
         conversation_item_id: brain_id,
         master_owner_id,
@@ -425,7 +428,15 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         processed_by: "Manual Sender",
         source_app: "External API",
         trigger_name: "textgrid-inbound",
+        processing_metadata: {
+          provider: "textgrid",
+          provider_message_id: clean(extracted.message_id) || null,
+          inbound_from,
+          inbound_to,
+          idempotency_key,
+        },
       });
+      message_event_enriched = true;
     } catch (err) {
       return buildInboundStepFailure("textgrid_inbound_failed_message_event_create", err);
     }
@@ -764,6 +775,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       scope: "textgrid_inbound",
       key: idempotency_key,
       summary: `Inbound SMS completed ${idempotency_key}`,
+      skip_content_fields: message_event_enriched,
       metadata: {
         provider_message_id: clean(extracted.message_id) || null,
         inbound_from,
@@ -787,6 +799,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       scope: "textgrid_inbound",
       key: idempotency_key,
       error,
+      skip_content_fields: message_event_enriched,
       metadata: {
         provider_message_id: clean(extracted.message_id) || null,
         inbound_from,
