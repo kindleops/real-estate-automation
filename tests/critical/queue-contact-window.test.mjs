@@ -81,21 +81,23 @@ test("resolveContactWindowField: recognized schema option returns field_value an
   assert.equal(result.reason, null);
 });
 
-test("resolveContactWindowField: valid time-range format without schema option is omitted safely", () => {
+test("resolveContactWindowField: valid time-range format passes through compat layer", () => {
+  // Any properly formatted time-range string is accepted via shouldAllowRawCategoryCompatibilityValue
+  // even when the attached schema snapshot does not have a matching option ID.
   const result = resolveContactWindowField("8AM-9AM CT");
 
-  assert.equal(result.omitted, true, "valid time-range format must be omitted when schema has no option");
-  assert.equal(result.field_value, undefined);
-  assert.equal(result.category_option_id, null);
-  assert.equal(result.reason, "formatted_value_missing_option_id");
+  assert.equal(result.omitted, false, "valid time-range format must pass through compat layer");
+  assert.equal(result.field_value, "8AM-9AM CT");
+  assert.equal(result.category_option_id, null, "option_id is null when resolved via compat");
+  assert.equal(result.reason, "compat_raw_category_value");
 });
 
-test("resolveContactWindowField: another real-world seller window without schema option is omitted safely", () => {
+test("resolveContactWindowField: real-world seller window passes through compat layer", () => {
   const result = resolveContactWindowField("12PM-2PM CT");
 
-  assert.equal(result.omitted, true);
-  assert.equal(result.field_value, undefined);
-  assert.equal(result.reason, "formatted_value_missing_option_id");
+  assert.equal(result.omitted, false);
+  assert.equal(result.field_value, "12PM-2PM CT");
+  assert.equal(result.reason, "compat_raw_category_value");
 });
 
 test("resolveContactWindowField: empty / null / undefined contact window is omitted with 'empty' reason", () => {
@@ -108,7 +110,7 @@ test("resolveContactWindowField: empty / null / undefined contact window is omit
 
 // ── buildSendQueueItem integration tests ──────────────────────────────────────
 
-test("buildSendQueueItem omits contact-window when value has no matching schema option", async () => {
+test("buildSendQueueItem writes contact-window for valid time-range via compat layer", async () => {
   let captured_fields = null;
 
   const result = await buildSendQueueItem({
@@ -127,16 +129,12 @@ test("buildSendQueueItem omits contact-window when value has no matching schema 
   });
 
   assert.ok(result.ok, "queue creation must succeed");
-  assert.equal(result.contact_window_written, false, "contact_window_written must be false");
+  assert.equal(result.contact_window_written, true, "contact_window_written must be true via compat");
+  assert.equal(result.contact_window_omit_reason, null);
   assert.equal(
-    result.contact_window_omit_reason,
-    "formatted_value_missing_option_id",
-    "contact-window omit reason must explain the missing category option"
-  );
-  assert.equal(
-    "contact-window" in (captured_fields || {}),
-    false,
-    "contact-window must be omitted from the Podio creation payload"
+    captured_fields?.["contact-window"],
+    "8AM-9AM CT",
+    "contact-window must be present in the payload"
   );
 
   // Core fields must still be present
@@ -174,7 +172,9 @@ test("buildSendQueueItem writes contact-window when the value matches a known sc
   );
 });
 
-test("buildSendQueueItem omits contact-window for 12PM-2PM CT when no schema option exists", async () => {
+test("buildSendQueueItem writes contact-window for 12PM-2PM CT via compat layer", async () => {
+  let captured_fields = null;
+
   const result = await buildSendQueueItem({
     context: makeBaseContext({
       summary: { total_messages_sent: 0, contact_window: "12PM-2PM CT" },
@@ -183,19 +183,19 @@ test("buildSendQueueItem omits contact-window for 12PM-2PM CT when no schema opt
     textgrid_number_item_id: 501,
     scheduled_for_local: "2026-04-04 12:00:00",
     contact_window: "12PM-2PM CT",
-    create_item: async () => ({ item_id: 1003 }),
+    create_item: async (_app_id, fields) => {
+      captured_fields = fields;
+      return { item_id: 1003 };
+    },
     update_item: async () => {},
   });
 
   assert.ok(result.ok);
-  assert.equal(result.contact_window_written, false, "valid time-range must be omitted without a schema option");
-  const has_contact_window_warning = result.warnings.some(
-    (w) => typeof w === "string" && w.includes("contact-window field omitted")
-  );
-  assert.equal(has_contact_window_warning, true, "omit warning must be surfaced for observability");
+  assert.equal(result.contact_window_written, true, "12PM-2PM CT must be written via compat layer");
+  assert.equal(captured_fields?.["contact-window"], "12PM-2PM CT");
 });
 
-test("buildSendQueueItem writing contact-window does not affect scheduling timestamps", async () => {
+test("buildSendQueueItem scheduling timestamps are present alongside compat contact-window", async () => {
   // The scheduled_for_local and scheduled_for_utc fields encode the real
   // send time — they must be present regardless of contact-window outcome.
   let captured_fields = null;
@@ -218,5 +218,5 @@ test("buildSendQueueItem writing contact-window does not affect scheduling times
 
   assert.ok(captured_fields?.["scheduled-for-local"]?.start, "scheduled-for-local must be set");
   assert.ok(captured_fields?.["scheduled-for-utc"]?.start, "scheduled-for-utc must be set");
-  assert.equal("contact-window" in captured_fields, false, "contact-window must be omitted");
+  assert.equal(captured_fields?.["contact-window"], "8AM-9AM CT", "contact-window must be written via compat");
 });

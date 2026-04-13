@@ -281,32 +281,37 @@ test("strict Touch 1 Podio mode prefers English Stage 1 ownership templates and 
   assert.equal(candidates[0]?.source, "podio");
 });
 
-test("strict Touch 1 Podio mode returns no candidates when Podio has no valid Stage 1 template", async () => {
-  const candidates = await loadTemplateCandidates({
-    use_case: "ownership_check",
-    language: "English",
-    strict_touch_one_podio_only: true,
-    remote_fetcher: noRemoteFetch,
-    local_fetcher: makeLocalFetcher([
-      makeLocalTemplate(
-        "local-stage1",
-        "ownership_check",
-        "Stage 1 — Ownership Confirmation",
-        999
-      ),
-    ]),
-    context: {
-      summary: {
-        seller_first_name: "Maria",
-        property_address: "123 Main St",
-      },
-    },
-  });
-
-  assert.deepEqual(
-    candidates,
-    [],
-    "strict Touch 1 Podio mode must not fall back to local templates"
+test("strict Touch 1 Podio mode throws NO_STAGE_1_TEMPLATE_FOUND when Podio has no valid Stage 1 template", async () => {
+  await assert.rejects(
+    () =>
+      loadTemplateCandidates({
+        use_case: "ownership_check",
+        language: "English",
+        strict_touch_one_podio_only: true,
+        remote_fetcher: noRemoteFetch,
+        local_fetcher: makeLocalFetcher([
+          makeLocalTemplate(
+            "local-stage1",
+            "ownership_check",
+            "Stage 1 — Ownership Confirmation",
+            999
+          ),
+        ]),
+        context: {
+          summary: {
+            seller_first_name: "Maria",
+            property_address: "123 Main St",
+          },
+        },
+      }),
+    (err) => {
+      assert.equal(
+        err.code,
+        "NO_STAGE_1_TEMPLATE_FOUND",
+        "must throw NO_STAGE_1_TEMPLATE_FOUND when strict Touch 1 Podio mode finds no valid Podio template"
+      );
+      return true;
+    }
   );
 });
 

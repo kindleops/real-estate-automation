@@ -415,12 +415,21 @@ function resolveContactWindowField(contact_window) {
     return { field_value: raw, category_option_id: option_id, omitted: false, reason: null };
   }
 
-  // Podio rejects raw contact-window strings unless they map to a real category
-  // option id.  Omit the field when the schema cannot resolve the option so queue
-  // creation remains non-blocking.
-  const reason = CONTACT_WINDOW_PATTERN.test(raw)
-    ? "formatted_value_missing_option_id"
-    : "no_matching_category_option_in_schema";
+  // Secondary check: the attached schema snapshot is stale and may be missing options
+  // that exist in the live Podio app.  All 65 Master Owner "Best Contact Window" values
+  // are registered in SEND_QUEUE_CONTACT_WINDOW_COMPAT_VALUES and any properly formatted
+  // time-range string is accepted by the compat layer.  Pass the raw string through so
+  // Podio can resolve it against the live option list.
+  if (shouldAllowRawCategoryCompatibilityValue(APP_IDS.send_queue, QUEUE_FIELDS.contact_window, raw)) {
+    return {
+      field_value: raw,
+      category_option_id: null,
+      omitted: false,
+      reason: "compat_raw_category_value",
+    };
+  }
+
+  const reason = "no_matching_category_option_in_schema";
 
   return {
     field_value: undefined,
@@ -912,6 +921,17 @@ export async function buildSendQueueItem({
       throw buildQueueValidationError("INVALID_STAGE_1_MESSAGE", {
         phrase: message_violation,
         message_text,
+      });
+    }
+
+    // FIX 7: contact_window must resolve to a writable Podio category option.
+    // A field that is omitted means the schema has no matching option for the
+    // resolved window value — queue rows created without a contact_window field
+    // cannot be correctly routed by the queue runner.
+    if (contact_window_field.omitted) {
+      throw buildQueueValidationError("MISSING_CONTACT_WINDOW", {
+        contact_window: resolved_contact_window,
+        omit_reason: contact_window_field.reason,
       });
     }
   }

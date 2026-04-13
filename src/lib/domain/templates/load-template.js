@@ -132,10 +132,13 @@ function filterStrictTouchOneCandidates(
   } = {}
 ) {
   const valid_candidates = [];
+  let use_case_mismatch_count = 0;
+  let stage_mismatch_count = 0;
 
   for (const template of templates) {
     const resolved_use_case = resolveNormalizedTemplateUseCase(template);
     if (resolved_use_case !== "ownership_check") {
+      use_case_mismatch_count += 1;
       logTouchOneTemplateRejection("use_case_mismatch", template, {
         resolved_use_case,
       });
@@ -143,6 +146,7 @@ function filterStrictTouchOneCandidates(
     }
 
     if (!templateHasStageOneMarker(template)) {
+      stage_mismatch_count += 1;
       logTouchOneTemplateRejection("stage_mismatch", template, {
         resolved_use_case,
       });
@@ -152,7 +156,15 @@ function filterStrictTouchOneCandidates(
     valid_candidates.push(template);
   }
 
-  if (!valid_candidates.length) return [];
+  if (!valid_candidates.length) {
+    warn("template.strict_touch_one_filter_empty", {
+      total_input: templates.length,
+      use_case_mismatch_count,
+      stage_mismatch_count,
+      final_candidates: 0,
+    });
+    return [];
+  }
 
   const english_candidates = valid_candidates.filter((template) =>
     safeCategoryEquals(template?.language, preferred_language || "English")
@@ -979,6 +991,7 @@ function buildStrictTouchOnePodioFilterSets({
   for (const stage_variant of stage_one_variants) {
     filters.push(
       buildFilterPayload({
+        use_case: "ownership_check",
         variant_group: stage_variant,
         language: requested_language,
         active: "Yes",
@@ -986,6 +999,7 @@ function buildStrictTouchOnePodioFilterSets({
     );
     filters.push(
       buildFilterPayload({
+        use_case: "ownership_check",
         variant_group: stage_variant,
         active: "Yes",
       })
@@ -994,12 +1008,14 @@ function buildStrictTouchOnePodioFilterSets({
 
   filters.push(
     buildFilterPayload({
+      use_case: "ownership_check",
       language: requested_language,
       active: "Yes",
     })
   );
   filters.push(
     buildFilterPayload({
+      use_case: "ownership_check",
       active: "Yes",
     })
   );
@@ -1238,8 +1254,7 @@ export async function loadTemplateCandidates({
   }
 
   if (strict_touch_one_podio_only) {
-    warn("template.touch_one_template_missing", {
-      reason: "template_missing",
+    const diagnostics = {
       requested_language,
       use_case: use_case || null,
       variant_group: variant_group || null,
@@ -1248,7 +1263,15 @@ export async function loadTemplateCandidates({
       selection_diagnostics: summarizeTemplateResolutionDiagnostics(
         resolution_diagnostics
       ),
+    };
+    warn("template.touch_one_template_missing", {
+      reason: "NO_STAGE_1_TEMPLATE_FOUND",
+      ...diagnostics,
     });
+    const err = new Error("NO_STAGE_1_TEMPLATE_FOUND");
+    err.code = "NO_STAGE_1_TEMPLATE_FOUND";
+    err.diagnostics = diagnostics;
+    throw err;
   }
 
   return [];

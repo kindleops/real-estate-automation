@@ -75,10 +75,9 @@ test("ai conversation brain linked-message-events accepts message event app refs
 
 test("queue builder writes contact-window when value matches time-range format (compat bypass)", async () => {
   // "12PM-2PM CT" is a valid seller contact window from Master Owners.  It has no
-  // matching option in the Send Queue schema (only "9AM-8PM CT", id=1 is an option),
-  // but isValidSendQueueContactWindow in schema.js recognises the time-range format
-  // and allows the raw string through via shouldAllowRawCategoryCompatibility.
-  // The field IS included in the payload — no 400 error and no unnecessary data loss.
+  // matching option in the stale attached schema (only "9AM-8PM CT", id=1 is present),
+  // but shouldAllowRawCategoryCompatibilityValue recognises both the compat set and
+  // any valid time-range format, allowing the raw string through to Podio.
   let created_fields = null;
 
   const result = await buildSendQueueItem({
@@ -134,9 +133,9 @@ test("queue builder writes contact-window when value matches time-range format (
   assert.equal(result.queue_item_id, 123, "queue item must be created successfully");
   assert.equal(
     "contact-window" in (created_fields || {}),
-    false,
-    "contact-window must be omitted when the schema has no matching category option"
+    true,
+    "contact-window must be written via compat layer"
   );
-  assert.equal(result.contact_window_written, false);
-  assert.equal(result.contact_window_omit_reason, "formatted_value_missing_option_id");
+  assert.equal(result.contact_window_written, true);
+  assert.equal(created_fields?.["contact-window"], "12PM-2PM CT");
 });

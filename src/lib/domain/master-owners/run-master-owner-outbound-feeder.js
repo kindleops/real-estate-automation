@@ -3322,14 +3322,20 @@ async function evaluateOwner({
     render_result?.invalid_placeholders?.length ||
     render_result?.missing_required_placeholders?.length
   ) {
+    warn("master_owner_feeder.first_touch_placeholder_validation_failed", {
+      master_owner_id,
+      detected_first_touch: template_stage_lock,
+      property_id: property_item?.item_id ?? null,
+      template_id: selected_template.item_id,
+      use_case: selected_template.use_case ?? null,
+      variant_group: selected_template.variant_group ?? null,
+      invalid_placeholders: render_result?.invalid_placeholders || [],
+      missing_required_placeholders: render_result?.missing_required_placeholders || [],
+    });
     if (template_stage_lock) {
-      warn("master_owner_feeder.first_touch_placeholder_validation_failed", {
+      throw buildFeederValidationError("MESSAGE_RENDER_FAILED", {
         master_owner_id,
-        detected_first_touch: true,
-        property_id: property_item?.item_id ?? null,
         template_id: selected_template.item_id,
-        use_case: selected_template.use_case ?? null,
-        variant_group: selected_template.variant_group ?? null,
         invalid_placeholders: render_result?.invalid_placeholders || [],
         missing_required_placeholders: render_result?.missing_required_placeholders || [],
       });
@@ -3352,6 +3358,13 @@ async function evaluateOwner({
   const rendered_message_text = clean(render_result?.rendered_text || "");
 
   if (!rendered_message_text) {
+    if (template_stage_lock) {
+      throw buildFeederValidationError("MESSAGE_RENDER_FAILED", {
+        master_owner_id,
+        template_id: selected_template.item_id,
+        rendered_message_text: null,
+      });
+    }
     return {
       ok: false,
       skipped: true,
@@ -3385,6 +3398,24 @@ async function evaluateOwner({
     timezone_label: resolved_timezone,
     contact_window: resolved_contact_window,
     distribution_key: rotation_key,
+  });
+
+  // FIX 8: Per-owner pre-write audit log with all required Touch-1 context fields.
+  // Emitted before every queue write so production logs can trace exactly:
+  //   - which template was selected and from which source
+  //   - what the rendered message looks like (preview)
+  //   - what contact window and schedule were resolved
+  // failure_reason is null here (non-null paths throw or return before this point).
+  log.info("master_owner_feeder.touch_one_pre_write_audit", {
+    owner_id: master_owner_id,
+    touch_number,
+    template_id: selected_template.item_id,
+    template_source: selected_template.source || null,
+    message_preview: rendered_message_text.slice(0, 60),
+    contact_window: resolved_contact_window || null,
+    scheduled_local: schedule.scheduled_for_local || null,
+    scheduled_utc: schedule.scheduled_for_utc || null,
+    failure_reason: null,
   });
 
   const plan = {
