@@ -903,6 +903,21 @@ export async function buildSendQueueItem({
   }
 
   if (strict_cold_outbound) {
+    // FIX 5: Hard-assert ALL required components before queue write.
+    // Touch 1 messages must never be written with partial data.
+    if (!template_id) {
+      throw buildQueueValidationError("NO_TEMPLATE", {
+        template_id,
+      });
+    }
+
+    if (!message_text || message_text.length < 10) {
+      throw buildQueueValidationError("NO_MESSAGE", {
+        message_text: message_text || null,
+        reason: !message_text ? "empty" : "too_short",
+      });
+    }
+
     const message_violation = detectTouchOneMessageViolation(message_text);
 
     if (normalized_message_type !== "Cold Outbound") {

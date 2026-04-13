@@ -1404,17 +1404,30 @@ export async function processSendQueueItem(queue_item_id) {
       await failQueueItem(queue_item_id, {
         failed_reason: "Network Error",
       });
+    } else if (queue_validation.reason === "invalid_touch_one_use_case") {
+      // FIX 10: Touch 1 rows with a wrong use_case are permanently blocked.
+      warn("queue.process_blocked_invalid_touch_one_use_case", {
+        queue_item_id,
+        use_case_template: queue_validation.use_case_template,
+        touch_number: queue_validation.touch_number,
+      });
+      await failQueueItem(queue_item_id, {
+        queue_status: "Blocked",
+        failed_reason: "Content Filter",
+      });
     }
 
     return {
       ok: false,
       reason: queue_validation.reason,
       queue_status:
-        queue_validation.reason === "junk_message_body" ? "Blocked" : "Failed",
+        queue_validation.reason === "junk_message_body" || queue_validation.reason === "invalid_touch_one_use_case"
+          ? "Blocked"
+          : "Failed",
       failed_reason:
         queue_validation.reason === "missing_phone_item"
           ? "Invalid Number"
-          : queue_validation.reason === "junk_message_body"
+          : queue_validation.reason === "junk_message_body" || queue_validation.reason === "invalid_touch_one_use_case"
             ? "Content Filter"
             : "Network Error",
       claimed: false,

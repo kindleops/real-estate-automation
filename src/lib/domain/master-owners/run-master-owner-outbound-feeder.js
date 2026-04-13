@@ -3332,7 +3332,11 @@ async function evaluateOwner({
       invalid_placeholders: render_result?.invalid_placeholders || [],
       missing_required_placeholders: render_result?.missing_required_placeholders || [],
     });
-    if (template_stage_lock) {
+    // FIX 4: Touch 1 uses safe-mode rendering — missing placeholders are
+    // replaced with empty strings and the message is accepted as long as the
+    // final rendered text meets the minimum length check below.  Non-Touch-1
+    // paths still hard-fail on placeholder issues.
+    if (template_stage_lock && !strict_touch_one_mode) {
       throw buildFeederValidationError("MESSAGE_RENDER_FAILED", {
         master_owner_id,
         template_id: selected_template.item_id,
@@ -3340,29 +3344,35 @@ async function evaluateOwner({
         missing_required_placeholders: render_result?.missing_required_placeholders || [],
       });
     }
-    return {
-      ok: false,
-      skipped: true,
-      reason: "template_placeholder_validation_failed",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      property: summarizeProperty(property_item, owner_item),
-      first_touch: template_stage_lock,
-      template_id: selected_template.item_id,
-      invalid_placeholders: render_result?.invalid_placeholders || [],
-      missing_required_placeholders:
-        render_result?.missing_required_placeholders || [],
-    };
+    if (!template_stage_lock) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "template_placeholder_validation_failed",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        property: summarizeProperty(property_item, owner_item),
+        first_touch: template_stage_lock,
+        template_id: selected_template.item_id,
+        invalid_placeholders: render_result?.invalid_placeholders || [],
+        missing_required_placeholders:
+          render_result?.missing_required_placeholders || [],
+      };
+    }
   }
 
   const rendered_message_text = clean(render_result?.rendered_text || "");
 
-  if (!rendered_message_text) {
+  // FIX 4: Touch 1 enforces a minimum message length — empty or trivially short
+  // messages (< 10 characters) are rejected outright.  This catches templates
+  // that reduced to whitespace after placeholder removal.
+  if (!rendered_message_text || (strict_touch_one_mode && rendered_message_text.length < 10)) {
     if (template_stage_lock) {
       throw buildFeederValidationError("MESSAGE_RENDER_FAILED", {
         master_owner_id,
         template_id: selected_template.item_id,
-        rendered_message_text: null,
+        rendered_message_text: rendered_message_text || null,
+        reason: !rendered_message_text ? "empty" : "too_short",
       });
     }
     return {

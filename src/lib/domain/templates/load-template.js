@@ -840,10 +840,17 @@ async function collectBucketCandidates({
   all_candidates = dedupeTemplates(removeEmptyTemplates(all_candidates));
   all_candidates = applySpamGuard(all_candidates);
   all_candidates = applyCooldownFilter(all_candidates, recently_used_template_ids);
-  all_candidates = filterRenderableTemplates(all_candidates, {
-    context,
-    template_render_overrides,
-  });
+
+  // FIX 1: Touch 1 templates MUST NOT be dropped due to missing placeholders.
+  // Stage 1 ownership_check templates are sent with safe rendering (missing
+  // values replaced with empty strings) so placeholder availability must not
+  // gate template selection.  Non-Touch-1 paths still filter by renderability.
+  if (!strict_touch_one_podio_only) {
+    all_candidates = filterRenderableTemplates(all_candidates, {
+      context,
+      template_render_overrides,
+    });
+  }
 
   if (strict_touch_one_podio_only) {
     all_candidates = filterStrictTouchOneCandidates(all_candidates, {

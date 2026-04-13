@@ -32,6 +32,8 @@ export function validateSendQueueItem(queue_item = null) {
   const message_text = getTextValue(queue_item, "message-text", "");
   const retry_count = Number(getNumberValue(queue_item, "retry-count", 0) || 0);
   const max_retries = Number(getNumberValue(queue_item, "max-retries", 3) || 3);
+  const touch_number = Number(getNumberValue(queue_item, "touch-number", 0) || 0);
+  const use_case_template = getCategoryValue(queue_item, "use-case-template", null);
 
   if (queue_status && isTerminalStatus(queue_status)) {
     return {
@@ -92,6 +94,22 @@ export function validateSendQueueItem(queue_item = null) {
       retry_count,
       max_retries,
     };
+  }
+
+  // FIX 10: Touch 1 send-time validation — the queue runner must never deliver
+  // a Touch 1 message that was somehow written with a wrong use case.  This is
+  // a safety net for rows that were created before the pipeline lock was active.
+  if (touch_number === 1) {
+    const normalized_use_case = lower(use_case_template);
+    if (normalized_use_case && normalized_use_case !== "ownership_check") {
+      return {
+        ok: false,
+        reason: "invalid_touch_one_use_case",
+        queue_status,
+        use_case_template,
+        touch_number,
+      };
+    }
   }
 
   return {
