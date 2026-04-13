@@ -32,6 +32,46 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function normalizeFieldLabel(value) {
+  return clean(value)
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function firstPresentCategoryByLabel(item, labels = [], fallback = null) {
+  const wanted = new Set(labels.map((label) => normalizeFieldLabel(label)).filter(Boolean));
+  if (!wanted.size) return fallback;
+
+  for (const field of safeArray(item?.fields)) {
+    const candidates = [
+      field?.label,
+      field?.config?.label,
+      field?.field?.label,
+    ];
+    const matches = candidates.some((value) => wanted.has(normalizeFieldLabel(value)));
+    if (!matches) continue;
+
+    const value = safeArray(field?.values)
+      .map((entry) => entry?.value?.text ?? (typeof entry?.value === "string" ? entry.value : null))
+      .find((entry) => clean(entry));
+
+    if (clean(value)) return value;
+  }
+
+  return fallback;
+}
+
+function readTemplateCategory(item, external_ids = [], labels = [], fallback = null) {
+  return firstPresentCategory(
+    item,
+    external_ids,
+    firstPresentCategoryByLabel(item, labels, fallback)
+  );
+}
+
 function deriveTemplateUseCase(item, variant_group = null) {
   const use_case_label = getCategoryValue(item, "use-case-2", null);
   const canonical_routing_slug = getCategoryValue(item, "use-case", null);
@@ -52,9 +92,20 @@ function deriveTemplateUseCase(item, variant_group = null) {
 
 export function normalizeTemplateItem(item) {
   const fields = Array.isArray(item?.fields) ? item.fields : [];
-  const variant_group = firstPresentCategory(item, ["stage", "stage-label"], null);
+  const variant_group = readTemplateCategory(
+    item,
+    ["stage", "stage-label"],
+    ["Variant Group", "Stage Label"],
+    null
+  );
   const use_case_label = getCategoryValue(item, "use-case-2", null);
   const canonical_routing_slug = getCategoryValue(item, "use-case", null);
+  const property_type_scope = readTemplateCategory(
+    item,
+    ["property-type-scope", "property-type"],
+    ["Property Type Scope", "Property Type"],
+    null
+  );
 
   return {
     item_id: item?.item_id || null,
@@ -67,17 +118,29 @@ export function normalizeTemplateItem(item) {
     canonical_routing_slug,
     variant_group,
     stage_code: getCategoryValue(item, "stage-code", null),
-    stage_label: getCategoryValue(item, "stage-label", null),
+    stage_label: readTemplateCategory(item, ["stage-label"], ["Stage Label"], null),
     tone: getCategoryValue(item, "tone", null),
     gender_variant: getCategoryValue(item, "gender-variant", null),
     language: getCategoryValue(item, "language", "English"),
-    sequence_position: getCategoryValue(item, "sequence-position", null),
+    sequence_position: readTemplateCategory(
+      item,
+      ["sequence-position"],
+      ["Sequence Position"],
+      null
+    ),
     paired_with_agent_type: getCategoryValue(item, "paired-with-agent-type", null),
     text: getTextValue(item, "text", ""),
     english_translation: getTextValue(item, "english-translation", ""),
     active: getCategoryValue(item, "active", "No"),
+    is_first_touch: readTemplateCategory(
+      item,
+      ["is-first-touch", "first-touch"],
+      ["Is First Touch", "First Touch"],
+      null
+    ),
     is_ownership_check: getCategoryValue(item, "is-ownership-check", "No"),
-    category_primary: getCategoryValue(item, "property-type", null),
+    property_type_scope,
+    category_primary: property_type_scope,
     category_secondary: firstPresentCategory(item, ["category-2", "category"], null),
     personalization_tags: getCategoryValues(item, "personalization-tags", []),
     deliverability_score: getNumberValue(item, "deliverability-score", 0),

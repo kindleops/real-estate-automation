@@ -63,6 +63,7 @@ import {
   getPodioRetryAfterSeconds,
   getPhoneValue,
   isPodioRateLimitError,
+  safeCategoryEquals,
   getTextValue,
   normalizeLanguage,
 } from "@/lib/providers/podio.js";
@@ -996,20 +997,22 @@ function buildStrictTouchOneRoute(route = null) {
 function isValidTouchOneTemplate(template = null) {
   if (!template) return false;
 
+  const resolved_is_first_touch =
+    clean(template?.is_first_touch) ||
+    clean(getCategoryValue(template?.raw, "is-first-touch", null)) ||
+    clean(getCategoryValue(template?.raw, "first-touch", null)) ||
+    null;
   const resolved_use_case = normalizeSellerFlowUseCase(
     clean(template?.use_case_label) ||
       clean(template?.use_case) ||
       clean(template?.canonical_routing_slug),
     clean(template?.variant_group) || clean(template?.stage_label) || null
   );
-  const stage_code = clean(template?.stage_code).toUpperCase();
-  const stage_markers = [template?.variant_group, template?.stage_label].some((value) =>
-    lower(value).includes("stage 1")
-  );
 
   return (
+    safeCategoryEquals(template?.active, "Yes") &&
     resolved_use_case === TOUCH_ONE_USE_CASE &&
-    (stage_code === "S1" || stage_markers)
+    safeCategoryEquals(resolved_is_first_touch, "Yes")
   );
 }
 
@@ -3249,10 +3252,10 @@ async function evaluateOwner({
   });
 
   // ── FINAL FIRST-TOUCH TEMPLATE GUARD ──────────────────────────────────────
-  // Safety net: allowed_variant_groups in loadTemplate should prevent later-stage
-  // templates from reaching here.  If one slips through anyway (e.g. a template
-  // with a forbidden use_case but no variant_group), reject it and treat the
-  // result as "no valid first-touch template available" rather than as an error.
+  // Safety net: Touch 1 now trusts the real Podio truth only — active +
+  // ownership_check + Is First Touch. If a selected template somehow violates
+  // that contract, reject it here and treat the result as "no valid first-touch
+  // template available" rather than progressing with a polluted selection.
   if (template_stage_lock && !isValidTouchOneTemplate(selected_template)) {
     const tmpl_use_case = selected_template.use_case || null;
     const tmpl_variant = selected_template.variant_group || null;

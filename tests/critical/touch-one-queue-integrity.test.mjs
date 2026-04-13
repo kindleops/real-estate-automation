@@ -83,10 +83,13 @@ function makeLocalTemplate(item_id, opts = {}) {
     use_case: opts.use_case ?? "ownership_check",
     variant_group: opts.variant_group ?? "Stage 1 — Ownership Confirmation",
     stage_code: opts.stage_code ?? "S1",
+    stage_label: opts.stage_label ?? "Ownership Confirmation",
     tone: "Warm",
     language: "English",
     sequence_position: "1st Touch",
     paired_with_agent_type: "Warm Professional",
+    is_first_touch: opts.is_first_touch ?? "Yes",
+    property_type_scope: opts.property_type_scope ?? "Any Residential",
     text: opts.text ?? "Hi there, checking on your property. Do you still own it?",
     active: "Yes",
     deliverability_score: 80,
@@ -131,15 +134,15 @@ test("loadTemplateCandidates throws NO_STAGE_1_TEMPLATE_FOUND when strict_touch_
   );
 });
 
-test("loadTemplateCandidates throws NO_STAGE_1_TEMPLATE_FOUND when Podio returns templates but none pass Stage-1 filters", async () => {
+test("loadTemplateCandidates throws NO_STAGE_1_TEMPLATE_FOUND when Podio returns templates but none pass Touch 1 truth filters", async () => {
   const wrong_use_case_template = makeLocalTemplate("podio-wrong-uc");
   wrong_use_case_template.use_case = "asking_price";
   wrong_use_case_template.source = "podio";
 
-  const wrong_stage_template = makeLocalTemplate("podio-wrong-stage");
-  wrong_stage_template.stage_code = "S3";
-  wrong_stage_template.variant_group = "Stage 3 — Asking Price";
-  wrong_stage_template.source = "podio";
+  const not_first_touch_template = makeLocalTemplate("podio-not-first-touch", {
+    is_first_touch: "No",
+  });
+  not_first_touch_template.source = "podio";
 
   await assert.rejects(
     () =>
@@ -147,7 +150,7 @@ test("loadTemplateCandidates throws NO_STAGE_1_TEMPLATE_FOUND when Podio returns
         use_case: "ownership_check",
         language: "English",
         strict_touch_one_podio_only: true,
-        remote_fetcher: async () => [wrong_use_case_template, wrong_stage_template],
+        remote_fetcher: async () => [wrong_use_case_template, not_first_touch_template],
         local_fetcher: makeLocalFetcher([]),
       }),
     (err) => {

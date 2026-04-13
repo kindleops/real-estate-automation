@@ -420,6 +420,14 @@ test("template normalization reads live Communications Engine fields", () => {
         values: [{ value: { text: "Ownership Confirmation" } }],
       },
       {
+        external_id: "property-type",
+        values: [{ value: { text: "Any Residential" } }],
+      },
+      {
+        external_id: "is-first-touch",
+        values: [{ value: { text: "Yes" } }],
+      },
+      {
         external_id: "stage-code",
         values: [{ value: { text: "ownership_confirmation" } }],
       },
@@ -445,6 +453,8 @@ test("template normalization reads live Communications Engine fields", () => {
   assert.equal(normalized.variant_group, "Stage 1 — Ownership Confirmation");
   assert.equal(normalized.stage_label, "Ownership Confirmation");
   assert.equal(normalized.stage_code, "ownership_confirmation");
+  assert.equal(normalized.property_type_scope, "Any Residential");
+  assert.equal(normalized.is_first_touch, "Yes");
   assert.equal(normalized.category_secondary, "Outreach");
 });
 

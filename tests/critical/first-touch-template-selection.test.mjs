@@ -42,6 +42,7 @@ function makeLocalTemplate(item_id, use_case, variant_group, score_boost = 0) {
     item_id,
     use_case,
     variant_group,
+    stage_label: variant_group ? "Ownership Confirmation" : null,
     tone: "Warm",
     gender_variant: "Neutral",
     language: "English",
@@ -50,8 +51,10 @@ function makeLocalTemplate(item_id, use_case, variant_group, score_boost = 0) {
     text: `Template text for ${item_id}`,
     english_translation: `Template text for ${item_id}`,
     active: "Yes",
+    is_first_touch: "Yes",
     is_ownership_check: "No",
-    category_primary: "Residential",
+    property_type_scope: "Any Residential",
+    category_primary: "Any Residential",
     category_secondary: "Outreach",
     personalization_tags: [],
     deliverability_score: 92 + score_boost,
@@ -161,7 +164,7 @@ test("allowed_variant_groups: template with null variant_group is always include
   assert.equal(returned_ids.includes("t-bad"), false, "Stage-6 variant must be excluded");
 });
 
-test("strict first-touch filtering requires exact ownership_check and explicit Stage 1 variant", async () => {
+test("strict first-touch filtering requires ownership_check and Is First Touch, not a Stage 1 label", async () => {
   const correct_stage1 = makeLocalTemplate(
     "t-correct",
     "ownership_check",
@@ -178,45 +181,53 @@ test("strict first-touch filtering requires exact ownership_check and explicit S
     "t-untagged",
     "ownership_check",
     null,
-    50
+    0
   );
+  const not_first_touch = {
+    ...makeLocalTemplate(
+      "t-not-first-touch",
+      "ownership_check",
+      "Ownership Confirmation",
+      60
+    ),
+    is_first_touch: "No",
+  };
 
   const candidates = await loadTemplateCandidates({
     use_case: "ownership_check",
     language: "English",
-    remote_fetcher: noRemoteFetch,
-    local_fetcher: makeLocalFetcher([
+    strict_touch_one_podio_only: true,
+    remote_fetcher: async () => [
       correct_stage1,
       wrong_use_case,
       untagged_variant,
-    ]),
-    allowed_variant_groups: FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
-    required_use_cases: new Set(["ownership_check"]),
-    required_variant_groups: FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS,
-    require_explicit_variant_group: true,
+      not_first_touch,
+    ],
+    local_fetcher: makeLocalFetcher([]),
   });
 
   const returned_ids = candidates.map((c) => c.item_id);
   assert.deepEqual(
     returned_ids,
-    ["t-correct"],
-    "strict first-touch filtering must keep only explicit Stage 1 ownership_check templates"
+    ["t-correct", "t-untagged"],
+    "strict first-touch filtering must keep active ownership_check first-touch templates even when stage metadata is absent"
   );
 });
 
-test("strict Touch 1 Podio mode prefers English Stage 1 ownership templates and blocks local fallback", async () => {
+test("strict Touch 1 Podio mode ranks by language, then Any Residential, then 1st Touch and blocks local fallback", async () => {
   const english_stage1 = {
     item_id: 9101,
     use_case: "ownership_check",
     use_case_label: "ownership_check",
     canonical_routing_slug: "ownership_check__none__still_own__intro_plain__plain__english",
-    variant_group: "Stage 1 — Ownership Confirmation",
+    variant_group: "Legacy Ownership Stage",
     stage_label: "Ownership Confirmation",
-    stage_code: "S1",
     tone: "Warm",
     language: "English",
     sequence_position: "1st Touch",
     paired_with_agent_type: "Any",
+    is_first_touch: "Yes",
+    property_type_scope: "Any Residential",
     text: "Hi {{first_name}}, checking on {{street_address}}. Do you still own it?",
     active: "Yes",
     deliverability_score: 60,
@@ -232,19 +243,22 @@ test("strict Touch 1 Podio mode prefers English Stage 1 ownership templates and 
     language: "Spanish",
     deliverability_score: 99,
   };
-  const wrong_stage = {
+  const english_lower_scope = {
     ...english_stage1,
     item_id: 9103,
-    stage_code: "S3",
-    variant_group: "Stage 3 — Asking Price",
-    stage_label: "Asking Price",
+    property_type_scope: "Single Family",
+    deliverability_score: 95,
   };
-  const wrong_use_case = {
+  const english_wrong_sequence = {
     ...english_stage1,
     item_id: 9104,
-    use_case: "asking_price_follow_up",
-    use_case_label: "asking_price_follow_up",
-    canonical_routing_slug: "asking_price_follow_up__seller_named_price",
+    sequence_position: "V1",
+    deliverability_score: 98,
+  };
+  const not_first_touch = {
+    ...english_stage1,
+    item_id: 9105,
+    is_first_touch: "No",
   };
 
   const candidates = await loadTemplateCandidates({
@@ -253,8 +267,9 @@ test("strict Touch 1 Podio mode prefers English Stage 1 ownership templates and 
     strict_touch_one_podio_only: true,
     remote_fetcher: async () => [
       spanish_stage1,
-      wrong_stage,
-      wrong_use_case,
+      english_lower_scope,
+      english_wrong_sequence,
+      not_first_touch,
       english_stage1,
     ],
     local_fetcher: makeLocalFetcher([
@@ -275,10 +290,73 @@ test("strict Touch 1 Podio mode prefers English Stage 1 ownership templates and 
 
   assert.deepEqual(
     candidates.map((candidate) => candidate.item_id),
-    [9101],
-    "strict Touch 1 Podio mode must keep only the English Stage 1 ownership template"
+    [9101, 9104, 9103, 9102],
+    "strict Touch 1 Podio mode must rank valid templates by language, Any Residential, then 1st Touch"
   );
   assert.equal(candidates[0]?.source, "podio");
+});
+
+test("strict Touch 1 Podio mode treats stage label as informational when the real hard filters pass", async () => {
+  const informational_stage = {
+    item_id: 9201,
+    use_case: "ownership_check",
+    use_case_label: "ownership_check",
+    canonical_routing_slug: "ownership_check__ownership_confirmation",
+    variant_group: "Legacy Ownership Stage",
+    stage_label: "Ownership Confirmation",
+    tone: "Warm",
+    language: "English",
+    sequence_position: "1st Touch",
+    paired_with_agent_type: "Warm Professional",
+    is_first_touch: "Yes",
+    property_type_scope: "Any Residential",
+    text: "Hi {{seller_first_name}}, checking on {{property_address}}. Do you still own it?",
+    active: "Yes",
+    deliverability_score: 70,
+    spam_risk: 0,
+    historical_reply_rate: 0,
+    total_sends: 0,
+    total_replies: 0,
+    total_conversations: 0,
+  };
+
+  const candidates = await loadTemplateCandidates({
+    use_case: "ownership_check",
+    language: "English",
+    strict_touch_one_podio_only: true,
+    remote_fetcher: async () => [informational_stage],
+    local_fetcher: makeLocalFetcher([]),
+  });
+
+  assert.equal(candidates[0]?.item_id, 9201);
+});
+
+test("strict Touch 1 Podio mode rejects explicitly multifamily-only scope for a residential lead", async () => {
+  const incompatible_scope = {
+    ...makeLocalTemplate("podio-duplex", "ownership_check", "Ownership Confirmation", 40),
+    source: "podio",
+    property_type_scope: "Duplex",
+  };
+  const valid_scope = {
+    ...makeLocalTemplate("podio-any-res", "ownership_check", "Ownership Confirmation", 10),
+    source: "podio",
+    property_type_scope: "Any Residential",
+  };
+
+  const candidates = await loadTemplateCandidates({
+    category: "Residential",
+    use_case: "ownership_check",
+    language: "English",
+    strict_touch_one_podio_only: true,
+    remote_fetcher: async () => [incompatible_scope, valid_scope],
+    local_fetcher: makeLocalFetcher([]),
+  });
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.item_id),
+    ["podio-any-res"],
+    "single-family/residential Touch 1 should reject clearly multifamily-only template scopes"
+  );
 });
 
 test("strict Touch 1 Podio mode throws NO_STAGE_1_TEMPLATE_FOUND when Podio has no valid Stage 1 template", async () => {
