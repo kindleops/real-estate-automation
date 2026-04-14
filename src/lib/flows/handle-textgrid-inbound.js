@@ -345,6 +345,26 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
 
   // From here the idempotency record exists; the outer catch calls
   // failIdempotentProcessing if anything escapes all inner catches.
+  let message_event_enriched = false;
+
+  async function failStepAndReturn(stepError, err) {
+    try {
+      await runtimeDeps.failIdempotentProcessing({
+        record_item_id: idempotency.record_item_id,
+        scope: "textgrid_inbound",
+        key: idempotency_key,
+        error: err,
+        skip_content_fields: message_event_enriched,
+        metadata: {
+          provider_message_id: clean(extracted.message_id) || null,
+          inbound_from,
+          inbound_to,
+        },
+      });
+    } catch (_) { /* best-effort */ }
+    return buildInboundStepFailure(stepError, err);
+  }
+
   try {
     // ── SEGMENT: brain_lookup ───────────────────────────────────────────────
     let context;
@@ -354,7 +374,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         create_brain_if_missing: false,
       });
     } catch (err) {
-      return buildInboundStepFailure("textgrid_inbound_failed_brain_lookup", err);
+      return failStepAndReturn("textgrid_inbound_failed_brain_lookup", err);
     }
 
     if (!context?.found) {
@@ -410,7 +430,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // contains exactly one Message Events row per inbound SMS with the real
     // seller message text, correct character count, and proper linkages.
     const inbound_number_item_id = null;
-    let message_event_enriched = false;
     try {
       await runtimeDeps.logInboundMessageEvent({
         record_item_id: idempotency.record_item_id,
@@ -431,7 +450,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       });
       message_event_enriched = true;
     } catch (err) {
-      return buildInboundStepFailure("textgrid_inbound_failed_message_event_create", err);
+      return failStepAndReturn("textgrid_inbound_failed_message_event_create", err);
     }
 
     if (inbound_debug_stage === "after_message_event_create") {
@@ -493,7 +512,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         signals,
       });
     } catch (err) {
-      return buildInboundStepFailure("textgrid_inbound_failed_conversation_resolution", err);
+      return failStepAndReturn("textgrid_inbound_failed_conversation_resolution", err);
     }
 
     if (inbound_debug_stage === "after_conversation_resolution") {
@@ -519,7 +538,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         });
       }
     } catch (err) {
-      return buildInboundStepFailure("textgrid_inbound_failed_prospect_resolution", err);
+      return failStepAndReturn("textgrid_inbound_failed_prospect_resolution", err);
     }
 
     if (inbound_debug_stage === "after_prospect_resolution") {
@@ -536,7 +555,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         property_id,
       });
     } catch (err) {
-      return buildInboundStepFailure("textgrid_inbound_failed_market_resolution", err);
+      return failStepAndReturn("textgrid_inbound_failed_market_resolution", err);
     }
 
     if (inbound_debug_stage === "after_market_resolution") {
@@ -701,7 +720,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
       });
     } catch (err) {
-      return buildInboundStepFailure("textgrid_inbound_failed_podio_write", err);
+      return failStepAndReturn("textgrid_inbound_failed_podio_write", err);
     }
 
     if (inbound_debug_stage === "after_podio_write") {

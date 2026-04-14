@@ -30,7 +30,8 @@ export async function updateMessageEvent(item_id, fields = {}, revision = null) 
 }
 
 export async function findMessageEvents(filters = {}, limit = 30, offset = 0, options = {}) {
-  return filterAppItems(APP_ID, filters, { limit, offset, ...(options || {}) });
+  const res = await filterAppItems(APP_ID, filters, { limit, offset, ...(options || {}) });
+  return res?.items ?? [];
 }
 
 export async function findMessageEventByMessageId(message_id) {

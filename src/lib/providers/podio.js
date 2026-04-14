@@ -1352,7 +1352,11 @@ export async function createItem(app_id, fields) {
     ? normalizePodioFieldMap(app_id, fields)
     : fields;
 
-  return podioRequest("post", `/item/app/${app_id}/`, { fields: normalized_fields });
+  const result = await podioRequest("post", `/item/app/${app_id}/`, { fields: normalized_fields });
+  if (result?.item_id) {
+    _item_app_id_cache.set(String(result.item_id), Number(app_id));
+  }
+  return result;
 }
 
 async function resolveItemAppId(item_id) {
