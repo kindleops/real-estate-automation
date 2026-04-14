@@ -69,6 +69,7 @@ const MESSAGE_EVENT_AI_ROUTE_COMPAT_VALUES = new Set([
   "offer interest",
   "price discovery",
   "condition discovery",
+  "offer positioning",
   "negotiation",
   "contract push",
   "dead lead handling",

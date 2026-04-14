@@ -1,26 +1,30 @@
 // ─── queue-outbound-message.js ───────────────────────────────────────────
+import APP_IDS from "@/lib/config/app-ids.js";
 import { loadContext } from "@/lib/domain/context/load-context.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
-import { loadTemplate } from "@/lib/domain/templates/load-template.js";
-import { renderTemplate } from "@/lib/domain/templates/render-template.js";
-import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
-import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
-import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
-import {
-  resolveQueueSchedule,
-  resolveSchedulingContactWindow,
-} from "@/lib/domain/queue/queue-schedule.js";
 import { chooseTextgridNumber } from "@/lib/domain/routing/choose-textgrid-number.js";
 import {
   getCategoryValue,
   getFirstAppReferenceId,
   getNumberValue,
   getDateValue,
+  getTextValue,
   normalizeUsPhone10,
 } from "@/lib/providers/podio.js";
 import { findQueueItems } from "@/lib/podio/queries/find-queue-items.js";
 import { info, warn } from "@/lib/logging/logger.js";
+
+// ── New SMS engine modules ───────────────────────────────────────────────
+import { mapNextAction, ACTIONS } from "@/lib/sms/flow_map.js";
+import { resolveTemplate } from "@/lib/sms/template_resolver.js";
+import { personalizeTemplate } from "@/lib/sms/personalize_template.js";
+import { computeScheduledSend } from "@/lib/sms/latency.js";
+import { queueMessage as smsQueueMessage } from "@/lib/sms/queue_message.js";
+import { normalizeAgentStyleFit } from "@/lib/sms/agent_style.js";
+import { normalizeLanguage } from "@/lib/sms/language_aliases.js";
+import { resolvePropertyTypeScope } from "@/lib/sms/property_scope.js";
+import { resolveDealStrategy } from "@/lib/sms/deal_strategy.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -312,9 +316,11 @@ export async function queueOutboundMessage({
     loadContextImpl = loadContext,
     classifyImpl = classify,
     resolveRouteImpl = resolveRoute,
-    loadTemplateImpl = loadTemplate,
-    renderTemplateImpl = renderTemplate,
-    buildSendQueueItemImpl = buildSendQueueItem,
+    mapNextActionImpl = mapNextAction,
+    resolveTemplateImpl = resolveTemplate,
+    personalizeTemplateImpl = personalizeTemplate,
+    computeScheduledSendImpl = computeScheduledSend,
+    smsQueueMessageImpl = smsQueueMessage,
     chooseTextgridNumberImpl = chooseTextgridNumber,
     findQueueItemsImpl = findQueueItems,
   } = deps;
@@ -395,6 +401,7 @@ export async function queueOutboundMessage({
     };
   }
 
+  // ── Resolve route (kept for offer/underwriting/pipeline metadata) ──────
   const route = resolveRouteImpl({
     classification,
     brain_item,
@@ -402,188 +409,77 @@ export async function queueOutboundMessage({
     message: clean(seed_message),
   });
 
+  // ── New SMS engine: flow_map → template → personalize → schedule → queue ─
+  const agent_item = context?.items?.agent_item || null;
+  const agent_style_fit = normalizeAgentStyleFit({
+    agent_style: paired_with_agent_type || null,
+    agent_archetype: getTextValue(agent_item, "text", ""),
+    agent_family: getCategoryValue(agent_item, "category", null),
+  });
+
   const resolved_language =
     language ||
-    route?.language ||
-    classification?.language ||
+    normalizeLanguage(classification?.language) ||
     context?.summary?.language_preference ||
     "English";
 
-  const resolved_use_case =
-    use_case ||
-    route?.use_case ||
-    "ownership_check";
-
-  const resolved_variant_group =
-    variant_group ||
-    route?.variant_group ||
-    "Stage 1 — Ownership Confirmation";
-
-  const resolved_tone =
-    tone ||
-    route?.tone ||
-    "Warm";
-
-  const resolved_sequence_position =
-    sequence_position ||
-    route?.sequence_position ||
-    "1st Touch";
-
-  const resolved_agent_type =
-    paired_with_agent_type ||
-    route?.template_filters?.paired_with_agent_type ||
-    route?.persona ||
-    "Warm Professional";
-
-  const resolved_category =
-    category ||
-    route?.template_filters?.category ||
-    route?.primary_category ||
-    "Residential";
-
-  const resolved_secondary_category =
-    secondary_category ||
-    route?.template_filters?.secondary_category ||
-    route?.secondary_category ||
-    null;
-  const resolved_template_lookup_secondary_category =
-    template_lookup_secondary_category !== undefined
-      ? template_lookup_secondary_category
-      : resolved_secondary_category;
-  const resolved_template_lookup_use_case =
-    template_lookup_use_case !== undefined
-      ? template_lookup_use_case
-      : resolved_use_case;
-
-  const resolved_lifecycle_stage =
-    lifecycle_stage ||
-    route?.lifecycle_stage ||
-    route?.template_filters?.lifecycle_stage ||
-    route?.stage ||
-    null;
-
-  const resolved_fallback_agent_type =
-    fallback_agent_type ||
-    route?.template_filters?.fallback_agent_type ||
-    "Warm Professional";
-  const resolved_rotation_key = deriveRotationKey({
-    explicit_rotation_key: rotation_key,
-    context,
-    use_case: resolved_use_case,
-    stage: resolved_lifecycle_stage || route?.stage,
-  });
-  const resolved_message_type = deriveMessageType({
-    explicit_message_type: message_type,
-    use_case: resolved_use_case,
-    stage: route?.stage,
-    lifecycle_stage: resolved_lifecycle_stage,
-    compliance_flag: classification?.compliance_flag,
-  });
   const resolved_touch_number = deriveNextTouchNumber({
     explicit_touch_number: touch_number,
     context,
   });
+
   const resolved_timezone = deriveTimezone({
     explicit_timezone: timezone,
     context,
   });
+
   const base_contact_window = deriveContactWindow({
     explicit_contact_window: contact_window,
     context,
   });
-  const resolved_contact_window = resolveSchedulingContactWindow({
-    contact_window: base_contact_window,
-    timezone_label: resolved_timezone,
-    is_first_contact:
-      resolved_message_type === "Cold Outbound" && resolved_touch_number <= 1,
+
+  const resolved_message_type = deriveMessageType({
+    explicit_message_type: message_type,
+    use_case: use_case || route?.use_case,
+    stage: route?.stage,
+    lifecycle_stage: lifecycle_stage || route?.lifecycle_stage,
+    compliance_flag: classification?.compliance_flag,
   });
-  const resolved_template_selector = buildTemplateSelectorInput({
-    template_selector: {
-      ...(route?.template_selector || {}),
-      ...(template_selector || {}),
-      use_case:
-        clean(template_selector?.use_case) ||
-        resolved_template_lookup_use_case,
-      language:
-        clean(template_selector?.language) ||
-        resolved_language,
-      property_type_scope:
-        clean(template_selector?.property_type_scope) ||
-        property_type_scope ||
-        route?.template_selector?.property_type_scope ||
-        null,
-      deal_strategy:
-        clean(template_selector?.deal_strategy) ||
-        deal_strategy ||
-        route?.template_selector?.deal_strategy ||
-        null,
-      touch_type:
-        clean(template_selector?.touch_type) ||
-        touch_type ||
-        route?.template_selector?.touch_type ||
-        null,
-    },
-    use_case: resolved_template_lookup_use_case,
-    language: resolved_language,
-    property_type_scope,
-    deal_strategy,
-    touch_type,
+
+  const is_first_touch = resolved_message_type === "Cold Outbound" && resolved_touch_number <= 1;
+
+  const property_context = {
+    property_type: context?.summary?.property_type || null,
+    owner_type: context?.summary?.owner_type || null,
+    is_first_touch,
     touch_number: resolved_touch_number,
-    message_type: resolved_message_type,
-    category: resolved_category,
-    secondary_category: resolved_template_lookup_secondary_category,
-    sequence_position: resolved_sequence_position,
-    route,
-    context,
+    is_multifamily: route?.is_multifamily_like || false,
+  };
+
+  // ── Flow map: determine next action from classification ──────────────
+  const flow = mapNextActionImpl({
+    classify_result: classification,
+    brain_state: {
+      conversation_stage: context?.summary?.conversation_stage || null,
+      close_sub_stage: null,
+    },
+    property_context,
+    agent_style_fit,
   });
 
-  let selected_template = template_item || null;
-
-  if (!selected_template && !template_id && !message_override) {
-    selected_template = await loadTemplateImpl({
-      template_selector: resolved_template_selector,
-      category: resolved_category,
-      secondary_category: resolved_template_lookup_secondary_category,
-      use_case: resolved_template_lookup_use_case,
-      variant_group: resolved_variant_group,
-      tone: resolved_tone,
-      gender_variant,
-      language: resolved_language,
-      sequence_position: resolved_sequence_position,
-      touch_type: resolved_template_selector.touch_type,
-      touch_number: resolved_touch_number,
-      message_type: resolved_message_type,
-      property_type_scope: resolved_template_selector.property_type_scope,
-      deal_strategy: resolved_template_selector.deal_strategy,
-      paired_with_agent_type: resolved_agent_type,
-      recently_used_template_ids:
-        context?.recent?.recently_used_template_ids || [],
-      rotation_key: resolved_rotation_key,
-      fallback_agent_type: resolved_fallback_agent_type,
-      context,
-      template_render_overrides,
-      allow_variant_group_fallback: true,
-    });
-  }
-
-  if (!selected_template && !message_override) {
-    warn("outbound.queue_message_template_not_found", {
+  // Compliance / STOP — abort immediately
+  if (flow.action === ACTIONS.STOP && !message_override) {
+    info("outbound.queue_message_stopped", {
       inbound_from: resolved_inbound_from,
-      phone_item_id: context?.ids?.phone_item_id || null,
-      use_case: resolved_use_case,
-      template_lookup_use_case: resolved_template_lookup_use_case,
-      language: resolved_language,
-      category: resolved_category,
-      secondary_category: resolved_template_lookup_secondary_category,
-      template_selector: resolved_template_selector,
-      sequence_position: resolved_sequence_position,
-      paired_with_agent_type: resolved_agent_type,
+      reason: flow.reason,
+      cancel_queued: flow.cancel_queued || false,
     });
-
     return {
       ok: false,
-      stage: "template",
-      reason: "template_not_found",
+      stage: "flow_map",
+      reason: flow.reason,
+      action: flow.action,
+      cancel_queued: flow.cancel_queued || false,
       inbound_from: normalized_inbound_from,
       context,
       classification,
@@ -591,67 +487,198 @@ export async function queueOutboundMessage({
     };
   }
 
-  const selected_template_id =
-    template_id ||
-    selected_template?.item_id ||
+  if (flow.action === ACTIONS.WAIT && !message_override) {
+    return {
+      ok: false,
+      stage: "flow_map",
+      reason: flow.reason,
+      action: flow.action,
+      inbound_from: normalized_inbound_from,
+      context,
+      classification,
+      route,
+    };
+  }
+
+  if (flow.action === ACTIONS.ESCALATE && !message_override) {
+    return {
+      ok: false,
+      stage: "flow_map",
+      reason: flow.reason,
+      action: flow.action,
+      human_review: true,
+      inbound_from: normalized_inbound_from,
+      context,
+      classification,
+      route,
+    };
+  }
+
+  // ── Resolve use case (caller override → flow_map → route → default) ──
+  const resolved_use_case =
+    use_case ||
+    flow.use_case ||
+    route?.use_case ||
+    "ownership_check";
+
+  const resolved_stage_code =
+    flow.stage_code ||
+    route?.stage ||
+    context?.summary?.conversation_stage ||
     null;
 
+  const resolved_rotation_key = deriveRotationKey({
+    explicit_rotation_key: rotation_key,
+    context,
+    use_case: resolved_use_case,
+    stage: resolved_stage_code,
+  });
+
+  const resolved_send_priority = deriveSendPriority({
+    explicit_send_priority: send_priority,
+    classification,
+    route,
+  });
+
+  // ── Template resolution via new SMS engine ───────────────────────────
   let final_message_text = "";
   let rendered_placeholders = [];
+  let resolution = null;
+  let selected_template_id = template_id || null;
 
   if (message_override) {
+    // Caller provided explicit message — skip template resolution
     final_message_text = message_override;
-  } else if (selected_template) {
-    const template_text = selected_template?.text || "";
+  } else if (template_item) {
+    // Caller provided a template object — personalize it via new engine
+    const template_text = template_item?.text || "";
+    selected_template_id = selected_template_id || template_item?.item_id || null;
 
-    const render_result = renderTemplateImpl({
-      template_text,
-      context,
-      overrides: {
-        language: resolved_language,
-        conversation_stage: route?.stage,
-        lifecycle_stage: resolved_lifecycle_stage,
-        ai_route: route?.brain_ai_route,
-        ...(template_render_overrides || {}),
-      },
-      use_case: selected_template?.use_case || resolved_template_lookup_use_case,
-      variant_group: selected_template?.variant_group || resolved_variant_group,
-    });
+    const personalization_context = {
+      seller_first_name: context?.summary?.seller_first_name || "",
+      agent_name: context?.summary?.agent_name || "",
+      property_address: context?.summary?.property_address || "",
+      property_city: context?.summary?.property_city || "",
+      city: context?.summary?.property_city || "",
+      ...(template_render_overrides || {}),
+    };
 
-    if (
-      render_result?.invalid_placeholders?.length ||
-      render_result?.missing_required_placeholders?.length
-    ) {
-      warn("outbound.queue_message_template_placeholder_validation_failed", {
+    const render = personalizeTemplateImpl(template_text, personalization_context);
+    if (!render.ok) {
+      warn("outbound.queue_message_personalization_failed", {
         inbound_from: resolved_inbound_from,
-        phone_item_id: context?.ids?.phone_item_id || null,
         template_id: selected_template_id,
-        invalid_placeholders: render_result?.invalid_placeholders || [],
-        missing_required_placeholders:
-          render_result?.missing_required_placeholders || [],
+        missing: render.missing,
+        reason: render.reason,
       });
-
       return {
         ok: false,
         stage: "render",
-        reason: "template_placeholder_validation_failed",
+        reason: render.reason || "personalization_failed",
+        missing_placeholders: render.missing || [],
         inbound_from: normalized_inbound_from,
         context,
         classification,
         route,
         template_id: selected_template_id,
-        invalid_placeholders: render_result?.invalid_placeholders || [],
-        missing_required_placeholders:
-          render_result?.missing_required_placeholders || [],
+      };
+    }
+    final_message_text = render.text;
+    rendered_placeholders = render.placeholders_used || [];
+
+    // Build a synthetic resolution for enrichment fields
+    resolution = {
+      resolved: true,
+      template_text,
+      use_case: template_item?.use_case || resolved_use_case,
+      stage_code: resolved_stage_code,
+      language: resolved_language,
+      agent_style_fit,
+      attachable_template_ref: template_item?.item_id
+        ? { app_id: APP_IDS?.templates, item_id: template_item.item_id }
+        : null,
+      source: "caller_provided",
+    };
+  } else {
+    // Full new pipeline: template_resolver → personalize_template
+    const property_scope = resolvePropertyTypeScope({
+      use_case: resolved_use_case,
+      is_follow_up: resolved_use_case?.includes("follow") || false,
+      ...property_context,
+    });
+    const deal_strat = resolveDealStrategy({
+      ...property_context,
+      objection: classification?.objection,
+      stage_code: resolved_stage_code,
+    });
+
+    resolution = resolveTemplateImpl({
+      use_case: resolved_use_case,
+      stage_code: resolved_stage_code,
+      language: resolved_language,
+      agent_style_fit,
+      property_type_scope: property_scope,
+      deal_strategy: deal_strat,
+      is_first_touch,
+      is_follow_up: resolved_use_case?.includes("follow") || false,
+      master_owner_id: context?.ids?.master_owner_id,
+      phone_e164: normalized_inbound_from,
+    });
+
+    if (!resolution.resolved) {
+      warn("outbound.queue_message_template_not_found", {
+        inbound_from: resolved_inbound_from,
+        phone_item_id: context?.ids?.phone_item_id || null,
+        use_case: resolved_use_case,
+        language: resolved_language,
+        agent_style_fit,
+        fallback_reason: resolution.fallback_reason,
+      });
+
+      return {
+        ok: false,
+        stage: "template",
+        reason: resolution.fallback_reason || "template_not_found",
+        inbound_from: normalized_inbound_from,
+        context,
+        classification,
+        route,
       };
     }
 
-    final_message_text = clean(render_result?.rendered_text || "");
-    rendered_placeholders = Array.isArray(render_result?.used_placeholders)
-      ? render_result.used_placeholders
-      : [];
-  } else {
-    final_message_text = message_override;
+    selected_template_id = resolution.template_id || null;
+
+    const personalization_context = {
+      seller_first_name: context?.summary?.seller_first_name || "",
+      agent_name: context?.summary?.agent_name || "",
+      property_address: context?.summary?.property_address || "",
+      property_city: context?.summary?.property_city || "",
+      city: context?.summary?.property_city || "",
+      ...(template_render_overrides || {}),
+    };
+
+    const render = personalizeTemplateImpl(resolution.template_text, personalization_context);
+    if (!render.ok) {
+      warn("outbound.queue_message_personalization_failed", {
+        inbound_from: resolved_inbound_from,
+        template_id: selected_template_id,
+        missing: render.missing,
+        reason: render.reason,
+      });
+      return {
+        ok: false,
+        stage: "render",
+        reason: render.reason || "personalization_failed",
+        missing_placeholders: render.missing || [],
+        inbound_from: normalized_inbound_from,
+        context,
+        classification,
+        route,
+        template_id: selected_template_id,
+      };
+    }
+    final_message_text = render.text;
+    rendered_placeholders = render.placeholders_used || [];
   }
 
   if (!final_message_text) {
@@ -673,6 +700,7 @@ export async function queueOutboundMessage({
     };
   }
 
+  // ── TextGrid number selection (unchanged) ────────────────────────────
   let resolved_textgrid_number_item_id = textgrid_number_item_id || null;
 
   if (!resolved_textgrid_number_item_id) {
@@ -711,21 +739,42 @@ export async function queueOutboundMessage({
     };
   }
 
-  const derived_schedule =
-    normalizeScheduledDate(scheduled_for_local) || normalizeScheduledDate(scheduled_for_utc)
-      ? {
-          scheduled_for_local:
-            normalizeScheduledDate(scheduled_for_local) ||
-            normalizeScheduledDate(scheduled_for_utc),
-          scheduled_for_utc: normalizeScheduledDate(scheduled_for_utc),
-        }
-      : resolveQueueSchedule({
-          now: started_at,
-          timezone_label: resolved_timezone,
-          contact_window: resolved_contact_window,
-          distribution_key: resolved_rotation_key,
-      });
+  // ── Schedule via new latency engine ──────────────────────────────────
+  let schedule;
 
+  if (normalizeScheduledDate(scheduled_for_local) || normalizeScheduledDate(scheduled_for_utc)) {
+    // Caller provided explicit schedule
+    schedule = {
+      scheduled_local:
+        normalizeScheduledDate(scheduled_for_local)?.start ||
+        normalizeScheduledDate(scheduled_for_utc)?.start ||
+        null,
+      scheduled_utc:
+        normalizeScheduledDate(scheduled_for_utc)?.start || null,
+      timezone: resolved_timezone,
+      latency_seconds: 0,
+      delay_source: "caller_override",
+    };
+  } else {
+    schedule = computeScheduledSendImpl({
+      now_utc: new Date(),
+      timezone: resolved_timezone,
+      assigned_agent: agent_item,
+      message_kind: (resolved_use_case?.includes("follow") || false) ? "follow_up" : "reply",
+      stage_code: resolved_stage_code,
+      classify_result: classification,
+      contact_window: base_contact_window,
+      delay_profile: flow.delay_profile,
+      seeded_key: [
+        context?.ids?.master_owner_id,
+        normalized_inbound_from,
+        resolved_use_case,
+        resolved_stage_code,
+      ],
+    });
+  }
+
+  // ── Duplicate guard (unchanged) ──────────────────────────────────────
   const queue_history = await findQueueItemsImpl({
     filters: {
       "phone-number": Number(context?.ids?.phone_item_id || 0) || undefined,
@@ -763,122 +812,89 @@ export async function queueOutboundMessage({
     };
   }
 
-  // ── Template selection audit log ─────────────────────────────────────────
-  // Emitted before every queue write so production logs can trace exactly
-  // which template was selected, why, and whether a local fallback was used.
+  // ── Template selection audit log ─────────────────────────────────────
   info("outbound.template_selection_audit", {
     inbound_from: resolved_inbound_from,
     phone_item_id: context?.ids?.phone_item_id || null,
     master_owner_id: context?.ids?.master_owner_id || null,
     selected_template_id: selected_template_id || null,
-    selected_template_title: selected_template?.title || null,
-    selected_template_use_case: selected_template?.use_case || null,
-    selected_template_variant_group: selected_template?.variant_group || null,
-    selected_template_source: selected_template?.source || null,
-    selected_template_resolution_source: selected_template?.template_resolution_source || null,
-    selected_template_fallback_reason: selected_template?.template_fallback_reason || null,
-    selected_template_selection_diagnostics:
-      selected_template?.template_selection_diagnostics || null,
-    is_local_fallback:
-      selected_template?.source === "local_registry" ||
-      Boolean(selected_template?.template_fallback_reason),
+    resolution_source: resolution?.source || null,
+    resolution_path: resolution?.resolution_path || null,
+    fallback_reason: resolution?.fallback_reason || null,
     resolved_use_case,
-    resolved_variant_group,
     resolved_language,
-    resolved_sequence_position,
-    resolved_agent_type,
+    agent_style_fit,
     message_override_used: Boolean(message_override),
+    pipeline: "sms_engine_v2",
   });
 
-  const queue_result = await buildSendQueueItemImpl({
-    context,
-    rendered_message_text: final_message_text,
-    template_id: selected_template_id,
-    template_item: selected_template,
-    textgrid_number_item_id: resolved_textgrid_number_item_id,
-    scheduled_for_local:
-      derived_schedule?.scheduled_for_local || { start: started_at },
-    scheduled_for_utc:
-      derived_schedule?.scheduled_for_utc || normalizeScheduledDate(scheduled_for_utc),
-    timezone: resolved_timezone,
-    contact_window: resolved_contact_window,
-    send_priority: deriveSendPriority({
-      explicit_send_priority: send_priority,
-      classification,
-      route,
-    }),
-    message_type: deriveMessageType({
-      explicit_message_type: resolved_message_type,
-    }),
+  // ── Queue via new SMS engine ─────────────────────────────────────────
+  const links = {
+    master_owner_id: context?.ids?.master_owner_id || null,
+    prospect_id: context?.ids?.prospect_id || null,
+    property_id: context?.ids?.property_id || null,
+    phone_id: context?.ids?.phone_item_id || null,
+    market_id: context?.ids?.market_id || null,
+    agent_id: context?.ids?.assigned_agent_id || null,
+    textgrid_number_id: resolved_textgrid_number_item_id,
+  };
+
+  const queue_context = {
+    touch_number: resolved_touch_number,
+    is_first_touch,
+    is_follow_up: resolved_use_case?.includes("follow") || false,
+    is_reengagement: resolved_use_case === "reengagement",
+    is_opt_out_confirm: classification?.compliance_flag === "stop_texting",
+    phone_e164: normalized_inbound_from,
+    contact_window: base_contact_window,
+    placeholders_used: rendered_placeholders,
+    property_address: context?.summary?.property_address || null,
+    property_type: context?.summary?.property_type || null,
+    owner_type: context?.summary?.owner_type || null,
     max_retries,
-    queue_status: deriveQueueStatus(queue_status),
+    send_priority: resolved_send_priority,
     dnc_check,
     delivery_confirmed,
-    touch_number: resolved_touch_number,
-    queue_id,
-    // Enrichment fields — populate Send Queue category fields for observability.
-    // Values are sourced from the selected template and resolved route parameters.
-    // resolveQueueCategoryField will safely omit any field whose value has no
-    // matching option in the Send Queue schema (e.g. stale supplement).
-    property_type: selected_template?.category_primary ?? resolved_category ?? null,
-    secondary_category: resolved_secondary_category,
-    current_stage: route?.stage || context?.summary?.conversation_stage || null,
-    use_case_template:
-      normalizeSellerFlowUseCase(selected_template?.use_case || resolved_use_case) || null,
-    personalization_tags_used: rendered_placeholders,
+  };
+
+  const queue_result = await smsQueueMessageImpl({
+    rendered_text: final_message_text,
+    schedule,
+    resolution: resolution || {
+      use_case: resolved_use_case,
+      stage_code: resolved_stage_code,
+      language: resolved_language,
+      agent_style_fit,
+    },
+    links,
+    context: queue_context,
   });
 
   info("outbound.queue_message_completed", {
     inbound_from: resolved_inbound_from,
-    queue_item_id: queue_result?.queue_item_id || null,
+    queue_item_id: queue_result?.item_id || null,
     phone_item_id: context?.ids?.phone_item_id || null,
     template_id: selected_template_id,
-    template_source: selected_template?.source || null,
-    template_resolution_source:
-      selected_template?.template_resolution_source || null,
-    template_fallback_reason:
-      selected_template?.template_fallback_reason || null,
-    template_title: selected_template?.title || null,
-    template_selection_diagnostics:
-      selected_template?.template_selection_diagnostics || null,
-    template_relation_id: queue_result?.template_relation_id ?? null,
-    template_app_field_written: queue_result?.template_app_field_written ?? false,
-    template_attached: queue_result?.template_attached ?? false,
-    template_attachment_strategy:
-      queue_result?.template_attachment_strategy ?? null,
-    template_attachment_reason:
-      queue_result?.template_attachment_reason ?? null,
+    resolution_source: resolution?.source || null,
+    fallback_reason: resolution?.fallback_reason || null,
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     use_case: resolved_use_case,
-    stage: route?.stage || null,
-    lifecycle_stage: resolved_lifecycle_stage,
-    template_lookup_use_case: resolved_template_lookup_use_case,
-    template_lookup_secondary_category: resolved_template_lookup_secondary_category,
+    stage: resolved_stage_code,
     message_override_used: Boolean(message_override),
+    pipeline: "sms_engine_v2",
   });
 
   return {
-    ok: true,
+    ok: queue_result?.ok ?? true,
     stage: "queued",
     inbound_from: normalized_inbound_from,
-    queue_item_id: queue_result?.queue_item_id || null,
+    queue_item_id: queue_result?.item_id || null,
     template_id: selected_template_id,
-    template_item: selected_template,
-    selected_template_source: selected_template?.source || null,
-    selected_template_resolution_source:
-      selected_template?.template_resolution_source || null,
-    selected_template_fallback_reason:
-      selected_template?.template_fallback_reason || null,
-    selected_template_title: selected_template?.title || null,
-    selected_template_selection_diagnostics:
-      selected_template?.template_selection_diagnostics || null,
-    template_relation_id: queue_result?.template_relation_id ?? null,
-    template_app_field_written: queue_result?.template_app_field_written ?? false,
-    template_attached: queue_result?.template_attached ?? false,
-    template_attachment_strategy:
-      queue_result?.template_attachment_strategy ?? null,
-    template_attachment_reason:
-      queue_result?.template_attachment_reason ?? null,
+    template_item: template_item || null,
+    selected_template_source: resolution?.source || null,
+    selected_template_resolution_source: resolution?.source || null,
+    selected_template_fallback_reason: resolution?.fallback_reason || null,
+    template_attached: Boolean(resolution?.attachable_template_ref?.item_id),
     message_override_used: Boolean(message_override),
     textgrid_number_item_id: resolved_textgrid_number_item_id,
     rendered_message_text: final_message_text,
@@ -886,6 +902,12 @@ export async function queueOutboundMessage({
     classification,
     route,
     queue_result,
+    // New SMS engine enrichment
+    flow_action: flow.action,
+    flow_reason: flow.reason,
+    resolution,
+    schedule,
+    pipeline: "sms_engine_v2",
   };
 }
 

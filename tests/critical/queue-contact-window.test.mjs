@@ -81,23 +81,22 @@ test("resolveContactWindowField: recognized schema option returns field_value an
   assert.equal(result.reason, null);
 });
 
-test("resolveContactWindowField: valid time-range format passes through compat layer", () => {
-  // Any properly formatted time-range string is accepted via shouldAllowRawCategoryCompatibilityValue
-  // even when the attached schema snapshot does not have a matching option ID.
+test("resolveContactWindowField: valid time-range format resolves via schema option", () => {
+  // "8AM-9AM CT" is now a known schema option (id=65) in the supplement.
   const result = resolveContactWindowField("8AM-9AM CT");
 
-  assert.equal(result.omitted, false, "valid time-range format must pass through compat layer");
+  assert.equal(result.omitted, false, "valid schema option must not be omitted");
   assert.equal(result.field_value, "8AM-9AM CT");
-  assert.equal(result.category_option_id, null, "option_id is null when resolved via compat");
-  assert.equal(result.reason, "compat_raw_category_value");
+  assert.equal(result.category_option_id, 65, "should resolve to schema option id 65");
+  assert.equal(result.reason, null);
 });
 
-test("resolveContactWindowField: real-world seller window passes through compat layer", () => {
+test("resolveContactWindowField: real-world seller window resolves via schema option", () => {
   const result = resolveContactWindowField("12PM-2PM CT");
 
   assert.equal(result.omitted, false);
   assert.equal(result.field_value, "12PM-2PM CT");
-  assert.equal(result.reason, "compat_raw_category_value");
+  assert.equal(result.reason, null);
 });
 
 test("resolveContactWindowField: empty / null / undefined contact window is omitted with 'empty' reason", () => {

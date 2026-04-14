@@ -428,13 +428,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         processed_by: "Manual Sender",
         source_app: "External API",
         trigger_name: "textgrid-inbound",
-        processing_metadata: {
-          provider: "textgrid",
-          provider_message_id: clean(extracted.message_id) || null,
-          inbound_from,
-          inbound_to,
-          idempotency_key,
-        },
       });
       message_event_enriched = true;
     } catch (err) {

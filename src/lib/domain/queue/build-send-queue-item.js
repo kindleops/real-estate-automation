@@ -50,7 +50,7 @@ const QUEUE_FIELDS = {
   market: "market",
   sms_agent: "sms-agent",
   textgrid_number: "textgrid-number",
-  template: "template",
+  template: "template-2",
   current_stage: "current-stage",
 
   touch_number: "touch-number",
@@ -64,14 +64,11 @@ const QUEUE_FIELDS = {
   property_address: "property-address",
   property_type: "property-type",
   owner_type: "owner-type",
-  category: "category",
   use_case_template: "use-case-template",
 };
 
 function getQueueTemplateFieldExternalId() {
-  return getAttachedFieldSchema(APP_IDS.send_queue, "template-2")
-    ? "template-2"
-    : QUEUE_FIELDS.template;
+  return "template-2";
 }
 
 function nowIso() {
@@ -802,9 +799,7 @@ export async function buildSendQueueItem({
   const owner_type_raw = getCategoryValue(master_owner_item, "owner-type", null);
   const resolved_owner_type =
     property_owner_type || mapOwnerTypeToQueueCategory(owner_type_raw);
-  const resolved_owner_category = secondary_category || mapOwnerTypeToQueueCategory(owner_type_raw);
   const owner_type_field = resolveQueueCategoryField(QUEUE_FIELDS.owner_type, resolved_owner_type);
-  const category_field = resolveQueueCategoryField(QUEUE_FIELDS.category, resolved_owner_category);
   const use_case_template_field = resolveQueueCategoryField(
     QUEUE_FIELDS.use_case_template,
     resolved_use_case_template
@@ -813,7 +808,6 @@ export async function buildSendQueueItem({
   for (const [field_name, source_value, resolved] of [
     [QUEUE_FIELDS.property_type, property_type, property_type_field],
     [QUEUE_FIELDS.owner_type, resolved_owner_type, owner_type_field],
-    [QUEUE_FIELDS.category, secondary_category, category_field],
     [QUEUE_FIELDS.current_stage, resolved_current_stage, current_stage_field],
     [QUEUE_FIELDS.use_case_template, resolved_use_case_template, use_case_template_field],
   ]) {
@@ -1023,7 +1017,6 @@ export async function buildSendQueueItem({
       : {}),
     ...(property_type_field.omitted ? {} : { [QUEUE_FIELDS.property_type]: property_type_field.field_value }),
     ...(owner_type_field.omitted ? {} : { [QUEUE_FIELDS.owner_type]: owner_type_field.field_value }),
-    ...(category_field.omitted ? {} : { [QUEUE_FIELDS.category]: category_field.field_value }),
     ...(current_stage_field.omitted
       ? {}
       : { [QUEUE_FIELDS.current_stage]: current_stage_field.field_value }),
@@ -1136,7 +1129,6 @@ export async function buildSendQueueItem({
     property_address_written: Boolean(property_id && property_address),
     property_type_written: !property_type_field.omitted,
     owner_type_written: !owner_type_field.omitted,
-    category_written: !category_field.omitted,
     current_stage_written: !current_stage_field.omitted,
     current_stage_value: resolved_current_stage,
     use_case_template_written: !use_case_template_field.omitted,

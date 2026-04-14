@@ -279,12 +279,12 @@ test("resolveQueueCategoryField: value not in real options returns no_matching_c
   assert.equal(result.field_value, undefined);
 });
 
-test("resolveQueueCategoryField: category field with unrecognised value returns no_matching_category_option_in_schema", () => {
-  // Send Queue category options are Corporate, Individual, Trust / Estate, etc.
-  // "First Touch" is not one of them.
+test("resolveQueueCategoryField: category field (removed from Send Queue) returns stale_empty_schema_options", () => {
+  // Send Queue no longer has a "category" field — was removed from supplement
+  // because it never existed in real Podio.
   const result = resolveQueueCategoryField("category", "First Touch");
   assert.equal(result.omitted, true);
-  assert.equal(result.reason, "no_matching_category_option_in_schema");
+  assert.equal(result.reason, "stale_empty_schema_options");
 });
 
 test("resolveQueueCategoryField: use-case-template with unrecognised slug returns no_matching_category_option_in_schema", () => {
@@ -338,7 +338,6 @@ test("Part 3 — category absent from payload when schema has no matching option
   });
 
   assert.ok(result.ok);
-  assert.equal(result.category_written, false);
   assert.equal("category" in (captured_fields || {}), false);
 });
 
@@ -378,7 +377,6 @@ test("Part 3 — queue creation succeeds even when all three new category fields
 
   assert.ok(result.ok, "queue creation must succeed when all new fields are omitted");
   assert.equal(result.property_type_written, false);
-  assert.equal(result.category_written, false);
   assert.equal(result.use_case_template_written, false);
 });
 
@@ -397,7 +395,6 @@ test("Part 3 — null values for new params do not cause payload failures", asyn
 
   assert.ok(result.ok);
   assert.equal(result.property_type_written, false);
-  assert.equal(result.category_written, false);
   assert.equal(result.use_case_template_written, false);
 });
 
@@ -787,9 +784,9 @@ test("Part 7 — owner-type written from linked property owner-type-2", async ()
   );
 });
 
-// ── Part 7.3: category reads from master owner's owner-type ──────────────────
+// ── Part 7.3: category field removed — Send Queue has no "category" field ────
 
-test("Part 7 — category written as 'Corporate' when master owner has LLC/CORP | ABSENTEE", async () => {
+test("Part 7 — category field is never written (Send Queue has no category field)", async () => {
   const master_owner_item = createPodioItem(201, {
     "owner-type": categoryField("LLC/CORP | ABSENTEE"),
   });
@@ -816,7 +813,7 @@ test("Part 7 — category written as 'Corporate' when master owner has LLC/CORP 
   };
 
   let captured_fields = null;
-  const result = await buildSendQueueItem({
+  await buildSendQueueItem({
     context,
     rendered_message_text: "Hi there",
     textgrid_number_item_id: 601,
@@ -828,97 +825,7 @@ test("Part 7 — category written as 'Corporate' when master owner has LLC/CORP 
     update_item: async () => {},
   });
 
-  assert.ok(result.ok);
-  assert.equal(result.category_written, true, "category must be written");
-  assert.equal(
-    captured_fields?.["category"],
-    "Corporate",
-    "category must map LLC/CORP | ABSENTEE → Corporate"
-  );
-});
-
-test("Part 7 — category written as 'Individual' for INDIVIDUAL | ABSENTEE owner-type", async () => {
-  const master_owner_item = createPodioItem(202, {
-    "owner-type": categoryField("INDIVIDUAL | ABSENTEE"),
-  });
-  const context = {
-    found: true,
-    items: {
-      phone_item: makeActivePhoneItem(),
-      brain_item: null,
-      master_owner_item,
-      property_item: null,
-      agent_item: null,
-      market_item: null,
-    },
-    ids: {
-      phone_item_id: 401,
-      master_owner_id: 202,
-      prospect_id: 301,
-      property_id: null,
-      market_id: null,
-      assigned_agent_id: null,
-    },
-    recent: { touch_count: 0 },
-    summary: { total_messages_sent: 0 },
-  };
-
-  let captured_fields = null;
-  await buildSendQueueItem({
-    context,
-    rendered_message_text: "Hi there",
-    textgrid_number_item_id: 601,
-    scheduled_for_local: "2026-04-04 09:00:00",
-    create_item: async (_app_id, fields) => {
-      captured_fields = fields;
-      return { item_id: 9203 };
-    },
-    update_item: async () => {},
-  });
-
-  assert.equal(captured_fields?.["category"], "Individual");
-});
-
-test("Part 7 — category written as 'Trust / Estate' for TRUST/ESTATE | ABSENTEE", async () => {
-  const master_owner_item = createPodioItem(203, {
-    "owner-type": categoryField("TRUST/ESTATE | ABSENTEE"),
-  });
-  const context = {
-    found: true,
-    items: {
-      phone_item: makeActivePhoneItem(),
-      brain_item: null,
-      master_owner_item,
-      property_item: null,
-      agent_item: null,
-      market_item: null,
-    },
-    ids: {
-      phone_item_id: 401,
-      master_owner_id: 203,
-      prospect_id: 301,
-      property_id: null,
-      market_id: null,
-      assigned_agent_id: null,
-    },
-    recent: { touch_count: 0 },
-    summary: { total_messages_sent: 0 },
-  };
-
-  let captured_fields = null;
-  await buildSendQueueItem({
-    context,
-    rendered_message_text: "Hi there",
-    textgrid_number_item_id: 601,
-    scheduled_for_local: "2026-04-04 09:00:00",
-    create_item: async (_app_id, fields) => {
-      captured_fields = fields;
-      return { item_id: 9204 };
-    },
-    update_item: async () => {},
-  });
-
-  assert.equal(captured_fields?.["category"], "Trust / Estate");
+  assert.equal("category" in (captured_fields || {}), false, "category field must not be written — Send Queue has no such field");
 });
 
 // ── Part 7.4: contact-window omit path when schema has no matching option ─────

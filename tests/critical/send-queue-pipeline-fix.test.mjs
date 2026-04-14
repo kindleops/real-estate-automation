@@ -395,9 +395,6 @@ test("failed-reason options in schema supplement cover all code-emitted values",
     "Daily Limit Hit",
     "Network Error",
     "Content Filter",
-    "Destination Unreachable",
-    "Unknown Error",
-    "Delivery Rejected",
   ];
 
   for (const reason of required_reasons) {

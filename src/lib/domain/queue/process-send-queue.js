@@ -78,7 +78,7 @@ const QUEUE_FIELDS = {
   market: "market",
   sms_agent: "sms-agent",
   textgrid_number: "textgrid-number",
-  template: "template",
+  template: "template-2",
 
   message_type: "message-type",
   message_text: "message-text",
@@ -462,6 +462,12 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
   const property_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.properties, null);
   const market_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.market, null);
   const sms_agent_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.sms_agent, null);
+
+  warn("queue.deferred_resolution_legacy_path", {
+    queue_item_id,
+    master_owner_id,
+    message: "Queue item missing pre-rendered message_text — falling back to legacy deferred resolution. New SMS engine pipeline should pre-render all messages at queue-creation time.",
+  });
 
   info("queue.message_resolution_started", {
     queue_item_id,

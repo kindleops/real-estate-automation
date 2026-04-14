@@ -23,7 +23,6 @@ const EVENT_FIELDS = {
   delivery_status: "status-3",
   raw_carrier_status: "status-2",
   ai_output: "ai-output",
-  processing_metadata: "processing-metadata",
 };
 
 function nowIso() {
@@ -68,7 +67,6 @@ export async function logInboundMessageEvent({
   processed_by = "Manual Sender",
   source_app = "External API",
   trigger_name = "textgrid-inbound",
-  processing_metadata = null,
 } = {}) {
   const ai_route = runtimeDeps.getCategoryValue(brain_item, "ai-route", null);
   const normalized_message = String(message_body || "");
@@ -110,13 +108,6 @@ export async function logInboundMessageEvent({
       : {}),
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
   };
-
-  if (processing_metadata) {
-    fields[EVENT_FIELDS.processing_metadata] =
-      typeof processing_metadata === "string"
-        ? processing_metadata
-        : JSON.stringify(processing_metadata);
-  }
 
   let created;
   if (record_item_id) {

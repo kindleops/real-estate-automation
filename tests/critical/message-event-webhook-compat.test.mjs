@@ -97,7 +97,6 @@ test("inbound message event updates existing idempotency record when record_item
     master_owner_id: 21,
     message_body: "yes",
     provider_message_id: "SM456",
-    processing_metadata: { provider: "textgrid", inbound_from: "5551230001" },
   });
 
   // Updates the existing record instead of creating a new one
@@ -117,10 +116,8 @@ test("inbound message event updates existing idempotency record when record_item
   // AI Output is cleared (no classification yet)
   assert.equal(updatedFields["ai-output"], "");
 
-  // Processing metadata is written to dedicated field
-  const meta = JSON.parse(updatedFields["processing-metadata"]);
-  assert.equal(meta.provider, "textgrid");
-  assert.equal(meta.inbound_from, "5551230001");
+  // No processing-metadata field (not in Podio app yet)
+  assert.equal(updatedFields["processing-metadata"], undefined);
 
   // Brain link uses the existing record_item_id
   assert.deepEqual(linkPayload, {

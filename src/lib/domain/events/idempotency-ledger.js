@@ -139,7 +139,6 @@ export async function beginIdempotentProcessing({
       "source-app": "External API",
       "message": buildRecordMessage(normalized_scope, normalized_key, summary),
       "ai-output": JSON.stringify(next_meta),
-      "processing-metadata": JSON.stringify(next_meta),
     });
 
     return {
@@ -160,16 +159,6 @@ export async function beginIdempotentProcessing({
     "source-app": "External API",
     "message": buildRecordMessage(normalized_scope, normalized_key, summary),
     "ai-output": JSON.stringify({
-      ...metadata,
-      scope: normalized_scope,
-      key: normalized_key,
-      status: "processing",
-      started_at,
-      completed_at: null,
-      last_error: null,
-      attempts: 1,
-    }),
-    "processing-metadata": JSON.stringify({
       ...metadata,
       scope: normalized_scope,
       key: normalized_key,
@@ -219,7 +208,6 @@ export async function completeIdempotentProcessing({
     "timestamp": { start: completed_at },
     "trigger-name": buildTriggerName(scope),
     "source-app": "External API",
-    "processing-metadata": processing_meta,
   };
 
   if (!skip_content_fields) {
@@ -270,7 +258,6 @@ export async function failIdempotentProcessing({
     "timestamp": { start: failed_at },
     "trigger-name": buildTriggerName(scope),
     "source-app": "External API",
-    "processing-metadata": processing_meta,
   };
 
   if (!skip_content_fields) {

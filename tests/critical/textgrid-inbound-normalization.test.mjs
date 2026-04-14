@@ -100,8 +100,4 @@ test("inbound handler accepts raw Twilio/TextGrid payload and logs inbound event
   assert.equal(logged_payload.received_at, "2026-04-08T00:00:00.000Z");
   assert.equal(logged_payload.processed_by, "Manual Sender");
   assert.equal(logged_payload.source_app, "External API");
-
-  // processing metadata is passed
-  assert.ok(logged_payload.processing_metadata, "processing_metadata should be provided");
-  assert.equal(logged_payload.processing_metadata.provider, "textgrid");
 });
