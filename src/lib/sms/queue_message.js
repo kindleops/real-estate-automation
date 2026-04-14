@@ -329,7 +329,11 @@ export async function queueMessage(params = {}) {
         };
       }
     }
-  } catch {
+  } catch (err) {
+    warn("queue_message.dedupe_lookup_failed", {
+      queue_id,
+      error: err?.message || "unknown",
+    });
     // Dedupe lookup failed — proceed cautiously with creation
   }
 

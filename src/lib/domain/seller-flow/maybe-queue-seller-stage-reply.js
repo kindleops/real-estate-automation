@@ -6,6 +6,21 @@ import {
   SELLER_FLOW_STAGES,
 } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { routeSellerConversation } from "@/lib/domain/seller-flow/route-seller-conversation.js";
+import APP_IDS from "@/lib/config/app-ids.js";
+import { info as _info, warn as _warn } from "@/lib/logging/logger.js";
+
+// ── Injectable logger deps (for testing) ─────────────────────────────────
+
+const defaultLogDeps = { info: _info, warn: _warn };
+let logDeps = { ...defaultLogDeps };
+
+export function __setSellerQueueLogDeps(overrides = {}) {
+  logDeps = { ...logDeps, ...overrides };
+}
+
+export function __resetSellerQueueLogDeps() {
+  logDeps = { ...defaultLogDeps };
+}
 
 const DEFAULT_LATENCY_BY_TIER = Object.freeze({
   hot: Object.freeze({ min_minutes: 3, max_minutes: 8 }),
@@ -145,6 +160,21 @@ export async function maybeQueueSellerStageReply({
   queue_message = queueOutboundMessage,
   schedule_resolver = resolveLatencyAwareQueueSchedule,
 } = {}) {
+  const phone_id = context?.ids?.phone_item_id || null;
+  const brain_id = context?.ids?.brain_item_id || null;
+  const master_owner_id = context?.ids?.master_owner_id || null;
+
+  logDeps.info("seller_queue.entry", {
+    inbound_from,
+    phone_id,
+    brain_id,
+    master_owner_id,
+    send_queue_app_id: APP_IDS.send_queue,
+    has_context: Boolean(context?.found),
+    has_classification: Boolean(classification),
+    message_preview: String(message || "").slice(0, 80),
+  });
+
   const plan = routeSellerConversation({
     context,
     classification,
@@ -155,6 +185,16 @@ export async function maybeQueueSellerStageReply({
   });
 
   if (!plan?.handled) {
+    logDeps.info("seller_queue.skipped", {
+      inbound_from,
+      phone_id,
+      brain_id,
+      reason: "seller_flow_not_handled",
+      plan_handled: false,
+      plan_should_queue_reply: plan?.should_queue_reply ?? null,
+      selected_use_case: plan?.selected_use_case || null,
+      send_queue_app_id: APP_IDS.send_queue,
+    });
     return {
       ok: true,
       queued: false,
@@ -166,6 +206,17 @@ export async function maybeQueueSellerStageReply({
   }
 
   if (!plan.should_queue_reply) {
+    logDeps.info("seller_queue.skipped", {
+      inbound_from,
+      phone_id,
+      brain_id,
+      reason: "seller_flow_no_auto_reply_needed",
+      plan_handled: true,
+      plan_should_queue_reply: false,
+      selected_use_case: plan.selected_use_case || null,
+      detected_intent: plan.detected_intent || null,
+      send_queue_app_id: APP_IDS.send_queue,
+    });
     return {
       ok: true,
       queued: false,
@@ -192,31 +243,98 @@ export async function maybeQueueSellerStageReply({
     delay_max_minutes: response_window.max_minutes,
   });
 
-  const queued = await queue_message({
+  logDeps.info("seller_queue.before_create", {
     inbound_from,
-    create_brain_if_missing: true,
-    category: derivePrimaryCategory(context),
-    secondary_category: null,
-    template_lookup_secondary_category: null,
+    phone_id,
+    brain_id,
     use_case: plan.selected_use_case,
-    template_lookup_use_case: plan.template_lookup_use_case,
-    variant_group: plan.selected_variant_group,
-    tone: plan.selected_tone,
-    language: plan.detected_language,
-    paired_with_agent_type: plan.paired_with_agent_type,
-    scheduled_for_local: schedule.scheduled_for_local,
-    scheduled_for_utc: schedule.scheduled_for_utc,
-    timezone: schedule.timezone_label || timezone_label,
-    contact_window: schedule.contact_window || contact_window,
-    send_priority: deriveSendPriority(plan.response_tier),
-    message_type: plan.selected_use_case === "reengagement" ? "Re-Engagement" : "Follow-Up",
+    template_lookup_use_case: plan.template_lookup_use_case || null,
+    next_action: "queue_outbound_message",
+    send_queue_app_id: APP_IDS.send_queue,
     queue_status: "Queued",
+    scheduled_for_utc: schedule.scheduled_for_utc,
+    scheduled_for_local: schedule.scheduled_for_local,
+    timezone: schedule.timezone_label || timezone_label,
     rotation_key,
-    template_render_overrides: {
-      offer_price: plan.offer_price_display,
-      smart_cash_offer_display: plan.offer_price_display,
-    },
+    response_tier: plan.response_tier || null,
+    variant_group: plan.selected_variant_group || null,
+    tone: plan.selected_tone || null,
   });
+
+  let queued;
+  try {
+    queued = await queue_message({
+      inbound_from,
+      create_brain_if_missing: true,
+      category: derivePrimaryCategory(context),
+      secondary_category: null,
+      template_lookup_secondary_category: null,
+      use_case: plan.selected_use_case,
+      template_lookup_use_case: plan.template_lookup_use_case,
+      variant_group: plan.selected_variant_group,
+      tone: plan.selected_tone,
+      language: plan.detected_language,
+      paired_with_agent_type: plan.paired_with_agent_type,
+      scheduled_for_local: schedule.scheduled_for_local,
+      scheduled_for_utc: schedule.scheduled_for_utc,
+      timezone: schedule.timezone_label || timezone_label,
+      contact_window: schedule.contact_window || contact_window,
+      send_priority: deriveSendPriority(plan.response_tier),
+      message_type: plan.selected_use_case === "reengagement" ? "Re-Engagement" : "Follow-Up",
+      queue_status: "Queued",
+      rotation_key,
+      template_render_overrides: {
+        offer_price: plan.offer_price_display,
+        smart_cash_offer_display: plan.offer_price_display,
+      },
+    });
+  } catch (err) {
+    logDeps.warn("seller_queue.create_failed", {
+      inbound_from,
+      phone_id,
+      brain_id,
+      use_case: plan.selected_use_case,
+      next_action: "queue_outbound_message",
+      send_queue_app_id: APP_IDS.send_queue,
+      queue_status: "Queued",
+      scheduled_for_utc: schedule.scheduled_for_utc,
+      rotation_key,
+      error: err?.message || "unknown",
+      error_description: err?.response?.data?.error_description || err?.error_description || null,
+    });
+    throw err;
+  }
+
+  if (queued?.ok) {
+    logDeps.info("seller_queue.created", {
+      inbound_from,
+      phone_id,
+      brain_id,
+      use_case: plan.selected_use_case,
+      next_action: "queued",
+      send_queue_app_id: APP_IDS.send_queue,
+      queue_status: "Queued",
+      template_id: queued.template_id || null,
+      queue_item_id: queued.queue_item_id || queued.queue_result?.item_id || null,
+      scheduled_for_utc: schedule.scheduled_for_utc,
+      dedupe_key: queued.queue_result?.queue_id || null,
+      pipeline: queued.pipeline || "sms_engine_v2",
+    });
+  } else {
+    logDeps.warn("seller_queue.create_failed", {
+      inbound_from,
+      phone_id,
+      brain_id,
+      use_case: plan.selected_use_case,
+      next_action: queued?.stage || "unknown",
+      send_queue_app_id: APP_IDS.send_queue,
+      queue_status: "Queued",
+      scheduled_for_utc: schedule.scheduled_for_utc,
+      rotation_key,
+      reason: queued?.reason || "unknown",
+      stage: queued?.stage || null,
+    });
+  }
 
   return {
     ok: Boolean(queued?.ok),
