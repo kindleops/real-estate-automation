@@ -617,6 +617,158 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     text:
       "We have buyer-side marketing moving on {{property_address}} now. I will text you with any real showing activity or access needs as they come up.",
   }),
+  // ── Reengagement — Generic follow-up for owners with unknown/unresolved stage ─
+  // These fire when no stage-specific follow-up template exists, providing a
+  // minimum-viable reengagement path.  They intentionally avoid agent_first_name
+  // so they render even when no agent is assigned.
+  createLocalTemplate({
+    item_id: "local-template:reengagement:v1",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V1",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    paired_with_agent_type: "Warm Professional",
+    text:
+      "Hi {{seller_first_name}} — following up on {{property_address}}. Has anything changed on your end?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:reengagement:v2",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V2",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    paired_with_agent_type: "Warm Professional",
+    text:
+      "Checking back in on {{property_address}}. Wanted to see if you had any updates.",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:reengagement:no-name:v1",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V3",
+    category_secondary: "Follow-Up",
+    tone: "Neutral",
+    paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    text:
+      "Following up on {{property_address}}. Are you still the owner?",
+  }),
+  // ── Spanish — First-touch ownership check ──────────────────────────────────────
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:es:v1",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V1",
+    category_secondary: "Outreach",
+    tone: "Warm",
+    language: "Spanish",
+    paired_with_agent_type: "Warm Professional",
+    is_first_touch: "Yes",
+    text: "Hola {{seller_first_name}}, ¿usted es dueño de la propiedad en {{property_address}}?",
+    english_translation: "Hello {{seller_first_name}}, do you own the property at {{property_address}}?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:ownership_check:es:v2",
+    use_case: "ownership_check",
+    variant_group: "Stage 1 — Ownership Confirmation",
+    sequence_position: "V2",
+    category_secondary: "Outreach",
+    tone: "Neutral",
+    language: "Spanish",
+    paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    is_first_touch: "Yes",
+    text: "Buenas, le escribo sobre {{property_address}}. ¿Es usted el propietario?",
+    english_translation: "Hello, I am writing about {{property_address}}. Are you the owner?",
+  }),
+  // ── Spanish — Follow-up ownership check ────────────────────────────────────────
+  createLocalTemplate({
+    item_id: "local-template:follow_up:ownership:es:v1",
+    use_case: "ownership_check_follow_up",
+    variant_group: "Stage 1 — Ownership Confirmation Follow-Up",
+    sequence_position: "V1",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    language: "Spanish",
+    paired_with_agent_type: "Warm Professional",
+    text: "Hola {{seller_first_name}}, dando seguimiento sobre {{property_address}}. ¿Sigue siendo el dueño?",
+    english_translation: "Hello {{seller_first_name}}, following up on {{property_address}}. Are you still the owner?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:follow_up:ownership:es:v2",
+    use_case: "ownership_check_follow_up",
+    variant_group: "Stage 1 — Ownership Confirmation Follow-Up",
+    sequence_position: "V2",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    language: "Spanish",
+    paired_with_agent_type: "Warm Professional",
+    text: "Le escribo de nuevo sobre {{property_address}}. ¿Tiene alguna novedad?",
+    english_translation: "Writing again about {{property_address}}. Do you have any updates?",
+  }),
+  // ── Spanish — Reengagement ─────────────────────────────────────────────────────
+  createLocalTemplate({
+    item_id: "local-template:reengagement:es:v1",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V1",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    language: "Spanish",
+    paired_with_agent_type: "Warm Professional",
+    text: "Hola {{seller_first_name}}, dando seguimiento sobre {{property_address}}. ¿Ha cambiado algo?",
+    english_translation: "Hello {{seller_first_name}}, following up on {{property_address}}. Has anything changed?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:reengagement:es:v2",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V2",
+    category_secondary: "Follow-Up",
+    tone: "Neutral",
+    language: "Spanish",
+    paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    text: "Dando seguimiento sobre {{property_address}}. ¿Sigue siendo el propietario?",
+    english_translation: "Following up on {{property_address}}. Are you still the owner?",
+  }),
+  // ── Spanish — Consider selling follow-up ───────────────────────────────────────
+  createLocalTemplate({
+    item_id: "local-template:follow_up:consider-selling:es:v1",
+    use_case: "consider_selling_follow_up",
+    variant_group: "Stage 2 — Consider Selling Follow-Up",
+    sequence_position: "V1",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    language: "Spanish",
+    paired_with_agent_type: "Warm Professional",
+    text: "Quería dar seguimiento sobre {{property_address}}. Si el precio fuera justo, ¿consideraría vender?",
+    english_translation: "Wanted to follow up on {{property_address}}. If the price was right, would you consider selling?",
+  }),
+  // ── Multifamily — Follow-up reengagement ───────────────────────────────────────
+  createLocalTemplate({
+    item_id: "local-template:reengagement:mf:v1",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V1",
+    category_primary: "Landlord / Multifamily",
+    category_secondary: "Follow-Up",
+    tone: "Warm",
+    paired_with_agent_type: "Specialist-Landlord / Market-Local",
+    text:
+      "Following up on {{property_address}}. Are you still the owner there?",
+  }),
+  createLocalTemplate({
+    item_id: "local-template:reengagement:mf:v2",
+    use_case: "reengagement",
+    variant_group: "Reengagement — Generic Follow-Up",
+    sequence_position: "V2",
+    category_primary: "Landlord / Multifamily",
+    category_secondary: "Follow-Up",
+    tone: "Neutral",
+    paired_with_agent_type: "Specialist-Landlord / Market-Local",
+    text:
+      "Checking back on {{property_address}}. Any updates on your end?",
+  }),
 ]);
 
 export default LOCAL_TEMPLATE_CANDIDATES;

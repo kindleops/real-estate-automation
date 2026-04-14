@@ -357,9 +357,12 @@ function buildTemplateSelectionInputs({
   const resolved_category = effective_follow_up_plan?.category || primary_category;
   const resolved_secondary_category =
     effective_follow_up_plan?.secondary_category ?? secondary_category;
+  const base_route_use_case = route?.use_case || "ownership_check";
   const resolved_use_case = is_first_touch
     ? "ownership_check"
-    : (effective_follow_up_plan?.template_lookup_use_case || route?.use_case || "ownership_check");
+    : (effective_follow_up_plan?.template_lookup_use_case ||
+       followUpUseCaseForStage(base_route_use_case) ||
+       base_route_use_case);
   const resolved_sequence_position = is_first_touch ? "1st Touch" : sequence_position;
   const resolved_message_type = is_first_touch ? "Cold Outbound" : "Follow-Up";
   const template_selector = buildTemplateSelectorInput({

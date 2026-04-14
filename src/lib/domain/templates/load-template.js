@@ -1060,6 +1060,84 @@ export async function loadTemplateCandidates({
     }
   }
 
+  // ── Reengagement fallback ladder ─────────────────────────────────────────────
+  // When no templates survived exact + alias matching, retry with progressively
+  // degraded criteria before giving up.  Order:
+  //   1. "reengagement" use_case  (generic follow-up for any stage)
+  //   2. "ownership_check_follow_up"  (most common first-stage follow-up)
+  // Only runs for Follow-Up touch_type and non-strict modes.
+  if (
+    !strict_touch_one_podio_only &&
+    selector_input.touch_type === TEMPLATE_TOUCH_TYPES.FOLLOW_UP
+  ) {
+    const fallback_use_cases = ["reengagement", "ownership_check_follow_up"];
+    const already_tried = new Set(use_case_candidates.map((uc) => normalizeSelectorText(uc)));
+
+    for (const fallback_uc of fallback_use_cases) {
+      if (already_tried.has(normalizeSelectorText(fallback_uc))) continue;
+
+      const fallback_selector = { ...selector_input, use_case: fallback_uc, deal_strategy: null };
+      const fallback_candidates = expandSelectorUseCases(fallback_uc, variant_group);
+      const fallback_filters = buildRemoteFilterRequests({
+        selector_input: fallback_selector,
+        use_case_candidates: fallback_candidates,
+        strict_touch_one_podio_only: false,
+      });
+
+      for (const source of sources) {
+        const result = await evaluateSourceSelection({
+          source,
+          filter_requests: fallback_filters,
+          selector_input: fallback_selector,
+          recently_used_template_ids,
+          context,
+          template_render_overrides,
+          strict_touch_one_podio_only: false,
+          remote_fetcher,
+          local_fetcher,
+          diagnostics: resolution_diagnostics,
+        });
+
+        if (result.survivors.length) {
+          resolution_diagnostics.selected_bucket_source = source;
+          const template_resolution_source =
+            source === "podio" ? "podio_template" : "local_template_fallback";
+
+          info("template.reengagement_fallback_matched", {
+            original_use_case: selector_input.use_case,
+            fallback_use_case: fallback_uc,
+            source,
+            survivor_count: result.survivors.length,
+          });
+
+          return result.survivors.map((template) => ({
+            ...template,
+            rotation_key,
+            template_resolution_source,
+            template_fallback_reason: "reengagement_fallback",
+            template_fallback_use_case: fallback_uc,
+            template_selection_diagnostics: {
+              selector_input: fallback_selector,
+              requested_use_cases: [fallback_uc],
+              use_case_candidates: fallback_candidates,
+              resolution: summarizeTemplateResolutionDiagnostics(resolution_diagnostics),
+              audit_summary: {
+                source,
+                total_candidates: result.candidates.length,
+                survivor_count: result.survivors.length,
+                rejection_counts: countRejectionReasons(result.candidates, "rejection_reasons"),
+                operational_rejection_counts: countRejectionReasons(
+                  result.candidates,
+                  "operational_rejection_reasons"
+                ),
+              },
+            },
+          }));
+        }
+      }
+    }
+  }
+
   const failure_diagnostics = {
     selector_input,
     requested_use_cases,
@@ -1070,6 +1148,20 @@ export async function loadTemplateCandidates({
     filter_requests,
     prefetch_audit_payload: last_prefetch_audit_payload,
     audit_payload: last_audit_payload,
+    elimination_summary: last_audit_payload
+      ? {
+          total_candidates: last_audit_payload.total_candidates || 0,
+          survivors: (last_audit_payload.survivors || []).length,
+          rejection_counts: countRejectionReasons(
+            last_audit_payload.candidates || [],
+            "rejection_reasons"
+          ),
+          operational_rejection_counts: countRejectionReasons(
+            last_audit_payload.candidates || [],
+            "operational_rejection_reasons"
+          ),
+        }
+      : null,
   };
 
   if (strict_touch_one_podio_only) {

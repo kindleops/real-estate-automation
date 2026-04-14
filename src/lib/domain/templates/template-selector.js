@@ -22,6 +22,64 @@ export const TEMPLATE_METADATA_ONLY_FIELDS = Object.freeze([
 ]);
 
 const TEMPLATE_LOOKUP_USE_CASE_ALIASES = Object.freeze({
+  // ── Follow-up stage aliases ──────────────────────────────────────────────────
+  // Each _follow_up use_case also matches its base stage and the generic
+  // reengagement bucket so that scoring can pick the best available template
+  // even when no exact follow-up variant is loaded.
+  ownership_check_follow_up: Object.freeze([
+    "reengagement",
+  ]),
+  consider_selling_follow_up: Object.freeze([
+    "ownership_check_follow_up",
+    "reengagement",
+  ]),
+  asking_price_follow_up: Object.freeze([
+    "consider_selling_follow_up",
+    "reengagement",
+  ]),
+  price_works_confirm_basics_follow_up: Object.freeze([
+    "asking_price_follow_up",
+    "followup_soft",
+    "reengagement",
+  ]),
+  price_high_condition_probe_follow_up: Object.freeze([
+    "asking_price_follow_up",
+    "followup_hard",
+    "followup_soft",
+    "reengagement",
+  ]),
+  offer_reveal_cash_follow_up: Object.freeze([
+    "offer_no_response_followup",
+    "followup_soft",
+    "followup_hard",
+    "persona_warm_professional_followup",
+    "persona_neighborly_followup",
+    "persona_empathetic_followup",
+    "persona_investor_direct_followup",
+    "persona_no-nonsense_closer_followup",
+    "reengagement",
+  ]),
+  // ── Reengagement cascade ─────────────────────────────────────────────────────
+  reengagement: Object.freeze([
+    "ownership_check_follow_up",
+  ]),
+  // ── Multifamily follow-up aliases ────────────────────────────────────────────
+  mf_confirm_units_follow_up: Object.freeze([
+    "reengagement",
+  ]),
+  mf_occupancy_follow_up: Object.freeze([
+    "mf_confirm_units_follow_up",
+    "reengagement",
+  ]),
+  mf_rents_follow_up: Object.freeze([
+    "mf_occupancy_follow_up",
+    "reengagement",
+  ]),
+  mf_expenses_follow_up: Object.freeze([
+    "mf_rents_follow_up",
+    "reengagement",
+  ]),
+  // ── Negotiation + closing aliases ────────────────────────────────────────────
   ask_timeline: Object.freeze([
     "text_me_later_specific",
     "not_ready",
@@ -41,23 +99,6 @@ const TEMPLATE_LOOKUP_USE_CASE_ALIASES = Object.freeze({
   ]),
   mf_offer_reveal: Object.freeze([
     "offer_reveal_cash",
-  ]),
-  offer_reveal_cash_follow_up: Object.freeze([
-    "offer_no_response_followup",
-    "followup_soft",
-    "followup_hard",
-    "persona_warm_professional_followup",
-    "persona_neighborly_followup",
-    "persona_empathetic_followup",
-    "persona_investor_direct_followup",
-    "persona_no-nonsense_closer_followup",
-  ]),
-  price_works_confirm_basics_follow_up: Object.freeze([
-    "followup_soft",
-  ]),
-  price_high_condition_probe_follow_up: Object.freeze([
-    "followup_hard",
-    "followup_soft",
   ]),
 });
 
