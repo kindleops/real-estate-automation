@@ -8,18 +8,14 @@ import {
   __resetPhoneNumbersTestDeps,
 } from "@/lib/podio/apps/phone-numbers.js";
 
-test("findPhoneRecord falls back to raw phone field when normalized fields are missing", async (t) => {
+test("findPhoneRecord returns null when normalized text-field lookups find nothing", async (t) => {
   const calls = [];
 
   __setPhoneNumbersTestDeps({
     logger: { info() {} },
     filterAppItems: async (_app_id, filters) => {
       calls.push(filters);
-
-      if (filters[PHONE_FIELDS.phone] === "(612) 743-3952") {
-        return { items: [{ item_id: 90210 }] };
-      }
-
+      // No phone item exists in Podio for this number
       return { items: [] };
     },
   });
@@ -30,22 +26,24 @@ test("findPhoneRecord falls back to raw phone field when normalized fields are m
 
   const result = await findPhoneRecord("+16127433952");
 
-  assert.equal(result?.item_id, 90210);
+  // Should return null (not throw) when the number doesn't exist
+  assert.equal(result, null, "should return null when no phone item matches");
   assert.ok(
     calls.some((filters) => filters[PHONE_FIELDS.phone_hidden] === "6127433952"),
-    "should try phone-hidden lookup first"
+    "should try phone-hidden lookup"
   );
   assert.ok(
     calls.some((filters) => filters[PHONE_FIELDS.canonical_e164] === "+16127433952"),
-    "should try canonical-e164 lookup before raw phone fallback"
+    "should try canonical-e164 lookup"
   );
   assert.ok(
     calls.some((filters) => filters[PHONE_FIELDS.canonical_e164] === "6127433952"),
-    "should try canonical-e164 10-digit fallback before raw phone fallback"
+    "should try canonical-e164 10-digit fallback"
   );
+  // Raw phone-type field is NOT tried — Podio doesn't support filtering on phone-type fields
   assert.ok(
-    calls.some((filters) => filters[PHONE_FIELDS.phone] === "(612) 743-3952"),
-    "should try raw phone-field national formatting as a final fallback"
+    !calls.some((filters) => filters[PHONE_FIELDS.phone]),
+    "should NOT attempt to filter on phone-type field"
   );
 });
 

@@ -185,11 +185,18 @@ export async function findPhoneRecord(raw_phone) {
 
   const canonical_e164 = toCanonicalUsE164(d10);
 
+  // NOTE: findPhoneByRawPhoneField was removed from this cascade because the
+  // Podio "phone" field has type "phone" which is NOT filterable via the
+  // Podio filter API.  Attempting to filter on it throws
+  // "Filtering not supported for fields of type phone", which kills the
+  // entire inbound handler.  phone-hidden (text) and canonical-e164 (text)
+  // already cover every normalised format, so the phone-type fallback could
+  // never add value.
   return (
     (await findPhoneByHiddenNumber(d10)) ??
     (await findPhoneByCanonicalE164(canonical_e164)) ??
     (await findPhoneByCanonicalE164(d10)) ??
-    (await findPhoneByRawPhoneField(raw_phone))
+    null
   );
 }
 
