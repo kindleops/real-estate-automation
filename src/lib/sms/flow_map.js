@@ -188,6 +188,28 @@ const OBJECTION_ROUTES = Object.freeze({
 });
 
 // ══════════════════════════════════════════════════════════════════════════
+// STAGE NORMALIZATION — Podio category text → flow_map short codes
+// ══════════════════════════════════════════════════════════════════════════
+
+const PODIO_STAGE_ALIASES = new Map([
+  ["ownership confirmation", "ownership"],
+  ["offer interest confirmation", "consider_selling"],
+  ["seller price discovery", "asking_price"],
+  ["condition / timeline discovery", "s4b"],
+  ["offer positioning", "offer"],
+  ["negotiation", "offer"],
+  ["verbal acceptance / lock", "contract"],
+  ["contract out", "contract"],
+  ["signed / closing", "close"],
+  ["closed / dead outcome", "close"],
+]);
+
+function normalizeStage(raw) {
+  const lower = String(raw ?? "").toLowerCase().trim();
+  return PODIO_STAGE_ALIASES.get(lower) || lower;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // STAGE-BASED FLOW PROGRESSION
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -196,7 +218,7 @@ const OBJECTION_ROUTES = Object.freeze({
  * positive seller signals.
  */
 function resolveStageProgression(brain_state, classify_result, property_context) {
-  const current_stage = String(brain_state?.conversation_stage ?? "").toLowerCase();
+  const current_stage = normalizeStage(brain_state?.conversation_stage);
   const signals = classify_result?.positive_signals || [];
   const signal_set = new Set(signals.map((s) => String(s).toLowerCase()));
 

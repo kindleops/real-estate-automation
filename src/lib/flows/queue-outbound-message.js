@@ -339,6 +339,11 @@ export async function queueOutboundMessage({
   });
 
   if (!resolved_inbound_from) {
+    warn("outbound.queue_message_skip", {
+      reason: "missing_inbound_from",
+      inbound_from: resolved_inbound_from,
+      use_case: use_case || null,
+    });
     return {
       ok: false,
       stage: "input",
@@ -348,6 +353,11 @@ export async function queueOutboundMessage({
   }
 
   if (!normalized_inbound_from) {
+    warn("outbound.queue_message_skip", {
+      reason: "invalid_inbound_from",
+      inbound_from: resolved_inbound_from,
+      use_case: use_case || null,
+    });
     return {
       ok: false,
       stage: "input",
@@ -467,7 +477,7 @@ export async function queueOutboundMessage({
     agent_style_fit,
   });
 
-  // Compliance / STOP — abort immediately
+  // Compliance / STOP — abort immediately (always honored, even pre-routed)
   if (flow.action === ACTIONS.STOP && !message_override) {
     info("outbound.queue_message_stopped", {
       inbound_from: resolved_inbound_from,
@@ -487,7 +497,21 @@ export async function queueOutboundMessage({
     };
   }
 
-  if (flow.action === ACTIONS.WAIT && !message_override) {
+  // When the caller provided an explicit use_case, they already performed
+  // routing (e.g. routeSellerConversation).  Skip WAIT / ESCALATE gates —
+  // only STOP (compliance) is honoured above.
+  const caller_pre_routed = Boolean(use_case);
+
+  if (flow.action === ACTIONS.WAIT && !message_override && !caller_pre_routed) {
+    warn("outbound.flow_action_wait", {
+      inbound_from: resolved_inbound_from,
+      phone_item_id: context?.ids?.phone_item_id || null,
+      brain_item_id: context?.ids?.brain_item_id || null,
+      conversation_stage: context?.summary?.conversation_stage || null,
+      reason: flow.reason,
+      action: flow.action,
+      use_case: use_case || null,
+    });
     return {
       ok: false,
       stage: "flow_map",
@@ -500,7 +524,16 @@ export async function queueOutboundMessage({
     };
   }
 
-  if (flow.action === ACTIONS.ESCALATE && !message_override) {
+  if (flow.action === ACTIONS.ESCALATE && !message_override && !caller_pre_routed) {
+    warn("outbound.flow_action_escalate", {
+      inbound_from: resolved_inbound_from,
+      phone_item_id: context?.ids?.phone_item_id || null,
+      brain_item_id: context?.ids?.brain_item_id || null,
+      conversation_stage: context?.summary?.conversation_stage || null,
+      reason: flow.reason,
+      action: flow.action,
+      use_case: use_case || null,
+    });
     return {
       ok: false,
       stage: "flow_map",

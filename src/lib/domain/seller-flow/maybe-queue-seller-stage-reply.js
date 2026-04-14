@@ -164,11 +164,18 @@ export async function maybeQueueSellerStageReply({
   const brain_id = context?.ids?.brain_item_id || null;
   const master_owner_id = context?.ids?.master_owner_id || null;
 
+  const prospect_id = context?.ids?.prospect_id || null;
+  const property_id = context?.ids?.property_id || null;
+  const stage = context?.summary?.conversation_stage || null;
+
   logDeps.info("seller_queue.entry", {
     inbound_from,
     phone_id,
     brain_id,
     master_owner_id,
+    prospect_id,
+    property_id,
+    stage,
     send_queue_app_id: APP_IDS.send_queue,
     has_context: Boolean(context?.found),
     has_classification: Boolean(classification),
@@ -185,10 +192,13 @@ export async function maybeQueueSellerStageReply({
   });
 
   if (!plan?.handled) {
-    logDeps.info("seller_queue.skipped", {
+    logDeps.info("seller_queue.skip", {
       inbound_from,
       phone_id,
       brain_id,
+      prospect_id,
+      property_id,
+      stage,
       reason: "seller_flow_not_handled",
       plan_handled: false,
       plan_should_queue_reply: plan?.should_queue_reply ?? null,
@@ -206,10 +216,13 @@ export async function maybeQueueSellerStageReply({
   }
 
   if (!plan.should_queue_reply) {
-    logDeps.info("seller_queue.skipped", {
+    logDeps.info("seller_queue.skip", {
       inbound_from,
       phone_id,
       brain_id,
+      prospect_id,
+      property_id,
+      stage,
       reason: "seller_flow_no_auto_reply_needed",
       plan_handled: true,
       plan_should_queue_reply: false,
@@ -247,6 +260,9 @@ export async function maybeQueueSellerStageReply({
     inbound_from,
     phone_id,
     brain_id,
+    prospect_id,
+    property_id,
+    stage,
     use_case: plan.selected_use_case,
     template_lookup_use_case: plan.template_lookup_use_case || null,
     next_action: "queue_outbound_message",
@@ -293,6 +309,9 @@ export async function maybeQueueSellerStageReply({
       inbound_from,
       phone_id,
       brain_id,
+      prospect_id,
+      property_id,
+      stage,
       use_case: plan.selected_use_case,
       next_action: "queue_outbound_message",
       send_queue_app_id: APP_IDS.send_queue,
@@ -305,11 +324,29 @@ export async function maybeQueueSellerStageReply({
     throw err;
   }
 
+  // Log the resolved next action (QUEUE / WAIT / STOP / ESCALATE)
+  logDeps.info("seller_queue.next_action", {
+    inbound_from,
+    phone_id,
+    brain_id,
+    prospect_id,
+    property_id,
+    stage,
+    use_case: plan.selected_use_case,
+    action: queued?.flow_action || (queued?.ok ? "queue_reply" : queued?.action || "unknown"),
+    reason: queued?.flow_reason || queued?.reason || null,
+    ok: Boolean(queued?.ok),
+    send_queue_app_id: APP_IDS.send_queue,
+  });
+
   if (queued?.ok) {
-    logDeps.info("seller_queue.created", {
+    logDeps.info("seller_queue.create_success", {
       inbound_from,
       phone_id,
       brain_id,
+      prospect_id,
+      property_id,
+      stage,
       use_case: plan.selected_use_case,
       next_action: "queued",
       send_queue_app_id: APP_IDS.send_queue,
@@ -325,14 +362,18 @@ export async function maybeQueueSellerStageReply({
       inbound_from,
       phone_id,
       brain_id,
+      prospect_id,
+      property_id,
+      stage,
       use_case: plan.selected_use_case,
       next_action: queued?.stage || "unknown",
+      action: queued?.action || null,
       send_queue_app_id: APP_IDS.send_queue,
       queue_status: "Queued",
       scheduled_for_utc: schedule.scheduled_for_utc,
       rotation_key,
       reason: queued?.reason || "unknown",
-      stage: queued?.stage || null,
+      error_description: queued?.reason || null,
     });
   }
 

@@ -807,3 +807,88 @@ test("deal strategy: creative signals route correctly", () => {
   assert.equal(resolveDealStrategy({ seller_wants_subject_to: true }), "Subject To");
   assert.equal(resolveDealStrategy({ seller_wants_novation: true }), "Novation");
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// 8b. STAGE NORMALIZATION — Podio text values → flow_map short codes
+// ══════════════════════════════════════════════════════════════════════════
+
+test("flow: Podio stage 'Ownership Confirmation' resolves to ownership_check", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Ownership Confirmation" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+  assert.equal(result.use_case, "ownership_check");
+});
+
+test("flow: Podio stage 'Offer Interest Confirmation' resolves to consider_selling stage", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Offer Interest Confirmation" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+  assert.equal(result.use_case, "consider_selling_follow_up");
+});
+
+test("flow: Podio stage 'Seller Price Discovery' resolves to asking_price stage", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Seller Price Discovery" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+  assert.equal(result.use_case, "asking_price_follow_up");
+});
+
+test("flow: Podio stage 'Condition / Timeline Discovery' resolves to condition probe", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Condition / Timeline Discovery" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+  assert.equal(result.use_case, "condition_question_set");
+});
+
+test("flow: Podio stage 'Offer Positioning' resolves to offer stage", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Offer Positioning" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+  assert.equal(result.use_case, "justify_price");
+});
+
+test("flow: Podio stage 'Contract Out' resolves to contract stage", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Contract Out" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+});
+
+test("flow: Podio stage 'Signed / Closing' resolves to close stage", () => {
+  const result = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "Signed / Closing" },
+  });
+  assert.equal(result.action, ACTIONS.QUEUE_REPLY);
+});
+
+test("flow: existing short codes still work after normalization", () => {
+  const r1 = mapNextAction({
+    classify_result: { positive_signals: ["confirms_ownership"] },
+    brain_state: { conversation_stage: "ownership" },
+  });
+  assert.equal(r1.use_case, "consider_selling");
+
+  const r2 = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "s1" },
+  });
+  assert.equal(r2.use_case, "ownership_check");
+
+  const r3 = mapNextAction({
+    classify_result: { positive_signals: [] },
+    brain_state: { conversation_stage: "consider_selling" },
+  });
+  assert.equal(r3.use_case, "consider_selling_follow_up");
+});

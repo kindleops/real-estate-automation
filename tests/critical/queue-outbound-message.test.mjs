@@ -451,3 +451,100 @@ test("queueOutboundMessage rejects duplicate pending queue item", async () => {
   assert.equal(result.stage, "duplicate_guard");
   assert.equal(result.reason, "duplicate_pending_queue_item");
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// NEW: caller_pre_routed bypasses ESCALATE / WAIT gates
+// ══════════════════════════════════════════════════════════════════════════
+
+test("queueOutboundMessage: explicit use_case bypasses ESCALATE gate", async () => {
+  // flow_map returns ESCALATE (the bug scenario), but caller provided use_case
+  const result = await queueOutboundMessage(
+    { phone: "12087034955", use_case: "consider_selling" },
+    baseDeps({
+      mapNextActionImpl: () => ({
+        action: ACTIONS.ESCALATE,
+        use_case: null,
+        stage_code: null,
+        reason: "unrecognized_stage",
+        delay_profile: "neutral",
+      }),
+    })
+  );
+
+  // Should NOT get ok:false from ESCALATE — caller already routed
+  assert.equal(result.ok, true, "pre-routed call should bypass ESCALATE");
+  assert.equal(result.stage, "queued");
+});
+
+test("queueOutboundMessage: explicit use_case bypasses WAIT gate", async () => {
+  const result = await queueOutboundMessage(
+    { phone: "12087034955", use_case: "ownership_check" },
+    baseDeps({
+      mapNextActionImpl: () => ({
+        action: ACTIONS.WAIT,
+        use_case: null,
+        stage_code: null,
+        reason: "wait_for_reply",
+        delay_profile: "neutral",
+      }),
+    })
+  );
+
+  assert.equal(result.ok, true, "pre-routed call should bypass WAIT");
+  assert.equal(result.stage, "queued");
+});
+
+test("queueOutboundMessage: explicit use_case does NOT bypass STOP gate", async () => {
+  // STOP is a compliance gate — always honoured
+  const result = await queueOutboundMessage(
+    { phone: "12087034955", use_case: "consider_selling" },
+    baseDeps({
+      mapNextActionImpl: () => ({
+        action: ACTIONS.STOP,
+        use_case: null,
+        stage_code: null,
+        reason: "compliance_stop",
+        cancel_queued: true,
+      }),
+    })
+  );
+
+  assert.equal(result.ok, false, "STOP is always honoured");
+  assert.equal(result.action, ACTIONS.STOP);
+});
+
+test("queueOutboundMessage: ESCALATE still blocks when no explicit use_case", async () => {
+  const result = await queueOutboundMessage(
+    { phone: "12087034955" },
+    baseDeps({
+      mapNextActionImpl: () => ({
+        action: ACTIONS.ESCALATE,
+        use_case: null,
+        stage_code: null,
+        reason: "unrecognized_stage",
+      }),
+    })
+  );
+
+  assert.equal(result.ok, false, "ESCALATE should block without explicit use_case");
+  assert.equal(result.stage, "flow_map");
+  assert.equal(result.action, ACTIONS.ESCALATE);
+});
+
+test("queueOutboundMessage: WAIT still blocks when no explicit use_case", async () => {
+  const result = await queueOutboundMessage(
+    { phone: "12087034955" },
+    baseDeps({
+      mapNextActionImpl: () => ({
+        action: ACTIONS.WAIT,
+        use_case: null,
+        stage_code: null,
+        reason: "wait_for_reply",
+      }),
+    })
+  );
+
+  assert.equal(result.ok, false, "WAIT should block without explicit use_case");
+  assert.equal(result.stage, "flow_map");
+  assert.equal(result.action, ACTIONS.WAIT);
+});

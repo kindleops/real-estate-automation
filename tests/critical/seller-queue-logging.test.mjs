@@ -3,10 +3,11 @@
  *
  * Verifies that maybe-queue-seller-stage-reply emits:
  *   seller_queue.entry
- *   seller_queue.skipped       (plan not handled / no auto reply)
- *   seller_queue.before_create (just before queue_message call)
- *   seller_queue.created       (successful queue creation)
- *   seller_queue.create_failed (queue creation failed or returned ok:false)
+ *   seller_queue.skip           (plan not handled / no auto reply)
+ *   seller_queue.before_create  (just before queue_message call)
+ *   seller_queue.next_action    (resolved action after queue_message returns)
+ *   seller_queue.create_success (successful queue creation)
+ *   seller_queue.create_failed  (queue creation failed or returned ok:false)
  *
  * Each log event is checked for required metadata fields.
  */
@@ -144,10 +145,10 @@ test("seller_queue.entry: includes context presence indicators", withLogCapture(
 }));
 
 // ══════════════════════════════════════════════════════════════════════════
-// 2. seller_queue.skipped — plan not handled
+// 2. seller_queue.skip — plan not handled
 // ══════════════════════════════════════════════════════════════════════════
 
-test("seller_queue.skipped: emitted when plan.handled is false", withLogCapture(async (capture) => {
+test("seller_queue.skip: emitted when plan.handled is false", withLogCapture(async (capture) => {
   // Classification with no recognized seller flow triggers "not handled"
   const result = await maybeQueueSellerStageReply({
     inbound_from: "+12125551234",
@@ -162,12 +163,14 @@ test("seller_queue.skipped: emitted when plan.handled is false", withLogCapture(
 
   // If the plan wasn't handled, we should see a skipped log
   if (!result.handled) {
-    const skipped = capture.first("seller_queue.skipped");
-    assert.ok(skipped, "seller_queue.skipped should be emitted");
+    const skipped = capture.first("seller_queue.skip");
+    assert.ok(skipped, "seller_queue.skip should be emitted");
     assert.equal(skipped.meta.phone_id, 401);
     assert.equal(skipped.meta.brain_id, 501);
     assert.equal(skipped.meta.reason, "seller_flow_not_handled");
     assert.equal(skipped.meta.send_queue_app_id, APP_IDS.send_queue);
+    assert.equal(skipped.meta.prospect_id, 301);
+    assert.equal(skipped.meta.property_id, 601);
   }
 }));
 
@@ -210,10 +213,10 @@ test("seller_queue.before_create: emitted with scheduling context", withLogCaptu
 }));
 
 // ══════════════════════════════════════════════════════════════════════════
-// 4. seller_queue.created — emitted after successful queue creation
+// 4. seller_queue.create_success — emitted after successful queue creation
 // ══════════════════════════════════════════════════════════════════════════
 
-test("seller_queue.created: emitted with item_id and dedupe_key on success", withLogCapture(async (capture) => {
+test("seller_queue.create_success: emitted with item_id and dedupe_key on success", withLogCapture(async (capture) => {
   const queue_message_stub = async () => ({
     ok: true,
     queue_item_id: 9999,
@@ -234,8 +237,8 @@ test("seller_queue.created: emitted with item_id and dedupe_key on success", wit
   });
 
   if (result.queued) {
-    const created = capture.first("seller_queue.created");
-    assert.ok(created, "seller_queue.created should be emitted");
+    const created = capture.first("seller_queue.create_success");
+    assert.ok(created, "seller_queue.create_success should be emitted");
     assert.equal(created.meta.inbound_from, "+12125551234");
     assert.equal(created.meta.phone_id, 401);
     assert.equal(created.meta.brain_id, 501);
@@ -245,6 +248,13 @@ test("seller_queue.created: emitted with item_id and dedupe_key on success", wit
     assert.equal(created.meta.queue_item_id, 9999);
     assert.equal(created.meta.dedupe_key, "abc123def456ab");
     assert.equal(created.meta.pipeline, "sms_engine_v2");
+    assert.equal(created.meta.prospect_id, 301);
+    assert.equal(created.meta.property_id, 601);
+
+    // seller_queue.next_action should also be emitted
+    const next = capture.first("seller_queue.next_action");
+    assert.ok(next, "seller_queue.next_action should be emitted");
+    assert.equal(next.meta.ok, true);
   }
 }));
 
@@ -279,7 +289,8 @@ test("seller_queue.create_failed: emitted when queue_message returns ok:false", 
     assert.equal(failed.meta.brain_id, 501);
     assert.equal(failed.meta.send_queue_app_id, APP_IDS.send_queue);
     assert.equal(failed.meta.reason, "template_not_found");
-    assert.equal(failed.meta.stage, "template");
+    assert.equal(failed.meta.prospect_id, 301);
+    assert.equal(failed.meta.property_id, 601);
   }
 }));
 
@@ -330,7 +341,7 @@ test("seller_queue: every code path emits entry log", withLogCapture(async (capt
   assert.ok(entries.length >= 1, "at least one entry log should be emitted");
 }));
 
-test("seller_queue: skipped path emits both entry and skipped", withLogCapture(async (capture) => {
+test("seller_queue: skipped path emits both entry and skip", withLogCapture(async (capture) => {
   const result = await maybeQueueSellerStageReply({
     inbound_from: "+12125559999",
     context: stubContext(),
@@ -342,8 +353,8 @@ test("seller_queue: skipped path emits both entry and skipped", withLogCapture(a
   assert.ok(entries.length >= 1, "entry log should be emitted");
 
   if (!result.handled) {
-    const skipped = capture.find("seller_queue.skipped");
-    assert.ok(skipped.length >= 1, "skipped log should be emitted for not-handled");
+    const skipped = capture.find("seller_queue.skip");
+    assert.ok(skipped.length >= 1, "skip log should be emitted for not-handled");
   }
 }));
 
