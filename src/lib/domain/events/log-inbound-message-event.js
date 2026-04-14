@@ -11,6 +11,7 @@ const EVENT_FIELDS = {
   master_owner: "master-owner",
   prospect: "linked-seller",
   property: "property",
+  market: "market",
   textgrid_number: "textgrid-number",
   phone_number: "phone-number",
   conversation: "conversation",
@@ -58,6 +59,7 @@ export async function logInboundMessageEvent({
   master_owner_id = null,
   prospect_id = null,
   property_id = null,
+  market_id = null,
   phone_item_id = null,
   inbound_number_item_id = null,
   message_body = "",
@@ -92,6 +94,9 @@ export async function logInboundMessageEvent({
       : {}),
     ...(asArrayAppRef(property_id)
       ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
+      : {}),
+    ...(asArrayAppRef(market_id)
+      ? { [EVENT_FIELDS.market]: asArrayAppRef(market_id) }
       : {}),
     ...(asArrayAppRef(phone_item_id)
       ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }

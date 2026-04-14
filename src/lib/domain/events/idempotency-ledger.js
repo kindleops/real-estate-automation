@@ -206,11 +206,11 @@ export async function completeIdempotentProcessing({
 
   const fields = {
     "timestamp": { start: completed_at },
-    "trigger-name": buildTriggerName(scope),
-    "source-app": "External API",
   };
 
   if (!skip_content_fields) {
+    fields["trigger-name"] = buildTriggerName(scope);
+    fields["source-app"] = "External API";
     fields["message"] = buildRecordMessage(scope, key, summary);
     fields["ai-output"] = processing_meta;
   }
@@ -256,11 +256,11 @@ export async function failIdempotentProcessing({
 
   const fields = {
     "timestamp": { start: failed_at },
-    "trigger-name": buildTriggerName(scope),
-    "source-app": "External API",
   };
 
   if (!skip_content_fields) {
+    fields["trigger-name"] = buildTriggerName(scope);
+    fields["source-app"] = "External API";
     fields["message"] = buildRecordMessage(scope, key, `Failed ${clean(scope)} event ${clean(key)}`);
     fields["ai-output"] = processing_meta;
   }
