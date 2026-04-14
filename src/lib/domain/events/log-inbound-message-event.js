@@ -85,7 +85,6 @@ export async function logInboundMessageEvent({
     [EVENT_FIELDS.processed_by]: processed_by,
     [EVENT_FIELDS.source_app]: source_app,
     [EVENT_FIELDS.trigger_name]: trigger_name,
-    [EVENT_FIELDS.ai_output]: "",
     ...(asArrayAppRef(master_owner_id)
       ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
       : {}),

@@ -358,9 +358,24 @@ export async function recordSystemAlert({
     let updated = false;
 
     if (existing?.item_id) {
-      await updateMessageEvent(existing.item_id, fields);
-      alert_item_id = existing.item_id;
-      updated = true;
+      try {
+        await updateMessageEvent(existing.item_id, fields);
+        alert_item_id = existing.item_id;
+        updated = true;
+      } catch (updateError) {
+        if (isRevisionLimitExceeded(updateError)) {
+          logger.warn("system_alert.revision_limit_rotation", {
+            subsystem: normalized_subsystem,
+            code: normalized_code,
+            old_item_id: existing.item_id,
+          });
+          const rotated = await createMessageEvent(fields);
+          alert_item_id = rotated?.item_id || null;
+          created = true;
+        } else {
+          throw updateError;
+        }
+      }
     } else {
       const created_record = await createMessageEvent(fields);
       alert_item_id = created_record?.item_id || null;
@@ -481,28 +496,50 @@ export async function resolveSystemAlert({
     }),
   };
 
+  let alert_item_id = existing.item_id;
+
   try {
     await updateMessageEvent(existing.item_id, resolved_fields);
   } catch (error) {
-    logger.warn("system_alert.resolve_failed", {
-      subsystem: normalized_subsystem,
-      code: normalized_code,
-      alert_item_id: existing.item_id,
-      failure_bucket: isRevisionLimitExceeded(error) ? "revision_limit_exceeded" : "write_error",
-      message: error?.message || "unknown_error",
-    });
-    return {
-      ok: false,
-      reason: isRevisionLimitExceeded(error)
-        ? "alert_item_revision_limit_exceeded"
-        : (clean(error?.message) || "resolve_failed"),
-    };
+    if (isRevisionLimitExceeded(error)) {
+      logger.warn("system_alert.resolve_revision_limit_rotation", {
+        subsystem: normalized_subsystem,
+        code: normalized_code,
+        old_item_id: existing.item_id,
+      });
+      try {
+        const rotated = await createMessageEvent(resolved_fields);
+        alert_item_id = rotated?.item_id || existing.item_id;
+      } catch (createError) {
+        logger.warn("system_alert.resolve_rotation_failed", {
+          subsystem: normalized_subsystem,
+          code: normalized_code,
+          message: createError?.message || "unknown_error",
+        });
+        return {
+          ok: false,
+          reason: clean(createError?.message) || "resolve_rotation_failed",
+        };
+      }
+    } else {
+      logger.warn("system_alert.resolve_failed", {
+        subsystem: normalized_subsystem,
+        code: normalized_code,
+        alert_item_id: existing.item_id,
+        failure_bucket: "write_error",
+        message: error?.message || "unknown_error",
+      });
+      return {
+        ok: false,
+        reason: clean(error?.message) || "resolve_failed",
+      };
+    }
   }
 
   return {
     ok: true,
     resolved: true,
-    alert_item_id: existing.item_id,
+    alert_item_id,
   };
 }
 

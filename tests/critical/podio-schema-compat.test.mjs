@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import APP_IDS from "@/lib/config/app-ids.js";
-import { normalizePodioFieldMap } from "@/lib/podio/schema.js";
+import { normalizePodioFieldMap, normalizePodioFilterMap } from "@/lib/podio/schema.js";
 import { buildSendQueueItem } from "@/lib/domain/queue/build-send-queue-item.js";
 
 test("message events source-app preserves attached-schema ids for known base options", () => {
@@ -138,4 +138,39 @@ test("queue builder writes contact-window when value matches time-range format (
   );
   assert.equal(result.contact_window_written, true);
   assert.equal(created_fields?.["contact-window"], "12PM-2PM CT");
+});
+
+// ─── normalizePodioFilterMap ────────────────────────────────────────────
+
+test("normalizePodioFilterMap wraps single category option ID in array for filter API", () => {
+  const filters = normalizePodioFilterMap(APP_IDS.message_events, {
+    "source-app": "Send Queue",
+  });
+
+  assert.deepEqual(filters["source-app"], [1]);
+});
+
+test("normalizePodioFilterMap wraps compat string value in array for filter API", () => {
+  const filters = normalizePodioFilterMap(APP_IDS.message_events, {
+    "source-app": "Buyer Disposition",
+  });
+
+  assert.deepEqual(filters["source-app"], ["Buyer Disposition"]);
+});
+
+test("normalizePodioFilterMap leaves text field values unwrapped", () => {
+  const filters = normalizePodioFilterMap(APP_IDS.message_events, {
+    "message-id": "SM123",
+  });
+
+  assert.equal(filters["message-id"], "SM123");
+});
+
+test("normalizePodioFilterMap wraps direction category in array", () => {
+  const filters = normalizePodioFilterMap(APP_IDS.message_events, {
+    "direction": "Inbound",
+  });
+
+  assert.ok(Array.isArray(filters["direction"]), "direction filter must be an array");
+  assert.equal(filters["direction"].length, 1);
 });

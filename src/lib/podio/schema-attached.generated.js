@@ -623,11 +623,11 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
           },
           {
             "id": 2,
-            "text": "GPT-4o (AI)"
+            "text": "GPT-4o AI"
           },
           {
             "id": 3,
-            "text": "Mistral-7B (AI)"
+            "text": "Mistral-7B AI"
           },
           {
             "id": 4,
@@ -640,6 +640,14 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
           {
             "id": 6,
             "text": "Scheduled Campaign"
+          },
+          {
+            "id": 7,
+            "text": "Queue Runner"
+          },
+          {
+            "id": 8,
+            "text": "Send Now API"
           }
         ]
       },
@@ -655,12 +663,20 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
             "text": "Send Queue"
           },
           {
-            "id": 2,
-            "text": "Agents"
-          },
-          {
             "id": 3,
             "text": "External API"
+          },
+          {
+            "id": 6,
+            "text": "Manual"
+          },
+          {
+            "id": 7,
+            "text": "Conversation Brain"
+          },
+          {
+            "id": 8,
+            "text": "Workflow Automation"
           }
         ]
       },
@@ -793,22 +809,34 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Hard Bounce"
+            "text": "Carrier Rejection"
           },
           {
             "id": 2,
-            "text": "Soft Bounce"
+            "text": "Undelivered"
           },
           {
             "id": 3,
-            "text": "Spam"
+            "text": "Rate Limited"
           },
           {
             "id": 4,
-            "text": "DNC"
+            "text": "Invalid Number"
           },
           {
             "id": 5,
+            "text": "Opt Out / DNC"
+          },
+          {
+            "id": 6,
+            "text": "Timeout"
+          },
+          {
+            "id": 7,
+            "text": "System Error"
+          },
+          {
+            "id": 8,
             "text": "Other"
           }
         ]
@@ -12807,79 +12835,31 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "✅ Yes"
+            "text": "Seller Inbound SMS"
           },
           {
             "id": 2,
-            "text": "❌ No"
+            "text": "Seller Outbound SMS"
           },
           {
             "id": 3,
-            "text": "Outbound Initial"
+            "text": "Delivery Update"
           },
           {
             "id": 4,
-            "text": "Inbound Reply"
+            "text": "Send Failure"
           },
           {
             "id": 5,
-            "text": "Outbound Follow-Up"
+            "text": "Stage Transition"
           },
           {
             "id": 6,
-            "text": "Offer"
+            "text": "AI Classification"
           },
           {
             "id": 7,
-            "text": "Objection Handling"
-          },
-          {
-            "id": 8,
-            "text": "Close / Park"
-          },
-          {
-            "id": 9,
-            "text": "Re-engagement"
-          },
-          {
-            "id": 10,
-            "text": "Close / Handoff"
-          },
-          {
-            "id": 11,
-            "text": "Negotiation"
-          },
-          {
-            "id": 12,
-            "text": "Underwriting"
-          },
-          {
-            "id": 13,
-            "text": "Offer Follow-Up"
-          },
-          {
-            "id": 14,
-            "text": "Post-Close"
-          },
-          {
-            "id": 15,
-            "text": "Identity / Trust"
-          },
-          {
-            "id": 16,
-            "text": "Sensitive Situation"
-          },
-          {
-            "id": 17,
-            "text": "Distress"
-          },
-          {
-            "id": 18,
-            "text": "Compliance"
-          },
-          {
-            "id": 19,
-            "text": "Emotion Routing"
+            "text": "Manual Note"
           }
         ]
       },

@@ -55,7 +55,7 @@ test("inbound message event writes the live conversation field and links the cre
   assert.equal(createdFields["category"], "Seller Inbound SMS");
   assert.equal(createdFields["message"], "Hello there");
   assert.equal(createdFields["character-count"], 11);
-  assert.equal(createdFields["ai-output"], "");
+  assert.equal(createdFields["ai-output"], undefined);
   assert.equal(createdFields["source-app"], "External API");
   assert.equal(createdFields["processed-by"], "Manual Sender");
   assert.deepEqual(createdFields["conversation"], [11]);
@@ -113,8 +113,8 @@ test("inbound message event updates existing idempotency record when record_item
   assert.equal(updatedFields["direction"], "Inbound");
   assert.equal(updatedFields["category"], "Seller Inbound SMS");
 
-  // AI Output is cleared (no classification yet)
-  assert.equal(updatedFields["ai-output"], "");
+  // AI Output is omitted (idempotency metadata preserved; Podio rejects empty strings)
+  assert.equal(updatedFields["ai-output"], undefined);
 
   // No processing-metadata field (not in Podio app yet)
   assert.equal(updatedFields["processing-metadata"], undefined);

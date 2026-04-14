@@ -674,6 +674,34 @@ export function normalizePodioFieldMap(app_id, fields = {}) {
   return normalized;
 }
 
+/**
+ * Like normalizePodioFieldMap but post-processes for the Podio filter API:
+ * category values must always be arrays of option IDs.
+ */
+export function normalizePodioFilterMap(app_id, filters = {}) {
+  const normalized = normalizePodioFieldMap(app_id, filters);
+  if (!normalized || typeof normalized !== "object") return normalized;
+
+  const appSchema = getAttachedAppSchema(app_id);
+  if (!appSchema) return normalized;
+
+  const result = {};
+  for (const [external_id, value] of Object.entries(normalized)) {
+    const field = appSchema.fields[external_id];
+    if (
+      field?.type === "category" &&
+      value !== null &&
+      value !== undefined &&
+      !Array.isArray(value)
+    ) {
+      result[external_id] = [value];
+    } else {
+      result[external_id] = value;
+    }
+  }
+  return result;
+}
+
 export default {
   PODIO_ATTACHED_SCHEMA,
   hasAttachedSchema,
@@ -682,4 +710,5 @@ export default {
   getCategoryOptionId,
   normalizePodioFieldValue,
   normalizePodioFieldMap,
+  normalizePodioFilterMap,
 };

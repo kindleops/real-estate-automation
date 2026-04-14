@@ -62,7 +62,7 @@ test("logInboundMessageEvent update path writes all expected fields", async (t) 
   assert.equal(updatedFields["text-2"], "SM_test_123");
   assert.equal(updatedFields["status-2"], "received");
   assert.equal(updatedFields["trigger-name"], "textgrid-inbound");
-  assert.equal(updatedFields["ai-output"], "");
+  assert.equal(updatedFields["ai-output"], undefined);
 
   // Number field
   assert.equal(updatedFields["character-count"], 23);
@@ -146,7 +146,6 @@ test("logInboundMessageEvent fields pass through normalizePodioFieldMap without 
     "processed-by": "Manual Sender",
     "source-app": "External API",
     "trigger-name": "textgrid-inbound",
-    "ai-output": "",
     "master-owner": [200],
     "linked-seller": [300],
     "property": [400],

@@ -6,6 +6,7 @@ import { child } from "@/lib/logging/logger.js";
 import {
   hasAttachedSchema,
   normalizePodioFieldMap,
+  normalizePodioFilterMap,
 } from "@/lib/podio/schema.js";
 
 function clean(value) {
@@ -1411,7 +1412,7 @@ export function filterAppItems(app_id, filters = {}, limitOrOptions = {}, maybeO
 
   const payload = {
     filters: hasAttachedSchema(app_id)
-      ? normalizePodioFieldMap(app_id, filters)
+      ? normalizePodioFilterMap(app_id, filters)
       : filters,
     limit,
     offset,
