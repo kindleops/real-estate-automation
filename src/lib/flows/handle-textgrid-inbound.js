@@ -371,7 +371,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     try {
       context = await runtimeDeps.loadContext({
         inbound_from,
-        create_brain_if_missing: false,
+        create_brain_if_missing: true,
       });
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_brain_lookup", err);

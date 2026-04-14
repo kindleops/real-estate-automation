@@ -92,18 +92,17 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
       },
 
       // ── Queue Status — adds "Delivered" option ─────────────────────────────
-      // Placeholder id:7 — verify against actual Podio option id after adding
-      // the option via the Podio admin UI.
+      // Verified against live Podio 2026-04-14
       "queue-status": {
         ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["queue-status"] || {}),
         options: [
           { id: 1, text: "Queued" },
           { id: 2, text: "Sending" },
           { id: 3, text: "Sent" },
-          { id: 4, text: "Delivered" },
-          { id: 5, text: "Cancelled" },
-          { id: 6, text: "Blocked" },
-          { id: 7, text: "Failed" },
+          { id: 7, text: "Delivered" },
+          { id: 4, text: "Cancelled" },
+          { id: 5, text: "Blocked" },
+          { id: 6, text: "Failed" },
         ],
       },
 
@@ -117,10 +116,6 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
           { id: 3, text: "Invalid Number" },
           { id: 4, text: "Daily Limit Hit" },
           { id: 5, text: "Network Error" },
-          // "Content Filter" is emitted by process-send-queue.js but does NOT
-          // yet exist in the live Podio app.  Placeholder id:6 — confirm after
-          // adding the option in the Podio admin UI.
-          { id: 6, text: "Content Filter" },
         ],
       },
 
@@ -267,7 +262,11 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
         label: "Delivery Confirmed",
         type: "category",
         multiple: false,
-        options: [],
+        options: [
+          { id: 1, text: "✅ Confirmed" },
+          { id: 2, text: "❌ Failed" },
+          { id: 3, text: "⏳ Pending" },
+        ],
       },
 
       "queue-id-2": {
@@ -320,7 +319,7 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
         { id: 2, text: "Individual" },
         { id: 3, text: "Trust / Estate" },
         { id: 4, text: "Bank / Lender" },
-        { id: 6, text: "Government" },
+        { id: 5, text: "Government" },
       ],
       },
       "use-case-template": {

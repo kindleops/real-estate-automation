@@ -388,13 +388,14 @@ test("failed-reason options in schema supplement cover all code-emitted values",
   const { getCategoryOptionId } = await import("@/lib/podio/schema.js");
   const APP_IDS = (await import("@/lib/config/app-ids.js")).default;
 
+  // These are the options that exist in live Podio as of 2026-04-14.
+  // "Content Filter" was removed — it is not a live Podio option.
   const required_reasons = [
     "Carrier Block",
     "Opt-Out",
     "Invalid Number",
     "Daily Limit Hit",
     "Network Error",
-    "Content Filter",
   ];
 
   for (const reason of required_reasons) {

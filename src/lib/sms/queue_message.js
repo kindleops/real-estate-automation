@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import APP_IDS from "@/lib/config/app-ids.js";
 import { createItem, getFirstMatchingItem } from "@/lib/providers/podio.js";
 import { countSegments } from "@/lib/sms/personalize_template.js";
+import { info, warn } from "@/lib/logging/logger.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // QUEUE FIELD EXTERNAL IDS
@@ -93,6 +94,21 @@ function appRef(value) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// EMPTY STRING GUARD
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Omit a field entirely if the value is empty-string, null, or undefined.
+ * Podio rejects empty strings for category fields, and empty values are
+ * indistinguishable from "not set" in the UI.
+ */
+function omitEmpty(value) {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  return value;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // DEDUPE
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -171,7 +187,7 @@ export function buildQueueFields({
   if (schedule?.scheduled_utc) {
     fields[QUEUE_FIELDS.scheduled_utc] = { start: schedule.scheduled_utc };
   }
-  if (schedule?.timezone) {
+  if (omitEmpty(schedule?.timezone) !== undefined) {
     fields[QUEUE_FIELDS.timezone] = schedule.timezone;
   }
 
@@ -184,13 +200,13 @@ export function buildQueueFields({
   }
   fields[QUEUE_FIELDS.message_type] = resolveMessageType(context);
 
-  // Use case
-  if (resolution?.use_case) {
+  // Use case — omit empty strings so Podio doesn't throw
+  if (omitEmpty(resolution?.use_case) !== undefined) {
     fields[QUEUE_FIELDS.use_case] = resolution.use_case;
   }
 
   // Stage
-  if (resolution?.stage_code) {
+  if (omitEmpty(resolution?.stage_code) !== undefined) {
     fields[QUEUE_FIELDS.current_stage] = resolution.stage_code;
   }
 
@@ -204,7 +220,7 @@ export function buildQueueFields({
   }
 
   // Contact window
-  if (context.contact_window) {
+  if (omitEmpty(context.contact_window) !== undefined) {
     fields[QUEUE_FIELDS.contact_window] = context.contact_window;
   }
 
@@ -221,25 +237,27 @@ export function buildQueueFields({
   // Template ref — only if valid
   Object.assign(fields, resolveTemplateRef(resolution));
 
-  // Property metadata
-  if (context.property_address) {
-    fields[QUEUE_FIELDS.property_address] = context.property_address;
+  // Property metadata — property-address is a Podio location field
+  if (omitEmpty(context.property_address) !== undefined) {
+    const addr = context.property_address;
+    fields[QUEUE_FIELDS.property_address] =
+      typeof addr === "object" && addr !== null ? addr : { value: addr };
   }
-  if (context.property_type) {
+  if (omitEmpty(context.property_type) !== undefined) {
     fields[QUEUE_FIELDS.property_type] = context.property_type;
   }
-  if (context.owner_type) {
+  if (omitEmpty(context.owner_type) !== undefined) {
     fields[QUEUE_FIELDS.owner_type] = context.owner_type;
   }
 
-  // Priority / compliance fields
-  if (context.send_priority) {
+  // Priority / compliance fields — guard against empty strings
+  if (omitEmpty(context.send_priority) !== undefined) {
     fields[QUEUE_FIELDS.send_priority] = context.send_priority;
   }
-  if (context.dnc_check) {
+  if (omitEmpty(context.dnc_check) !== undefined) {
     fields[QUEUE_FIELDS.dnc_check] = context.dnc_check;
   }
-  if (context.delivery_confirmed) {
+  if (omitEmpty(context.delivery_confirmed) !== undefined) {
     fields[QUEUE_FIELDS.delivery_confirmed] = context.delivery_confirmed;
   }
 
@@ -271,6 +289,21 @@ export async function queueMessage(params = {}) {
   const fields = buildQueueFields(params);
   const queue_id = fields[QUEUE_FIELDS.queue_id];
 
+  info("queue_message.building", {
+    queue_id,
+    has_message_text: Boolean(fields[QUEUE_FIELDS.message_text]),
+    has_master_owner: Boolean(fields[QUEUE_FIELDS.master_owner]),
+    has_prospects: Boolean(fields[QUEUE_FIELDS.prospects]),
+    has_properties: Boolean(fields[QUEUE_FIELDS.properties]),
+    has_phone: Boolean(fields[QUEUE_FIELDS.phone_number]),
+    has_textgrid: Boolean(fields[QUEUE_FIELDS.textgrid_number]),
+    has_template: Boolean(fields[QUEUE_FIELDS.template]),
+    queue_status: fields[QUEUE_FIELDS.queue_status],
+    message_type: fields[QUEUE_FIELDS.message_type],
+    use_case: fields[QUEUE_FIELDS.use_case] || null,
+    field_count: Object.keys(fields).length,
+  });
+
   // Dedupe check: look for an existing row with the same queue ID
   try {
     const existing = await runtimeDeps.getFirstMatchingItem(
@@ -282,6 +315,11 @@ export async function queueMessage(params = {}) {
     if (existing?.item_id) {
       const status = String(existing.fields?.find?.((f) => f.external_id === "queue-status")?.values?.[0]?.value?.text ?? "").toLowerCase();
       if (status === "queued" || status === "sending" || status === "sent") {
+        info("queue_message.duplicate_blocked", {
+          queue_id,
+          existing_item_id: existing.item_id,
+          existing_status: status,
+        });
         return {
           ok: false,
           reason: "duplicate_blocked",
@@ -295,7 +333,22 @@ export async function queueMessage(params = {}) {
     // Dedupe lookup failed — proceed cautiously with creation
   }
 
-  const created = await runtimeDeps.createItem(APP_IDS.send_queue, fields);
+  let created;
+  try {
+    created = await runtimeDeps.createItem(APP_IDS.send_queue, fields);
+  } catch (err) {
+    warn("queue_message.create_failed", {
+      queue_id,
+      error: err?.message || "unknown",
+      field_keys: Object.keys(fields),
+    });
+    throw err;
+  }
+
+  info("queue_message.created", {
+    queue_id,
+    item_id: created?.item_id || null,
+  });
 
   return {
     ok: true,

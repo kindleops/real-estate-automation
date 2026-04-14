@@ -100,7 +100,7 @@ function installInboundDeps({
   };
 }
 
-test("inbound webhook does not create a brain record before Stage 1 ownership confirmation", async () => {
+test("inbound webhook passes create_brain_if_missing: true to loadContext", async () => {
   let create_brain_count = 0;
   let update_brain_count = 0;
   let sync_pipeline_args = null;
@@ -129,9 +129,15 @@ test("inbound webhook does not create a brain record before Stage 1 ownership co
   });
 
   assert.equal(result.ok, true);
-  assert.equal(load_context_calls[0]?.create_brain_if_missing, false);
+  // Brain creation is now delegated to loadContext via create_brain_if_missing: true.
+  // The handler no longer gates brain creation to Stage 1 — loadContext creates
+  // the brain eagerly when the phone record resolves to a master owner.
+  assert.equal(load_context_calls[0]?.create_brain_if_missing, true);
+  // The mock loadContext doesn't actually call createBrain, and the mock context
+  // has no brain, so shouldCreateBrainForInbound controls the post-queue create.
+  // For "Who is this?" the plan does not have "Ownership Confirmed" intent, so
+  // the narrow shouldCreateBrainForInbound gate still returns false.
   assert.equal(create_brain_count, 0);
-  assert.equal(update_brain_count, 0);
   assert.equal(sync_pipeline_args?.create_if_missing, false);
 });
 

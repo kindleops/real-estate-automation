@@ -194,7 +194,7 @@ export async function maybeQueueSellerStageReply({
 
   const queued = await queue_message({
     inbound_from,
-    create_brain_if_missing: false,
+    create_brain_if_missing: true,
     category: derivePrimaryCategory(context),
     secondary_category: null,
     template_lookup_secondary_category: null,

@@ -127,7 +127,7 @@ test("buildQueueFields writes property metadata from context", () => {
     },
   });
 
-  assert.equal(fields[QUEUE_FIELDS.property_address], "5521 Laster Ln");
+  assert.deepEqual(fields[QUEUE_FIELDS.property_address], { value: "5521 Laster Ln" });
   assert.equal(fields[QUEUE_FIELDS.property_type], "Residential");
   assert.equal(fields[QUEUE_FIELDS.owner_type], "Individual");
   assert.deepEqual(fields[QUEUE_FIELDS.personalization_tags], [
