@@ -570,43 +570,55 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Ownership Check"
+            "text": "Ownership Confirmation"
           },
           {
             "id": 2,
-            "text": "Identity"
+            "text": "Offer Interest"
           },
           {
             "id": 3,
-            "text": "Offer"
+            "text": "Price Discovery"
           },
           {
             "id": 4,
-            "text": "Objection Handling"
+            "text": "Condition Discovery"
           },
           {
             "id": 5,
-            "text": "Wrong Number"
+            "text": "Offer Positioning"
           },
           {
             "id": 6,
-            "text": "Follow-Up"
+            "text": "Negotiation"
           },
           {
             "id": 7,
-            "text": "Re-Engagement"
+            "text": "Objection Handling"
           },
           {
             "id": 8,
-            "text": "Dispo Buyer"
+            "text": "Re-Engagement"
           },
           {
             "id": 9,
-            "text": "Spanish Route"
+            "text": "Contract Push"
           },
           {
             "id": 10,
-            "text": "Legal Opt-Out"
+            "text": "Dead Lead Handling"
+          },
+          {
+            "id": 11,
+            "text": "Wrong Number"
+          },
+          {
+            "id": 12,
+            "text": "DNC"
+          },
+          {
+            "id": 13,
+            "text": "Unknown"
           }
         ]
       },
@@ -9222,11 +9234,19 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Male"
+            "text": "Masculine"
           },
           {
             "id": 2,
-            "text": "Female"
+            "text": "Feminine"
+          },
+          {
+            "id": 3,
+            "text": "Neutral"
+          },
+          {
+            "id": 4,
+            "text": "Unknown"
           }
         ]
       },
@@ -10511,23 +10531,43 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Ownership"
+            "text": "Ownership Confirmation"
           },
           {
             "id": 2,
-            "text": "Offer"
+            "text": "Offer Interest Confirmation"
           },
           {
-            "id": 3,
-            "text": "Q/A"
+            "id": 14,
+            "text": "Seller Price Discovery"
           },
           {
-            "id": 4,
-            "text": "Contract"
+            "id": 15,
+            "text": "Condition / Timeline Discovery"
           },
           {
-            "id": 5,
-            "text": "Follow-Up"
+            "id": 13,
+            "text": "Offer Positioning"
+          },
+          {
+            "id": 9,
+            "text": "Negotiation"
+          },
+          {
+            "id": 6,
+            "text": "Verbal Acceptance / Lock"
+          },
+          {
+            "id": 7,
+            "text": "Contract Out"
+          },
+          {
+            "id": 8,
+            "text": "Signed / Closing"
+          },
+          {
+            "id": 10,
+            "text": "Closed / Dead Outcome"
           }
         ]
       },
@@ -10574,6 +10614,38 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
           {
             "id": 3,
             "text": "Strategic Seller"
+          },
+          {
+            "id": 4,
+            "text": "Absentee Owner"
+          },
+          {
+            "id": 5,
+            "text": "Pre-Foreclosure"
+          },
+          {
+            "id": 6,
+            "text": "Divorce"
+          },
+          {
+            "id": 7,
+            "text": "Inherited"
+          },
+          {
+            "id": 8,
+            "text": "Job Relocation"
+          },
+          {
+            "id": 9,
+            "text": "Financial Distress"
+          },
+          {
+            "id": 10,
+            "text": "Investor Flip"
+          },
+          {
+            "id": 11,
+            "text": "Unknown"
           }
         ]
       },
@@ -10634,7 +10706,7 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
           },
           {
             "id": 13,
-            "text": "Asian Indian (Hindi or Other)"
+            "text": "Hindi"
           },
           {
             "id": 14,
@@ -10647,6 +10719,14 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
           {
             "id": 16,
             "text": "Greek"
+          },
+          {
+            "id": 17,
+            "text": "Other"
+          },
+          {
+            "id": 18,
+            "text": "Unknown"
           }
         ]
       },
@@ -10680,35 +10760,51 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "_ Active Negotiation"
+            "text": "Active Negotiation"
           },
           {
             "id": 2,
-            "text": "_ Warm Lead"
+            "text": "Warm Lead"
           },
           {
             "id": 3,
-            "text": "_ Hot Opportunity"
+            "text": "Hot Opportunity"
           },
           {
             "id": 4,
-            "text": "_ Waiting on Seller"
+            "text": "Waiting on Seller"
           },
           {
             "id": 5,
-            "text": "⚫️ AI Follow-Up Running"
+            "text": "AI Follow-Up Running"
           },
           {
             "id": 6,
-            "text": "⚪️ Cold / No Response"
+            "text": "Cold / No Response"
           },
           {
             "id": 7,
-            "text": "_ Under Contract"
+            "text": "Under Contract"
           },
           {
             "id": 8,
-            "text": "_ Closed"
+            "text": "Closed"
+          },
+          {
+            "id": 9,
+            "text": "DNC"
+          },
+          {
+            "id": 10,
+            "text": "Wrong Number"
+          },
+          {
+            "id": 11,
+            "text": "Paused"
+          },
+          {
+            "id": 12,
+            "text": "Manual Review"
           }
         ]
       },
@@ -10729,15 +10825,19 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "_ High Priority"
+            "text": "High Priority"
           },
           {
             "id": 2,
-            "text": "_ Medium"
+            "text": "Medium Priority"
           },
           {
             "id": 3,
-            "text": "_ Low"
+            "text": "Low Priority"
+          },
+          {
+            "id": 4,
+            "text": "Urgent"
           }
         ]
       },
@@ -10774,27 +10874,39 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "_ Seller Hesitation"
+            "text": "Seller Hesitation"
           },
           {
             "id": 2,
-            "text": "_ Wants too high"
+            "text": "Wants Too High"
           },
           {
             "id": 3,
-            "text": "_ Not decision maker"
+            "text": "Not Decision Maker"
           },
           {
             "id": 4,
-            "text": "_ Possible scam"
+            "text": "Possible Scam"
           },
           {
             "id": 5,
-            "text": "_ Angry / short replies"
+            "text": "Angry / Short Replies"
           },
           {
             "id": 6,
-            "text": "_ Emotional volatility"
+            "text": "Emotional Volatility"
+          },
+          {
+            "id": 7,
+            "text": "Legal Threat"
+          },
+          {
+            "id": 8,
+            "text": "Represented by Agent"
+          },
+          {
+            "id": 9,
+            "text": "Unknown"
           }
         ]
       },
@@ -10820,6 +10932,14 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
           {
             "id": 4,
             "text": "Manual Override"
+          },
+          {
+            "id": 5,
+            "text": "Completed"
+          },
+          {
+            "id": 6,
+            "text": "Expired"
           }
         ]
       },
@@ -12835,31 +12955,43 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Seller Inbound SMS"
+            "text": "Calm"
           },
           {
             "id": 2,
-            "text": "Seller Outbound SMS"
+            "text": "Anxious"
           },
           {
             "id": 3,
-            "text": "Delivery Update"
+            "text": "Motivated"
           },
           {
             "id": 4,
-            "text": "Send Failure"
+            "text": "Resistant"
           },
           {
             "id": 5,
-            "text": "Stage Transition"
+            "text": "Grieving"
           },
           {
             "id": 6,
-            "text": "AI Classification"
+            "text": "Confused"
           },
           {
             "id": 7,
-            "text": "Manual Note"
+            "text": "Angry"
+          },
+          {
+            "id": 8,
+            "text": "Excited"
+          },
+          {
+            "id": 9,
+            "text": "Indifferent"
+          },
+          {
+            "id": 10,
+            "text": "Unknown"
           }
         ]
       },
@@ -14706,19 +14838,35 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Active"
+            "text": "Empathetic"
           },
           {
             "id": 2,
-            "text": "Paused"
+            "text": "Direct"
           },
           {
             "id": 3,
-            "text": "Retired"
+            "text": "Formal"
           },
           {
             "id": 4,
-            "text": "Yes"
+            "text": "Casual"
+          },
+          {
+            "id": 5,
+            "text": "Spiritual"
+          },
+          {
+            "id": 6,
+            "text": "Urgent"
+          },
+          {
+            "id": 7,
+            "text": "Humorous"
+          },
+          {
+            "id": 8,
+            "text": "Unknown"
           }
         ]
       },
@@ -14731,27 +14879,39 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "Specialist"
+            "text": "Price Too Low"
           },
           {
             "id": 2,
-            "text": "Market-Local"
+            "text": "Not Ready to Sell"
           },
           {
             "id": 3,
-            "text": "Fallback"
+            "text": "Has Agent"
           },
           {
             "id": 4,
-            "text": "Tier 3"
+            "text": "Inherited Dispute"
           },
           {
             "id": 5,
-            "text": "Tier 2"
+            "text": "Market Comparing"
           },
           {
             "id": 6,
-            "text": "Tier 1"
+            "text": "Wants Retail"
+          },
+          {
+            "id": 7,
+            "text": "Probate Pending"
+          },
+          {
+            "id": 8,
+            "text": "No Objection"
+          },
+          {
+            "id": 9,
+            "text": "Unknown"
           }
         ]
       },
@@ -15135,79 +15295,43 @@ export const PODIO_ATTACHED_SCHEMA = Object.freeze({
         "options": [
           {
             "id": 1,
-            "text": "English"
+            "text": "Cash"
           },
           {
             "id": 2,
-            "text": "Spanish"
+            "text": "Seller Finance"
           },
           {
             "id": 3,
-            "text": "Portuguese"
-          },
-          {
-            "id": 4,
-            "text": "Italian"
+            "text": "Subject-To"
           },
           {
             "id": 5,
-            "text": "Hebrew"
-          },
-          {
-            "id": 6,
-            "text": "Mandarin"
+            "text": "Novation"
           },
           {
             "id": 7,
-            "text": "Korean"
+            "text": "Lease Option"
+          },
+          {
+            "id": 4,
+            "text": "Hybrid"
           },
           {
             "id": 8,
-            "text": "Vietnamese"
+            "text": "Nurture"
           },
           {
             "id": 9,
-            "text": "Polish"
+            "text": "DNC"
           },
           {
             "id": 10,
-            "text": "Arabic"
+            "text": "Wrong Number"
           },
           {
-            "id": 11,
-            "text": "Hindi"
-          },
-          {
-            "id": 12,
-            "text": "French"
-          },
-          {
-            "id": 13,
-            "text": "Russian"
-          },
-          {
-            "id": 14,
-            "text": "Japanese"
-          },
-          {
-            "id": 15,
-            "text": "Farsi"
-          },
-          {
-            "id": 16,
-            "text": "German"
-          },
-          {
-            "id": 17,
-            "text": "Greek"
-          },
-          {
-            "id": 18,
-            "text": "Thai"
-          },
-          {
-            "id": 19,
-            "text": "Pashto"
+            "id": 6,
+            "text": "Unknown"
           }
         ]
       },

@@ -254,15 +254,21 @@ async function resolveBuyerBlastEvent(extracted = {}) {
     }
   }
 
-  const recent_events = sortNewestFirst(
-    toItems(
-      await runtimeDeps.findMessageEvents(
-        { "source-app": "Buyer Disposition" },
-        150,
-        0
+  let recent_events = [];
+  try {
+    recent_events = sortNewestFirst(
+      toItems(
+        await runtimeDeps.findMessageEvents(
+          { "source-app": "Buyer Disposition" },
+          150,
+          0
+        )
       )
-    )
-  );
+    );
+  } catch (_filter_err) {
+    // "Buyer Disposition" may not be a valid Podio category option yet —
+    // treat as no matching events.
+  }
 
   const sender_email = lower(extracted.sender_email);
   const sender_phone = normalizePhoneToken(extracted.sender_phone);
