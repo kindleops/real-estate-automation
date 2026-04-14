@@ -11,6 +11,7 @@ function createLocalTemplate({
   gender_variant = "Neutral",
   language = "English",
   paired_with_agent_type = "Fallback / Market-Local / Specialist-Close",
+  is_first_touch = "No",
 }) {
   return {
     item_id,
@@ -27,6 +28,7 @@ function createLocalTemplate({
     text,
     english_translation: english_translation || text,
     active: "Yes",
+    is_first_touch,
     is_ownership_check: "No",
     category_primary,
     category_secondary,
@@ -57,6 +59,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     category_secondary: "Outreach",
     tone: "Warm",
     paired_with_agent_type: "Warm Professional",
+    is_first_touch: "Yes",
     text: "Hey {{seller_first_name}} — {{agent_first_name}} here. Do you still own the place at {{property_address}}?",
   }),
   createLocalTemplate({
@@ -67,6 +70,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     category_secondary: "Outreach",
     tone: "Neutral",
     paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    is_first_touch: "Yes",
     text: "{{agent_first_name}} here — reaching out about {{property_address}}. Are you the owner there?",
   }),
   createLocalTemplate({
@@ -77,6 +81,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     category_secondary: "Outreach",
     tone: "Warm",
     paired_with_agent_type: "Warm Professional",
+    is_first_touch: "Yes",
     text: "Hi {{seller_first_name}}, this is {{agent_first_name}}. Do you own {{property_address}}?",
   }),
   createLocalTemplate({
@@ -87,6 +92,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     category_secondary: "Outreach",
     tone: "Warm",
     paired_with_agent_type: "Warm Professional",
+    is_first_touch: "Yes",
     text: "Hi {{seller_first_name}}, checking on {{property_address}}. Do you still own it?",
   }),
   createLocalTemplate({
@@ -97,6 +103,7 @@ export const LOCAL_TEMPLATE_CANDIDATES = Object.freeze([
     category_secondary: "Outreach",
     tone: "Neutral",
     paired_with_agent_type: "Fallback / Market-Local / Specialist-Close",
+    is_first_touch: "Yes",
     text: "Reaching out about {{property_address}}. Are you the owner there?",
   }),
   // ── Stage 1 — Ownership Confirmation Follow-Up ────────────────────────────────

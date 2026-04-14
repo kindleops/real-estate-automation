@@ -386,7 +386,7 @@ function buildTemplateSelectionInputs({
     sequence_position: resolved_sequence_position,
     route,
     context,
-    strict_touch_one_podio_only: Boolean(is_first_touch),
+    strict_touch_one_podio_only: false,
   });
 
   return {
@@ -427,7 +427,7 @@ function buildTemplateSelectionInputs({
     required_use_cases: undefined,
     required_variant_groups: undefined,
     require_explicit_variant_group: false,
-    strict_touch_one_podio_only: Boolean(is_first_touch),
+    strict_touch_one_podio_only: false,
   };
 }
 

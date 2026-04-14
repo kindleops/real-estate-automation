@@ -1,8 +1,8 @@
 import ENV from "@/lib/config/env.js";
 
 export const DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME = "SMS / TIER #1 / ALL";
-export const DEFAULT_FEEDER_BATCH_SIZE = 250;
-export const DEFAULT_FEEDER_SCAN_LIMIT = 3000;
+export const DEFAULT_FEEDER_BATCH_SIZE = 10;
+export const DEFAULT_FEEDER_SCAN_LIMIT = 50;
 export const DEFAULT_FEEDER_BUFFER_CRITICAL_LOW = 250;
 export const DEFAULT_FEEDER_BUFFER_REPLENISH_TARGET = 750;
 export const DEFAULT_FEEDER_BUFFER_HEALTHY_TARGET = 1500;
@@ -83,7 +83,7 @@ export function getRolloutControls() {
     feeder_buffer_replenish_target,
     feeder_buffer_healthy_target,
     feeder_buffer_ideal_target,
-    feeder_max_batch: normalizePositiveInteger(ENV.ROLLOUT_FEEDER_MAX_BATCH, 500),
+    feeder_max_batch: normalizePositiveInteger(ENV.ROLLOUT_FEEDER_MAX_BATCH, 15),
     queue_max_batch: normalizePositiveInteger(ENV.ROLLOUT_QUEUE_MAX_BATCH, 50),
     retry_max_batch: normalizePositiveInteger(ENV.ROLLOUT_RETRY_MAX_BATCH, 50),
     reconcile_max_batch: normalizePositiveInteger(ENV.ROLLOUT_RECONCILE_MAX_BATCH, 50),
@@ -276,11 +276,13 @@ export function capFeederScanLimit(
   fallback = getRolloutControls().feeder_default_scan_limit
 ) {
   const controls = getRolloutControls();
+  // Cap at feeder_max_batch * 10 to stay within Vercel function timeout.
+  // Buffer targets are aspirational — scanning thousands of owners in a single
+  // 300s invocation is not feasible.  The cron runs every 8 minutes so the
+  // buffer fills incrementally across invocations.
   const scan_cap = Math.max(
     controls.feeder_default_scan_limit,
-    controls.feeder_max_batch * 10,
-    controls.feeder_buffer_healthy_target * 2,
-    controls.feeder_max_batch
+    controls.feeder_max_batch * 10
   );
   return clampLimit(scan_limit, scan_cap, fallback);
 }

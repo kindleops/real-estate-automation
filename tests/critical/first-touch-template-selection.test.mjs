@@ -668,3 +668,82 @@ test("FORBIDDEN_FIRST_TOUCH_USE_CASES covers all later-stage and close/offer use
     "ownership_check must NOT be forbidden — it is the first-touch clamp target"
   );
 });
+
+// ── 8. local registry ownership_check templates are eligible for first-touch ──
+
+import { LOCAL_TEMPLATE_CANDIDATES } from "@/lib/domain/templates/local-template-registry.js";
+
+test("local ownership_check templates declare is_first_touch=Yes", () => {
+  const ownership_check_templates = LOCAL_TEMPLATE_CANDIDATES.filter(
+    (t) => t.use_case === "ownership_check"
+  );
+  assert.ok(
+    ownership_check_templates.length >= 3,
+    "should have at least 3 local ownership_check templates"
+  );
+  for (const t of ownership_check_templates) {
+    assert.equal(
+      t.is_first_touch,
+      "Yes",
+      `local template ${t.item_id} must have is_first_touch=Yes`
+    );
+    assert.equal(t.active, "Yes", `local template ${t.item_id} must be active`);
+  }
+});
+
+test("loadTemplateCandidates with strict_touch_one_podio_only=false falls back to local ownership_check templates", async () => {
+  const candidates = await loadTemplateCandidates({
+    use_case: "ownership_check",
+    language: "English",
+    strict_touch_one_podio_only: false,
+    remote_fetcher: noRemoteFetch,
+    local_fetcher: makeLocalFetcher(
+      LOCAL_TEMPLATE_CANDIDATES.filter((t) => t.use_case === "ownership_check")
+    ),
+    context: {
+      summary: {
+        seller_first_name: "John",
+        property_address: "123 Main St",
+        agent_first_name: "Sarah",
+      },
+    },
+  });
+
+  assert.ok(candidates.length > 0, "must find at least one local ownership_check template");
+  const returned_sources = new Set(candidates.map((c) => c.source));
+  assert.ok(
+    returned_sources.has("local_registry"),
+    "local_registry templates must be included when strict_touch_one_podio_only=false"
+  );
+  for (const c of candidates) {
+    assert.equal(c.rejection_reasons.length, 0, `template ${c.item_id} must have no rejection reasons`);
+  }
+});
+
+test("no-agent ownership_check templates survive renderability check when agent_first_name is missing", async () => {
+  const no_agent_templates = LOCAL_TEMPLATE_CANDIDATES.filter(
+    (t) => t.use_case === "ownership_check" && !t.text.includes("agent_first_name")
+  );
+  assert.ok(no_agent_templates.length >= 1, "should have at least one no-agent template");
+
+  const candidates = await loadTemplateCandidates({
+    use_case: "ownership_check",
+    language: "English",
+    strict_touch_one_podio_only: false,
+    remote_fetcher: noRemoteFetch,
+    local_fetcher: makeLocalFetcher(no_agent_templates),
+    context: {
+      summary: {
+        seller_first_name: "John",
+        property_address: "123 Main St",
+        // no agent_first_name
+      },
+    },
+  });
+
+  assert.ok(candidates.length > 0, "no-agent templates must survive when agent_first_name is missing");
+  for (const c of candidates) {
+    assert.equal(c.rejection_reasons.length, 0, `template ${c.item_id} must pass selection`);
+    assert.equal(c.operational_rejection_reasons.length, 0, `template ${c.item_id} must pass operational checks`);
+  }
+});
