@@ -112,6 +112,24 @@ export function validateSendQueueItem(queue_item = null) {
     }
   }
 
+  // ── Template attachment quarantine ──────────────────────────────────────────
+  // Every live queue row must be backed by a real Podio template with a valid
+  // template relation.  Rows created from local_registry fallback templates
+  // have no template relation (the field is empty) and must not be sent.
+  // This catches rows that slipped through before the require_podio_template
+  // gate was added to the feeder.
+  const template_relation_id = getFirstAppReferenceId(queue_item, "template-2", null);
+  if (!template_relation_id) {
+    return {
+      ok: false,
+      reason: "unattached_template",
+      queue_status,
+      touch_number,
+      use_case_template,
+      note: "queue row has no template relation — likely created from local_registry fallback",
+    };
+  }
+
   return {
     ok: true,
     queue_status,

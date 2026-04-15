@@ -391,6 +391,7 @@ test("validateSendQueueItem accepts Touch 1 queue item with ownership_check use 
     "message-text": textField("Hi there, checking on your property. Do you still own it?"),
     "touch-number": numberField(1),
     "use-case-template": categoryField("ownership_check"),
+    "template-2": appRefField(9001),
   });
 
   const result = validateSendQueueItem(queue_item);
@@ -406,6 +407,7 @@ test("validateSendQueueItem accepts Touch 2+ queue item with any use case", () =
     "message-text": textField("Following up on our conversation about your property."),
     "touch-number": numberField(3),
     "use-case-template": categoryField("asking_price_follow_up"),
+    "template-2": appRefField(9001),
   });
 
   const result = validateSendQueueItem(queue_item);

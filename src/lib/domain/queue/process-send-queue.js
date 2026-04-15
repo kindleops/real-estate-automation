@@ -1443,19 +1443,31 @@ export async function processSendQueueItem(queue_item_id) {
         queue_status: "Blocked",
         failed_reason: "Content Filter",
       });
+    } else if (queue_validation.reason === "unattached_template") {
+      // Queue row has no template relation — cannot be sent.
+      // This should not happen for new rows (prevented by feeder guard),
+      // but may exist for legacy rows created during fallback mode.
+      warn("queue.process_blocked_unattached_template", {
+        queue_item_id,
+        reason: "queue_row_missing_template_relation",
+      });
+      await failQueueItem(queue_item_id, {
+        queue_status: "Blocked",
+        failed_reason: "Content Filter",
+      });
     }
 
     return {
       ok: false,
       reason: queue_validation.reason,
       queue_status:
-        queue_validation.reason === "junk_message_body" || queue_validation.reason === "invalid_touch_one_use_case"
+        queue_validation.reason === "junk_message_body" || queue_validation.reason === "invalid_touch_one_use_case" || queue_validation.reason === "unattached_template"
           ? "Blocked"
           : "Failed",
       failed_reason:
         queue_validation.reason === "missing_phone_item"
           ? "Invalid Number"
-          : queue_validation.reason === "junk_message_body" || queue_validation.reason === "invalid_touch_one_use_case"
+          : queue_validation.reason === "junk_message_body" || queue_validation.reason === "invalid_touch_one_use_case" || queue_validation.reason === "unattached_template"
             ? "Content Filter"
             : "Network Error",
       claimed: false,

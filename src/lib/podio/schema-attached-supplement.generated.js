@@ -18,17 +18,14 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
   // initial schema snapshot, plus corrected/annotated overrides for existing
   // fields whose snapshot data is stale or wrong.
   //
-  // ── Template field mismatch (REQUIRES PODIO SCHEMA CHANGE) ────────────────
-  // The base snapshot records Send Queue.template.referenced_app_ids = [29488989]
-  // (an old, inactive Templates app).  The active Templates app is
-  // APP_IDS.templates = 30647181.  Until the Podio relationship field is updated
-  // to reference 30647181, every attempt to attach a template item will be
-  // rejected by Podio with 400.  The code correctly retries without template on
-  // 400, but the template is never linked.
-  // PODIO ACTION: In the Send Queue app settings, open the "Template" relationship
-  // field and change its referenced app from 29488989 to 30647181.
-  // CODE ACTION: The supplement below already declares the correct app ID so that
-  // once Podio is updated the code path works without further changes.
+  // ── Template field — RESOLVED ─────────────────────────────────────────────
+  // The original "template" field (base snapshot referenced_app_ids: [29488989])
+  // pointed to an old inactive Templates app.  The code now writes to the new
+  // "template-2" field (Podio field_id: 276566399) added to the Send Queue app,
+  // which correctly references APP_IDS.templates = 30647181.  No Podio schema
+  // changes are required — the field exists and is live.
+  // - "template" override below is kept only for schema-compat purposes.
+  // - "template-2" is the active write target; field_id confirmed: 276566399.
   //
   // ── Queue Status — Delivered option ─────────────────────────────────────
   // "Delivered" was missing from the base snapshot — now declared explicitly
@@ -54,15 +51,20 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
     }),
     fields: {
       ...(BASE_SEND_QUEUE_SCHEMA?.fields || {}),
-      // ── Template relationship — correct referenced app id ─────────────────
+      // ── Old "template" field — stale referenced app, kept for schema compat ─
       // Base snapshot has referenced_app_ids: [29488989] (stale inactive app).
-      // This override declares the active Templates app so resolveTemplateFieldReference
-      // correctly identifies direct-attachment candidates.  The write will still
-      // fail with Podio 400 until the Podio field itself is pointed at 30647181.
+      // Code no longer writes to this field (uses "template-2" instead), but
+      // the override is preserved so resolveTemplateFieldReference won't log
+      // a mismatch warning if this field is ever read.
       "template": {
         ...(BASE_SEND_QUEUE_SCHEMA?.fields?.["template"] || {}),
         referenced_app_ids: [APP_IDS.templates],
       },
+      // ── "template-2" — active template relation field (CONFIRMED LIVE) ────
+      // Podio field_id: 276566399  |  referenced app: 30647181 (Templates)
+      // This is the field the code writes to for all new queue rows.
+      // Added to the Send Queue Podio app after the base schema snapshot was
+      // generated, so it does not appear in schema-attached.generated.js.
       "template-2": {
         label: "Template",
         type: "app",

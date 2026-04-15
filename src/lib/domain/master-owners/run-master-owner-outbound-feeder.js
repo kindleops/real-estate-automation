@@ -3218,13 +3218,45 @@ async function evaluateOwner({
       evaluation_depth,
       ...template_resolution_inputs,
     },
-    () => loadTemplate(template_selection_inputs)
+    () => loadTemplate({ ...template_selection_inputs, require_podio_template: !dry_run })
   );
+
+  // ── LIVE SELLER QUEUE: reject local_registry templates ─────────────────────
+  // When performing a real queue write (dry_run=false), the template MUST come
+  // from the Podio Templates app so that:
+  //   - selected_template_item_id is a real numeric Podio ID
+  //   - template relation can be attached to the queue row
+  //   - queue row truthfulness is maintained
+  // Local fallback templates may still surface during dry_run diagnostics and
+  // tests, but they cannot create live seller Send Queue inventory.
+  let local_template_rejected = false;
+  if (
+    !dry_run &&
+    selected_template?.item_id &&
+    (
+      selected_template.source === "local_registry" ||
+      String(selected_template.item_id).startsWith("local-template:") ||
+      selected_template.template_resolution_source === "local_template_fallback"
+    )
+  ) {
+    log.warn("master_owner_feeder.live_seller_local_template_rejected", {
+      master_owner_id,
+      template_id: selected_template.item_id,
+      template_source: selected_template.source || null,
+      template_resolution_source: selected_template.template_resolution_source || null,
+      template_fallback_reason: selected_template.template_fallback_reason || null,
+      action: "skip_owner_require_podio_template",
+    });
+    local_template_rejected = true;
+    selected_template = null;
+  }
 
   if (!selected_template?.item_id) {
     const template_resolution_diagnostics = {
       ...template_resolution_inputs,
-      failure_reason: template_stage_lock
+      failure_reason: local_template_rejected
+        ? "live_queue_requires_podio_template"
+        : template_stage_lock
         ? "template_missing"
         : "no_template_candidates_matched_filters",
       fallback_candidate_count: 0,
@@ -3648,9 +3680,26 @@ async function evaluateOwner({
       plan,
       queue_item_id: queue_result?.queue_item_id || null,
       queue_result,
+      template_truthfulness: {
+        selected_template_source: queue_result?.selected_template_source ?? null,
+        selected_template_item_id: queue_result?.selected_template_item_id ?? null,
+        template_relation_id: queue_result?.template_relation_id ?? null,
+        template_app_field_written: queue_result?.template_app_field_written ?? false,
+        template_attached: queue_result?.template_attached ?? false,
+      },
     };
   } catch (error) {
     if (strict_touch_one_mode) {
+      throw error;
+    }
+
+    // LIVE SELLERS MUST HAVE PODIO TEMPLATES — do not fall back to creating
+    // zero-template rows for non-dry_run evaluations. The fallback mode exists
+    // to handle transient API failures, but live queue integrity demands that
+    // every row has a valid template relation. If template loading failed in
+    // production, that's a critical issue that should propagate, not silently
+    // fallback to broken queue rows.
+    if (!dry_run) {
       throw error;
     }
 

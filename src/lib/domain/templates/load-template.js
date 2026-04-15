@@ -57,7 +57,7 @@ function getTemplateCategoryValue(external_id, value = null) {
 
   const normalized = normalizeSelectorText(raw);
   return (
-    field.options.find((option) => normalizeSelectorText(option.text) === normalized)?.text || raw
+    field.options.find((option) => normalizeSelectorText(option.text) === normalized)?.text || null
   );
 }
 
@@ -98,9 +98,13 @@ export async function fetchTemplatesCached(
     return cached.value;
   }
 
+  const effective_limit =
+    fetch_limit !== null && fetch_limit !== undefined && Number(fetch_limit) > 0
+      ? Number(fetch_limit)
+      : undefined;
   const batch = await fetcher(
     filter_set,
-    Number.isFinite(Number(fetch_limit)) ? Number(fetch_limit) : undefined,
+    effective_limit,
     Number.isFinite(Number(fetch_offset)) ? Number(fetch_offset) : 0
   );
   cache.set(cache_key, {
@@ -155,19 +159,24 @@ function buildRemoteFilterRequests({
       "is-first-touch": "Yes",
       active: active_value,
     });
-    addRequest("touch_one_use_case_legacy_first_touch", {
-      "use-case": getTemplateCategoryValue("use-case", requested_use_case) || requested_use_case,
-      "is-first-touch": "Yes",
-      active: active_value,
-    });
+    const touch_one_legacy_value = getTemplateCategoryValue("use-case", requested_use_case);
+    if (touch_one_legacy_value) {
+      addRequest("touch_one_use_case_legacy_first_touch", {
+        "use-case": touch_one_legacy_value,
+        "is-first-touch": "Yes",
+        active: active_value,
+      });
+    }
     addRequest("touch_one_use_case_template", {
       "use-case-2": requested_use_case,
       active: active_value,
     });
-    addRequest("touch_one_use_case_legacy", {
-      "use-case": getTemplateCategoryValue("use-case", requested_use_case) || requested_use_case,
-      active: active_value,
-    });
+    if (touch_one_legacy_value) {
+      addRequest("touch_one_use_case_legacy", {
+        "use-case": touch_one_legacy_value,
+        active: active_value,
+      });
+    }
     addRequest(
       "touch_one_active_only",
       {
@@ -181,10 +190,18 @@ function buildRemoteFilterRequests({
         "use-case-2": use_case,
         active: active_value,
       });
-      addRequest(`use_case_legacy:${use_case}`, {
-        "use-case": getTemplateCategoryValue("use-case", use_case) || use_case,
-        active: active_value,
-      });
+
+      // Only add legacy use-case filter when the value exists in the legacy
+      // field's option list.  Newer use_cases (ownership_check_follow_up,
+      // asking_price_follow_up, etc.) only exist in use-case-2 and would
+      // cause a schema validation error if sent through the legacy field.
+      const legacy_value = getTemplateCategoryValue("use-case", use_case);
+      if (legacy_value) {
+        addRequest(`use_case_legacy:${use_case}`, {
+          "use-case": legacy_value,
+          active: active_value,
+        });
+      }
     }
 
     addRequest("active_only", {
@@ -264,10 +281,18 @@ function summarizeTemplateResolutionDiagnostics(diagnostics = {}) {
 function isTemplateFilterValidationError(error) {
   const message = clean(error?.message).toLowerCase();
 
-  return (
-    Number(error?.status || error?.response?.status || 0) === 400 &&
-    (message.includes("invalid category value") || message.includes("invalid value"))
-  );
+  // Client-side schema validation errors (thrown by normalizeCategoryValue)
+  // have no HTTP status — match on message pattern alone.
+  if (
+    message.includes("invalid category value") ||
+    message.includes("invalid value") ||
+    message.includes("unknown field for")
+  ) {
+    return true;
+  }
+
+  // Server-side Podio 400 responses.
+  return Number(error?.status || error?.response?.status || 0) === 400;
 }
 
 function rotateVariant(templates, rotation_key = null) {
@@ -938,6 +963,7 @@ export async function loadTemplateCandidates({
   required_variant_groups = null,
   require_explicit_variant_group = false,
   strict_touch_one_podio_only = false,
+  require_podio_template = false,
   touch_type = null,
   touch_number = null,
   message_type = null,
@@ -973,7 +999,7 @@ export async function loadTemplateCandidates({
     use_case_candidates,
     strict_touch_one_podio_only,
   });
-  const sources = strict_touch_one_podio_only
+  const sources = (strict_touch_one_podio_only || require_podio_template)
     ? ["podio"]
     : ["podio", "local_registry"];
 
@@ -1063,14 +1089,23 @@ export async function loadTemplateCandidates({
   // ── Reengagement fallback ladder ─────────────────────────────────────────────
   // When no templates survived exact + alias matching, retry with progressively
   // degraded criteria before giving up.  Order:
-  //   1. "reengagement" use_case  (generic follow-up for any stage)
+  //   1. "reengagement" use_case  (requires evidence of prior communication)
   //   2. "ownership_check_follow_up"  (most common first-stage follow-up)
   // Only runs for Follow-Up touch_type and non-strict modes.
   if (
     !strict_touch_one_podio_only &&
     selector_input.touch_type === TEMPLATE_TOUCH_TYPES.FOLLOW_UP
   ) {
-    const fallback_use_cases = ["reengagement", "ownership_check_follow_up"];
+    // Evidence gate: reengagement requires actual prior outreach — touch_number
+    // alone is insufficient.  At least 2 prior messages must have been sent OR
+    // the seller must have replied at least once.
+    const has_reengagement_evidence =
+      (context?.recent?.touch_count ?? 0) >= 2 ||
+      Boolean(context?.summary?.last_inbound_message);
+
+    const fallback_use_cases = has_reengagement_evidence
+      ? ["reengagement", "ownership_check_follow_up"]
+      : ["ownership_check_follow_up"];
     const already_tried = new Set(use_case_candidates.map((uc) => normalizeSelectorText(uc)));
 
     for (const fallback_uc of fallback_use_cases) {
@@ -1204,6 +1239,7 @@ export async function loadTemplate({
   required_variant_groups = null,
   require_explicit_variant_group = false,
   strict_touch_one_podio_only = false,
+  require_podio_template = false,
   touch_type = null,
   touch_number = null,
   message_type = null,
@@ -1235,6 +1271,7 @@ export async function loadTemplate({
     required_variant_groups,
     require_explicit_variant_group,
     strict_touch_one_podio_only,
+    require_podio_template,
     touch_type,
     touch_number,
     message_type,
@@ -1249,6 +1286,13 @@ export async function loadTemplate({
 
   return rotateVariant(top_cluster, rotation_key);
 }
+
+// Exported for white-box testing only
+export {
+  buildRemoteFilterRequests as __buildRemoteFilterRequests,
+  getTemplateCategoryValue as __getTemplateCategoryValue,
+  isTemplateFilterValidationError as __isTemplateFilterValidationError,
+};
 
 export default {
   clearTemplateBatchCache,

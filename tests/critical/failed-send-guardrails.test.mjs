@@ -101,6 +101,7 @@ test("validateSendQueueItem accepts a body with 3 or more words", () => {
     "message-text": textField("Hi there John, I am reaching out about your property."),
     "retry-count": numberField(0),
     "max-retries": numberField(3),
+    "template-2": appRefField(9001),
   });
 
   const result = validateSendQueueItem(item);
