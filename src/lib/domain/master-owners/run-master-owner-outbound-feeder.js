@@ -51,7 +51,7 @@ import {
   resolveQueueSchedule,
   resolveSchedulingContactWindow,
 } from "@/lib/domain/queue/queue-schedule.js";
-import { findSendQueueItemByQueueId } from "@/lib/podio/apps/send-queue.js";
+import { findSendQueueItemByQueueId, findAllSendQueueItemsByQueueId } from "@/lib/podio/apps/send-queue.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
   fetchAllItems,
@@ -68,6 +68,7 @@ import {
   safeCategoryEquals,
   getTextValue,
   normalizeLanguage,
+  updateItem,
 } from "@/lib/providers/podio.js";
 import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
 import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
@@ -3675,6 +3676,53 @@ async function evaluateOwner({
         : (selected_template?.use_case || null),
       strict_cold_outbound: strict_touch_one_mode,
     });
+
+    // Post-creation duplicate verification — if a concurrent feeder run created
+    // an item with the same queue_id during the TOCTOU window, detect and cancel
+    // the duplicate so only one queue row survives per idempotency key.
+    const created_item_id = queue_result?.queue_item_id || null;
+    if (created_item_id && idempotency_queue_id) {
+      try {
+        const all_matches = await findAllSendQueueItemsByQueueId(idempotency_queue_id);
+        if (all_matches.length > 1) {
+          // Keep the oldest item (lowest item_id), cancel the rest.
+          const sorted = [...all_matches].sort(
+            (a, b) => Number(a.item_id) - Number(b.item_id)
+          );
+          const keeper = sorted[0];
+          const duplicates_to_cancel = sorted.slice(1);
+          for (const dup of duplicates_to_cancel) {
+            try {
+              await updateItem(dup.item_id, {
+                "queue-status": { value: "Cancelled" },
+              });
+              log.warn("master_owner_feeder.concurrent_duplicate_cancelled", {
+                master_owner_id,
+                cancelled_item_id: dup.item_id,
+                kept_item_id: keeper.item_id,
+                queue_id: idempotency_queue_id,
+                duplicate_count: all_matches.length,
+              });
+            } catch (cancel_error) {
+              log.warn("master_owner_feeder.concurrent_duplicate_cancel_failed", {
+                master_owner_id,
+                item_id: dup.item_id,
+                queue_id: idempotency_queue_id,
+                error: String(cancel_error?.message || cancel_error),
+              });
+            }
+          }
+        }
+      } catch (dedup_error) {
+        // Non-fatal — log and continue. The item was created successfully.
+        log.warn("master_owner_feeder.post_creation_dedup_check_failed", {
+          master_owner_id,
+          queue_item_id: created_item_id,
+          queue_id: idempotency_queue_id,
+          error: String(dedup_error?.message || dedup_error),
+        });
+      }
+    }
 
     appendQueueItemToRuntimeHistory({
       runtime,

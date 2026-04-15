@@ -172,7 +172,17 @@ export function buildFirstContactWindow({
     return `${formatTimeToken(min_minutes)}-${formatTimeToken(max_minutes)} ${suffix}`;
   }
 
-  return `${formatTimeToken(parsed_window.start)}-${formatTimeToken(parsed_window.end)} ${suffix}`;
+  // Clamp the window so starts are never before min_minutes (8 AM)
+  // and ends are never after max_minutes (9 PM).
+  const clamped_start = Math.max(parsed_window.start, min_minutes);
+  const clamped_end = Math.min(parsed_window.end, max_minutes);
+
+  // If clamping inverted the range, fall back to the full allowed window.
+  if (clamped_start >= clamped_end) {
+    return `${formatTimeToken(min_minutes)}-${formatTimeToken(max_minutes)} ${suffix}`;
+  }
+
+  return `${formatTimeToken(clamped_start)}-${formatTimeToken(clamped_end)} ${suffix}`;
 }
 
 export function resolveSchedulingContactWindow({

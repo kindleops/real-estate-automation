@@ -121,13 +121,13 @@ test("latency-aware queue schedule rolls a delayed reply into the next contact w
   assert.equal(result.scheduled_for_utc, "2026-04-03 22:01:44");
 });
 
-test("first-contact scheduling preserves the seller-provided window", () => {
+test("first-contact scheduling clamps early contact windows to 8AM minimum", () => {
   assert.equal(
     buildFirstContactWindow({
       contact_window: "7AM-9AM CT",
       timezone_label: "Central",
     }),
-    "7AM-9AM CT"
+    "8AM-9AM CT"
   );
 });
 
@@ -141,7 +141,7 @@ test("first-contact scheduling preserves seller-specific windows that already fi
   );
 });
 
-test("non-first-contact scheduling keeps the seller contact window instead of forcing all-day sending", () => {
+test("non-first-contact scheduling clamps early contact windows to 8AM minimum", () => {
   assert.equal(buildAlwaysOnContactWindow("Central"), "12AM-11:59PM CT");
   assert.equal(
     resolveSchedulingContactWindow({
@@ -149,7 +149,7 @@ test("non-first-contact scheduling keeps the seller contact window instead of fo
       timezone_label: "Central",
       is_first_contact: false,
     }),
-    "7AM-9AM CT"
+    "8AM-9AM CT"
   );
 });
 

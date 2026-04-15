@@ -119,6 +119,17 @@ export async function findSendQueueItemByQueueId(queue_id) {
   return findByField(APP_ID, QUEUE_FIELDS.queue_id_2, queue_id);
 }
 
+export async function findAllSendQueueItemsByQueueId(queue_id) {
+  if (!queue_id) return [];
+  const response = await filterAppItems(
+    APP_ID,
+    { [QUEUE_FIELDS.queue_id_2]: queue_id },
+    { limit: 10, offset: 0 }
+  );
+  const items = Array.isArray(response?.items) ? response.items : Array.isArray(response) ? response : [];
+  return items;
+}
+
 export async function findQueuedSendQueueItems(limit = 25, offset = 0) {
   return filterAppItems(
     APP_ID,
@@ -172,6 +183,7 @@ export default {
   updateSendQueueItem,
   findSendQueueItems,
   findSendQueueItemByQueueId,
+  findAllSendQueueItemsByQueueId,
   findQueuedSendQueueItems,
   findFailedSendQueueItems,
   findDueSendQueueItems,

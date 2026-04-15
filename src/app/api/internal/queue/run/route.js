@@ -5,6 +5,7 @@ import { handleQueueRunRequest } from "@/lib/domain/queue/queue-run-request.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 const logger = child({
   module: "api.internal.queue.run",
