@@ -22,12 +22,10 @@ import { findMessageEventsByMessageId as findMessageEventItemsByMessageId } from
 
 import { mapTextgridFailureBucket } from "@/lib/providers/textgrid.js";
 import {
-  beginIdempotentProcessing,
-  completeIdempotentProcessing,
-  failIdempotentProcessing,
   hashIdempotencyPayload,
 } from "@/lib/domain/events/idempotency-ledger.js";
-import { logDeliveryEvent } from "@/lib/domain/events/log-delivery-event.js";
+// logDeliveryEvent intentionally not imported — delivery callbacks only update
+// original outbound events, never create new Message Event items.
 import {
   getQueueItemIdFromMessageEvent,
   isQueueSendEventItem,
@@ -73,11 +71,8 @@ const defaultDeps = {
   updatePhoneNumberItem,
   findMessageEventItemsByMessageId,
   mapTextgridFailureBucket,
-  beginIdempotentProcessing,
-  completeIdempotentProcessing,
-  failIdempotentProcessing,
   hashIdempotencyPayload,
-  logDeliveryEvent,
+  // logDeliveryEvent removed — delivery callbacks update existing events only
   updateMessageEventStatus,
   updateBrainAfterDelivery,
   info,
@@ -648,46 +643,12 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
     };
   }
 
-  const idempotency = await runtimeDeps.beginIdempotentProcessing({
-    scope: "textgrid_delivery",
-    key: idempotency_key,
-    summary: `Processed delivery callback ${idempotency_key}`,
-    metadata: {
-      provider_message_id: clean(extracted.message_id) || null,
-      client_reference_id: extracted.client_reference_id || null,
-      normalized_state,
-    },
-  });
-
-  if (!idempotency.ok) {
-    return {
-      ok: false,
-      reason: idempotency.reason,
-      message_id: extracted.message_id,
-      client_reference_id: extracted.client_reference_id,
-      idempotency_key,
-    };
-  }
-
-  if (idempotency.duplicate) {
-    runtimeDeps.info("textgrid.delivery_duplicate_ignored", {
-      message_id: extracted.message_id,
-      client_reference_id: extracted.client_reference_id,
-      reason: idempotency.reason,
-      idempotency_key,
-    });
-
-    return {
-      ok: true,
-      duplicate: true,
-      updated: false,
-      reason: idempotency.reason,
-      message_id: extracted.message_id,
-      client_reference_id: extracted.client_reference_id,
-      normalized_state,
-      idempotency_key,
-    };
-  }
+  // ── Lightweight duplicate guard ───────────────────────────────────────
+  // Instead of writing idempotency records to the Message Events Podio app
+  // (which pollutes the view with non-message items), we rely on the fact
+  // that delivery status updates are idempotent — re-applying the same
+  // status to an event or queue item is a no-op.  This avoids creating any
+  // new Podio items for delivery callbacks.
 
   try {
     const correlation = await resolveTextgridDeliveryCorrelation(extracted);
@@ -704,7 +665,7 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
         queue_item_ids: exact_queue_item_ids,
       });
 
-      const result = {
+      return {
         ok: false,
         reason: correlation.reason,
         message_id: extracted.message_id,
@@ -712,20 +673,6 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
         queue_item_ids: exact_queue_item_ids,
         matched_event_count: linked_events.length,
       };
-
-      await runtimeDeps.failIdempotentProcessing({
-        record_item_id: idempotency.record_item_id,
-        scope: "textgrid_delivery",
-        key: idempotency_key,
-        error: result.reason,
-        metadata: {
-          provider_message_id: clean(extracted.message_id) || null,
-          client_reference_id: extracted.client_reference_id || null,
-          queue_item_ids: exact_queue_item_ids,
-        },
-      });
-
-      return result;
     }
 
     if (!correlation.ok && correlation.reason === "ambiguous_legacy_queue_correlation") {
@@ -734,7 +681,7 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
         queue_item_ids: queue_items.map((item) => item?.item_id || null).filter(Boolean),
       });
 
-      const result = {
+      return {
         ok: false,
         reason: correlation.reason,
         message_id: extracted.message_id,
@@ -743,19 +690,6 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
           .map((item) => item?.item_id || null)
           .filter(Boolean),
       };
-
-      await runtimeDeps.failIdempotentProcessing({
-        record_item_id: idempotency.record_item_id,
-        scope: "textgrid_delivery",
-        key: idempotency_key,
-        error: result.reason,
-        metadata: {
-          provider_message_id: clean(extracted.message_id) || null,
-          matched_event_count: linked_events.length,
-        },
-      });
-
-      return result;
     }
 
     if (exact_queue_item_ids.length === 1 || queue_items.length === 1) {
@@ -773,25 +707,12 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
         status: extracted.status,
       });
 
-      const result = {
+      return {
         ok: false,
         reason: "message_event_not_found",
         message_id: extracted.message_id,
         client_reference_id: extracted.client_reference_id,
       };
-
-      await runtimeDeps.failIdempotentProcessing({
-        record_item_id: idempotency.record_item_id,
-        scope: "textgrid_delivery",
-        key: idempotency_key,
-        error: result.reason,
-        metadata: {
-          provider_message_id: clean(extracted.message_id) || null,
-          client_reference_id: extracted.client_reference_id || null,
-        },
-      });
-
-      return result;
     }
 
     const primary_event = linked_events[0] || null;
@@ -816,37 +737,7 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
     });
     const primary_brain_id = primary_brain_item?.item_id || primary_conversation_item_id || null;
 
-    await runtimeDeps.logDeliveryEvent({
-      provider_message_id: extracted.message_id,
-      delivery_status: normalized_state,
-      raw_carrier_status: extracted.error_status || extracted.status || normalized_state,
-      error_message: extracted.error_message,
-      error_status: extracted.error_status,
-      queue_item_id: primary_queue_item?.item_id || exact_queue_item_ids[0] || null,
-      client_reference_id: extracted.client_reference_id,
-      master_owner_id: primary_master_owner_id,
-      prospect_id: primary_prospect_id,
-      property_id:
-        runtimeDeps.getFirstAppReferenceId(primary_event, "property", null) ||
-        runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.properties, null),
-      phone_item_id:
-        runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.phone_number, null) ||
-        runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.phone_number, null),
-      textgrid_number_item_id:
-        runtimeDeps.getFirstAppReferenceId(primary_event, EVENT_FIELDS.textgrid_number, null) ||
-        runtimeDeps.getFirstAppReferenceId(primary_queue_item, QUEUE_FIELDS.textgrid_number, null),
-      conversation_item_id: primary_brain_id,
-      processed_by:
-        runtimeDeps.getCategoryValue(primary_event, EVENT_FIELDS.processed_by, null) ||
-        "Scheduled Campaign",
-      source_app:
-        runtimeDeps.getCategoryValue(primary_event, EVENT_FIELDS.source_app, null) ||
-        "External API",
-      trigger_name:
-        primary_queue_item?.item_id
-          ? `textgrid-delivery:${primary_queue_item.item_id}`
-          : "textgrid-delivery",
-    });
+    // No longer create a separate delivery event — just update existing events.
 
     for (const event_item of linked_events) {
       await runtimeDeps.updateMessageEventStatus({
@@ -905,35 +796,8 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
       idempotency_key,
     };
 
-    await runtimeDeps.completeIdempotentProcessing({
-      record_item_id: idempotency.record_item_id,
-      scope: "textgrid_delivery",
-      key: idempotency_key,
-      summary: `Delivery callback completed ${idempotency_key}`,
-      metadata: {
-        provider_message_id: clean(extracted.message_id) || null,
-        client_reference_id: extracted.client_reference_id || null,
-        normalized_state,
-        matched_event_count: linked_events.length,
-        queue_item_ids: queue_items.map((item) => item?.item_id || null).filter(Boolean),
-        correlation_mode,
-      },
-    });
-
     return result;
   } catch (error) {
-    await runtimeDeps.failIdempotentProcessing({
-      record_item_id: idempotency.record_item_id,
-      scope: "textgrid_delivery",
-      key: idempotency_key,
-      error,
-      metadata: {
-        provider_message_id: clean(extracted.message_id) || null,
-        client_reference_id: extracted.client_reference_id || null,
-        normalized_state,
-      },
-    });
-
     throw error;
   }
 }

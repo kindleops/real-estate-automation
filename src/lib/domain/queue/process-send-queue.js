@@ -89,6 +89,7 @@ const QUEUE_FIELDS = {
   delivered_at: "delivered-at",
   failed_reason: "failed-reason",
   delivery_confirmed: "delivery-confirmed",
+  property_address: "property-address",
 };
 
 const EVENT_FIELDS = {
@@ -1198,6 +1199,8 @@ export async function finalizeSuccessfulQueueSend({
   property_id = null,
   market_id = null,
   outbound_number_item_id = null,
+  sms_agent_id = null,
+  property_address = null,
   template_id = null,
   message_body = "",
   message_variant = null,
@@ -1254,6 +1257,8 @@ export async function finalizeSuccessfulQueueSend({
       market_id,
       phone_item_id,
       outbound_number_item_id,
+      sms_agent_id,
+      property_address,
       message_body,
       provider_message_id: send_result.message_id,
       queue_item_id,
@@ -1498,6 +1503,8 @@ export async function processSendQueueItem(queue_item_id) {
   const prospect_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null);
   const property_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.properties, null);
   const market_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.market, null);
+  const sms_agent_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.sms_agent, null);
+  const property_address = getTextValue(queue_item, QUEUE_FIELDS.property_address, "") || "";
   const message_variant = getTouchNumber(queue_item);
   const canonical_flow =
     message_resolution.canonical_flow ||
@@ -1876,6 +1883,8 @@ export async function processSendQueueItem(queue_item_id) {
     property_id: resolved_property_id,
     market_id: resolved_market_id,
     outbound_number_item_id,
+    sms_agent_id,
+    property_address,
     template_id: template_relation_id,
     message_body,
     message_variant,

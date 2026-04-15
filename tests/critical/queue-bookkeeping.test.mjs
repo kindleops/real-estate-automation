@@ -73,6 +73,8 @@ test("finalizeSuccessfulQueueSend records a clean success path", async () => {
     market_id: 801,
     phone_item_id: 401,
     outbound_number_item_id: 501,
+    sms_agent_id: null,
+    property_address: null,
     message_body: "Test message",
     provider_message_id: "provider-1",
     queue_item_id: 123,

@@ -20,6 +20,7 @@ const EVENT_FIELDS = {
   property: "property",
   textgrid_number: "textgrid-number",
   phone_number: "phone-number",
+  sms_agent: "sms-agent",
   conversation: "conversation",
   market: "market",
   ai_route: "ai-route",
@@ -28,6 +29,7 @@ const EVENT_FIELDS = {
   trigger_name: "trigger-name",
   message: "message",
   template: "template",
+  property_address: "property-address",
   character_count: "character-count",
   delivery_status: "status-3",
   raw_carrier_status: "status-2",
@@ -39,8 +41,22 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
-function nowIso() {
-  return new Date().toISOString();
+// Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago so that
+// Podio date fields display Central time to ops.
+function nowCentral() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 function mapDeliveryStatusForEvent(send_result) {
@@ -62,6 +78,8 @@ export function buildOutboundMessageEventFields({
   market_id = null,
   phone_item_id = null,
   outbound_number_item_id = null,
+  sms_agent_id = null,
+  property_address = null,
   message_body = "",
   provider_message_id = null,
   queue_item_id = null,
@@ -116,7 +134,7 @@ export function buildOutboundMessageEventFields({
     [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Outbound",
     [EVENT_FIELDS.event_type]: "Seller Outbound SMS",
-    [EVENT_FIELDS.timestamp]: { start: nowIso() },
+    [EVENT_FIELDS.timestamp]: { start: nowCentral() },
     [EVENT_FIELDS.message]: String(message_body || ""),
     [EVENT_FIELDS.character_count]: String(message_body || "").length,
     [EVENT_FIELDS.delivery_status]: mapDeliveryStatusForEvent(send_result),
@@ -174,6 +192,12 @@ export function buildOutboundMessageEventFields({
       : {}),
     ...(asArrayAppRef(template_id)
       ? { [EVENT_FIELDS.template]: asArrayAppRef(template_id) }
+      : {}),
+    ...(asArrayAppRef(sms_agent_id)
+      ? { [EVENT_FIELDS.sms_agent]: asArrayAppRef(sms_agent_id) }
+      : {}),
+    ...(clean(property_address)
+      ? { [EVENT_FIELDS.property_address]: clean(property_address) }
       : {}),
     ...(latency_ms !== null && latency_ms !== undefined
       ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }

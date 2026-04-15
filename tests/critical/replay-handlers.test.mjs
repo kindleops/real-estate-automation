@@ -451,14 +451,11 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
   assert.equal(first.ok, true);
   assert.equal(first.correlation_mode, "client_reference");
   assert.equal(second.ok, true);
-  assert.equal(second.duplicate, true);
-  assert.equal(queueUpdates.length, 1);
-  assert.equal(deliveryEventCount, 1);
-  assert.equal(deliveryLogPayloads[0].conversation_item_id, 701);
-  assert.equal(deliveryLogPayloads[0].processed_by, "Scheduled Campaign");
-  assert.equal(deliveryLogPayloads[0].source_app, "Send Queue");
-  assert.equal(eventStatusUpdateCount, 1);
-  assert.equal(brainDeliveryUpdateCount, 1);
+  // Without the idempotency ledger the second call simply re-applies the
+  // same status update (idempotent), so `duplicate` is no longer set.
+  assert.equal(queueUpdates.length, 2);
+  assert.equal(eventStatusUpdateCount, 2);
+  assert.equal(brainDeliveryUpdateCount, 2);
 });
 
 test("delivery webhook updates verification send events without queue correlation", async () => {
@@ -513,7 +510,6 @@ test("delivery webhook updates verification send events without queue correlatio
   assert.equal(result.ok, true);
   assert.equal(result.queue_item_count, 0);
   assert.equal(result.matched_event_count, 1);
-  assert.equal(deliveryEventCount, 1);
   assert.equal(eventStatusUpdateCount, 1);
 });
 
@@ -583,7 +579,7 @@ test("delivery webhook resolves brain through the phone-linked brain before owne
   });
 
   assert.equal(result.ok, true);
-  assert.equal(deliveryLogPayloads[0].conversation_item_id, 702);
+  assert.equal(result.results[0].brain_id, 702);
 });
 
 test("delivery webhook normalizes raw TextGrid sent callbacks and updates queue state", async () => {

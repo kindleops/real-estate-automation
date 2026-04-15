@@ -14,6 +14,8 @@ const EVENT_FIELDS = {
   market: "market",
   textgrid_number: "textgrid-number",
   phone_number: "phone-number",
+  sms_agent: "sms-agent",
+  property_address: "property-address",
   conversation: "conversation",
   ai_route: "ai-route",
   processed_by: "processed-by",
@@ -28,6 +30,24 @@ const EVENT_FIELDS = {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+// Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago so that
+// Podio date fields display Central time to ops.
+function nowCentral() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 function asArrayAppRef(value) {
@@ -62,6 +82,8 @@ export async function logInboundMessageEvent({
   market_id = null,
   phone_item_id = null,
   inbound_number_item_id = null,
+  sms_agent_id = null,
+  property_address = null,
   message_body = "",
   provider_message_id = null,
   raw_carrier_status = "received",
@@ -77,7 +99,7 @@ export async function logInboundMessageEvent({
     [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
     [EVENT_FIELDS.direction]: "Inbound",
     [EVENT_FIELDS.event_type]: "Seller Inbound SMS",
-    [EVENT_FIELDS.timestamp]: { start: received_at || nowIso() },
+    [EVENT_FIELDS.timestamp]: { start: received_at || nowCentral() },
     [EVENT_FIELDS.message]: normalized_message,
     [EVENT_FIELDS.character_count]: normalized_message.length,
     [EVENT_FIELDS.delivery_status]: "Received",
@@ -111,6 +133,12 @@ export async function logInboundMessageEvent({
         }
       : {}),
     ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
+    ...(asArrayAppRef(sms_agent_id)
+      ? { [EVENT_FIELDS.sms_agent]: asArrayAppRef(sms_agent_id) }
+      : {}),
+    ...(String(property_address ?? "").trim()
+      ? { [EVENT_FIELDS.property_address]: String(property_address).trim() }
+      : {}),
   };
 
   let created;

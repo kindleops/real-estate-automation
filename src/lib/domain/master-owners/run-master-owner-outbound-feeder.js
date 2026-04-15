@@ -20,6 +20,7 @@ import { deriveContextSummary } from "@/lib/domain/context/derive-context-summar
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
+import { resolvePropertyTypeScope } from "@/lib/sms/property_scope.js";
 import {
   renderTemplate,
 } from "@/lib/domain/templates/render-template.js";
@@ -353,6 +354,7 @@ function buildTemplateSelectionInputs({
   sequence_position = null,
   context = null,
   rotation_key = null,
+  property_type_scope: explicit_property_type_scope = null,
 } = {}) {
   const resolved_category = effective_follow_up_plan?.category || primary_category;
   const resolved_secondary_category =
@@ -373,6 +375,7 @@ function buildTemplateSelectionInputs({
       property_type_scope:
         effective_follow_up_plan?.property_type_scope ||
         route?.template_selector?.property_type_scope ||
+        explicit_property_type_scope ||
         null,
       deal_strategy:
         effective_follow_up_plan?.deal_strategy ||
@@ -3198,6 +3201,10 @@ async function evaluateOwner({
     sequence_position,
     context,
     rotation_key,
+    property_type_scope: resolvePropertyTypeScope({
+      property_type: getCategoryValue(property_item, "property-type", null),
+      unit_count: getNumberValue(property_item, "number-of-units", null),
+    }),
   });
   const template_resolution_inputs = summarizeTemplateSelectionInputs({
     template_selection_inputs,
@@ -3612,15 +3619,22 @@ async function evaluateOwner({
   );
 
   if (existing_queue_row?.item_id) {
-    return {
-      ok: false,
-      skipped: true,
-      reason: "duplicate_queue_id",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      duplicate_queue_item_id: existing_queue_row.item_id,
-      queue_id: idempotency_queue_id,
-    };
+    // Skip cancelled/blocked queue rows — they should not prevent re-queuing.
+    const existing_status = lower(
+      getCategoryValue(existing_queue_row, "queue-status", null)
+    );
+    const terminal_non_blocking = new Set(["cancelled", "blocked", "failed"]);
+    if (!terminal_non_blocking.has(existing_status)) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "duplicate_queue_id",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        duplicate_queue_item_id: existing_queue_row.item_id,
+        queue_id: idempotency_queue_id,
+      };
+    }
   }
 
   const queue_message_type = strict_touch_one_mode
