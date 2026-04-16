@@ -7,7 +7,7 @@
     },
     {
       "path": "/api/internal/outbound/feed-master-owners",
-      "schedule": "2-59/8 * * * *"
+      "schedule": "2-59/8 3-12 * * *"
     },
     {
       "path": "/api/internal/queue/retry",

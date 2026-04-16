@@ -435,6 +435,7 @@ function buildTemplateSelectionInputs({
     required_variant_groups: undefined,
     require_explicit_variant_group: false,
     strict_touch_one_podio_only: false,
+    skip_render_validation: true,
   };
 }
 

@@ -458,9 +458,10 @@ function isRenderableTemplate(
     context = null,
     template_render_overrides = {},
     strict_touch_one_podio_only = false,
+    skip_render_validation = false,
   } = {}
 ) {
-  if (strict_touch_one_podio_only) return true;
+  if (strict_touch_one_podio_only || skip_render_validation) return true;
 
   const renderability = evaluateTemplatePlaceholders({
     template_text: template?.text || "",
@@ -486,6 +487,7 @@ function evaluateTemplateCandidate(
     context = null,
     template_render_overrides = {},
     strict_touch_one_podio_only = false,
+    skip_render_validation = false,
   } = {}
 ) {
   const template_use_case = normalizeTemplateSelectorUseCase(template);
@@ -568,6 +570,7 @@ function evaluateTemplateCandidate(
       context,
       template_render_overrides,
       strict_touch_one_podio_only,
+      skip_render_validation,
     })
   ) {
     operational_rejection_reasons.push("render_validation_failed");
@@ -892,6 +895,7 @@ async function evaluateSourceSelection({
   context = null,
   template_render_overrides = {},
   strict_touch_one_podio_only = false,
+  skip_render_validation = false,
   remote_fetcher = fetchTemplatesCached,
   local_fetcher = fetchLocalTemplates,
   diagnostics = null,
@@ -916,6 +920,7 @@ async function evaluateSourceSelection({
         context,
         template_render_overrides,
         strict_touch_one_podio_only,
+        skip_render_validation,
       })
     )
     .sort((left, right) => {
@@ -972,6 +977,7 @@ export async function loadTemplateCandidates({
   required_variant_groups = null,
   require_explicit_variant_group = false,
   strict_touch_one_podio_only = false,
+  skip_render_validation = false,
   require_podio_template = false,
   touch_type = null,
   touch_number = null,
@@ -1024,6 +1030,7 @@ export async function loadTemplateCandidates({
       context,
       template_render_overrides,
       strict_touch_one_podio_only,
+      skip_render_validation,
       remote_fetcher,
       local_fetcher,
       diagnostics: resolution_diagnostics,
@@ -1137,6 +1144,7 @@ export async function loadTemplateCandidates({
           context,
           template_render_overrides,
           strict_touch_one_podio_only: false,
+          skip_render_validation,
           remote_fetcher,
           local_fetcher,
           diagnostics: resolution_diagnostics,
@@ -1248,6 +1256,7 @@ export async function loadTemplate({
   required_variant_groups = null,
   require_explicit_variant_group = false,
   strict_touch_one_podio_only = false,
+  skip_render_validation = false,
   require_podio_template = false,
   touch_type = null,
   touch_number = null,
@@ -1280,6 +1289,7 @@ export async function loadTemplate({
     required_variant_groups,
     require_explicit_variant_group,
     strict_touch_one_podio_only,
+    skip_render_validation,
     require_podio_template,
     touch_type,
     touch_number,
