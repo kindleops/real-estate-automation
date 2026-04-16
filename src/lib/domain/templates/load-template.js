@@ -1020,6 +1020,7 @@ export async function loadTemplateCandidates({
 
   let last_audit_payload = null;
   let last_prefetch_audit_payload = null;
+  let podio_elimination_summary = null;
 
   for (const source of sources) {
     const result = await evaluateSourceSelection({
@@ -1038,6 +1039,31 @@ export async function loadTemplateCandidates({
 
     last_audit_payload = result.audit_payload;
     last_prefetch_audit_payload = result.prefetch_audit_payload;
+
+    if (!result.survivors.length && source === "podio") {
+      podio_elimination_summary = {
+        total_candidates: result.candidates.length,
+        rejection_counts: countRejectionReasons(result.candidates, "rejection_reasons"),
+        operational_rejection_counts: countRejectionReasons(
+          result.candidates,
+          "operational_rejection_reasons"
+        ),
+        sample_rejections: result.candidates.slice(0, 5).map((c) => ({
+          item_id: c.item_id,
+          title: c.title,
+          use_case: c.use_case,
+          selector_use_case: c.selector_use_case,
+          canonical_use_case: c.canonical_use_case,
+          language: c.language,
+          active: c.active,
+          touch_type: c.touch_type,
+          property_type_scope: c.property_type_scope,
+          deal_strategy: c.deal_strategy,
+          rejection_reasons: c.rejection_reasons,
+          operational_rejection_reasons: c.operational_rejection_reasons,
+        })),
+      };
+    }
 
     if (result.survivors.length) {
       resolution_diagnostics.selected_bucket_source = source;
@@ -1090,6 +1116,7 @@ export async function loadTemplateCandidates({
             "operational_rejection_reasons"
           ),
         },
+        podio_elimination_summary: source === "local_registry" ? podio_elimination_summary : undefined,
       };
 
       return result.survivors.map((template) => ({
