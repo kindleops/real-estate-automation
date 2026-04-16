@@ -544,15 +544,6 @@ function evaluateTemplateCandidate(
     rejection_reasons.push("deal_strategy_mismatch");
   }
 
-  const requested_lang = selector_input?.language || "English";
-  if (
-    clean(template?.language) &&
-    !safeCategoryEquals(template?.language, requested_lang) &&
-    !safeCategoryEquals(template?.language, "English")
-  ) {
-    rejection_reasons.push("language_mismatch");
-  }
-
   if (!clean(template?.text)) {
     operational_rejection_reasons.push("empty_text");
   }

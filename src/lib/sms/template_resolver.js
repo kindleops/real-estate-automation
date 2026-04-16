@@ -84,7 +84,9 @@ function scoreTemplate(template, query) {
     return { score: -1, matches, mismatches };
   }
 
-  // Language (hard filter — mismatch rejects unless English fallback)
+  // Language (soft penalty — prefer matching language, accept English fallback,
+  // penalize wrong language but do not hard-reject so templates still available
+  // when no matching-language templates exist)
   if (lc(template.language) === lc(query.language)) {
     score += 500;
     matches.push("language");
@@ -93,7 +95,6 @@ function scoreTemplate(template, query) {
     matches.push("english_fallback");
   } else {
     mismatches.push("language");
-    return { score: -1, matches, mismatches };
   }
 
   // First touch / follow-up flags
