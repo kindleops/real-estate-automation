@@ -3553,6 +3553,8 @@ async function evaluateOwner({
     template_fallback_reason:
       selected_template.template_fallback_reason || null,
     template_title: selected_template.title || null,
+    template_selection_diagnostics:
+      selected_template.template_selection_diagnostics || null,
     rendered_message_text,
     rendered_character_count: rendered_message_text.length,
     deferred_template_resolution: false,
