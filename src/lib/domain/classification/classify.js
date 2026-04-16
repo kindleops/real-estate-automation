@@ -366,6 +366,24 @@ const COMPLIANCE_EXACT = new Set([
   "dừng", "dung",
   // Polish
   "zatrzymaj", "odpisz",
+  // Hebrew
+  "עצור", "הפסק", "ביטול",
+  // Mandarin
+  "停止", "取消", "停",
+  // Korean
+  "중지", "그만", "취소", "멈춰",
+  // Japanese
+  "止めて", "停止", "やめて", "やめろ",
+  // Arabic
+  "توقف", "قف", "الغاء", "أوقف",
+  // Russian
+  "стоп", "остановить", "отмена", "хватит",
+  // Thai
+  "หยุด", "ยกเลิก",
+  // Hindi
+  "बंद", "रोको", "रुको",
+  // Greek
+  "σταμάτα", "στοπ", "ακύρωση",
 ]);
 
 const COMPLIANCE_PHRASES = [
@@ -501,6 +519,65 @@ const COMPLIANCE_PHRASES = [
   "nie dzwoń do mnie", "zostaw mnie w spokoju",
   "to jest nękanie", "zgłoszę ten numer",
   "nie chcę wiadomości", "nie chcę być kontaktowany",
+
+  // ── Hebrew ──────────────────────────────────────────────────────────────
+  "תפסיק לשלוח הודעות", "אל תשלח לי הודעות",
+  "תוריד אותי מהרשימה", "אל תתקשר אלי",
+  "עזוב אותי בשקט", "זה הטרדה",
+  "אל תשלח לי יותר", "תמחק את המספר שלי",
+  "לא רוצה הודעות", "אל תיצור איתי קשר",
+
+  // ── Mandarin ────────────────────────────────────────────────────────────
+  "不要发短信给我", "不要联系我", "把我从名单上删除",
+  "不要打电话给我", "别再发了", "这是骚扰",
+  "删除我的号码", "不要再联系", "别发信息了",
+  "不想收到信息", "停止发送", "别再打来",
+
+  // ── Korean ──────────────────────────────────────────────────────────────
+  "문자 보내지 마세요", "연락하지 마세요",
+  "목록에서 삭제해주세요", "전화하지 마세요",
+  "그만 보내세요", "이것은 괴롭힘입니다",
+  "제 번호를 삭제해주세요", "연락 안 받겠습니다",
+  "더 이상 보내지 마세요", "관심 없으니 그만하세요",
+
+  // ── Japanese ────────────────────────────────────────────────────────────
+  "メッセージを送らないでください", "連絡しないでください",
+  "リストから削除してください", "電話しないでください",
+  "もう送らないで", "迷惑です", "やめてください",
+  "番号を消してください", "もう連絡しないで",
+  "しつこいです", "迷惑行為です",
+
+  // ── Arabic ──────────────────────────────────────────────────────────────
+  "لا ترسل رسائل", "لا تتواصل معي",
+  "احذفني من القائمة", "لا تتصل بي",
+  "اتركني وشأني", "هذا تحرش",
+  "لا أريد رسائل", "احذف رقمي",
+  "توقف عن الإرسال", "لا تراسلني",
+
+  // ── Russian ─────────────────────────────────────────────────────────────
+  "не пишите мне", "не связывайтесь со мной",
+  "удалите меня из списка", "не звоните мне",
+  "оставьте меня в покое", "это домогательство",
+  "удалите мой номер", "прекратите писать",
+  "больше не пишите", "не беспокойте меня",
+
+  // ── Thai ────────────────────────────────────────────────────────────────
+  "อย่าส่งข้อความ", "อย่าติดต่อฉัน",
+  "ลบฉันออกจากรายชื่อ", "อย่าโทรหาฉัน",
+  "ปล่อยฉันไว้", "นี่คือการคุกคาม",
+  "ไม่ต้องส่งมาอีก", "ลบเบอร์ฉัน",
+
+  // ── Hindi ───────────────────────────────────────────────────────────────
+  "मुझे मैसेज मत करो", "मुझसे संपर्क मत करो",
+  "मुझे लिस्ट से हटाओ", "मुझे फोन मत करो",
+  "मुझे अकेला छोड़ दो", "यह उत्पीड़न है",
+  "मेरा नंबर डिलीट करो", "और मैसेज मत भेजो",
+
+  // ── Greek ───────────────────────────────────────────────────────────────
+  "μην μου στέλνεις μηνύματα", "μη με ενοχλείς",
+  "βγάλε με από τη λίστα", "μη μου τηλεφωνείς",
+  "άφησέ με ήσυχο", "αυτό είναι παρενόχληση",
+  "μην μου ξαναστείλεις", "σβήσε τον αριθμό μου",
 ];
 
 function detectComplianceFlag(message) {
@@ -542,6 +619,14 @@ const OBJECTION_MAP = [
       "not mine", "not my property", "i don't own", "i don't own that",
       "i don't own this", "that's not my property",
       "that is not my property", "incorrect number",
+      // English slang / misspellings
+      "wrong #", "wrng number", "rong number",
+      "aint the owner", "ain't the owner", "im not the owner",
+      "thats not mine", "that aint mine", "that ain't mine",
+      "dont own it", "dont own that", "i dont own",
+      "doesnt belong to me", "dont belong to me",
+      "allready sold", "alredy sold", "i sold it already",
+      "sold it awhile ago", "been sold", "that was sold",
       // Spanish
       "número equivocado", "equivocado de número",
       "no soy el dueño", "no soy la dueña",
@@ -575,6 +660,33 @@ const OBJECTION_MAP = [
       "zły numer", "nie jestem właścicielem",
       "nie jestem właścicielką", "już sprzedałem",
       "już sprzedałam", "to nie moja nieruchomość",
+      // Hebrew
+      "מספר לא נכון", "לא הבעלים", "כבר מכרתי",
+      "זה לא שלי", "לא שלי הנכס", "מכרתי את זה",
+      // Mandarin
+      "打错了", "号码错了", "不是业主", "已经卖了",
+      "不是我的房子", "我不是房主", "卖掉了",
+      // Korean
+      "번호 틀렸어요", "잘못된 번호", "주인이 아닙니다",
+      "이미 팔았습니다", "제 집이 아닙니다", "소유자가 아닙니다",
+      // Japanese
+      "番号が違います", "オーナーではありません", "もう売りました",
+      "私の物件ではありません", "所有者ではありません", "売却済みです",
+      // Arabic
+      "رقم خاطئ", "لست المالك", "بعتها بالفعل",
+      "ليست ملكي", "لست صاحب العقار", "تم البيع",
+      // Russian
+      "неправильный номер", "не владелец", "уже продал",
+      "это не моя собственность", "не мой дом", "давно продано",
+      // Thai
+      "เบอร์ผิด", "ไม่ใช่เจ้าของ", "ขายไปแล้ว",
+      "ไม่ใช่ของฉัน", "ไม่ใช่บ้านฉัน",
+      // Hindi
+      "गलत नंबर", "मालिक नहीं हूं", "पहले ही बेच दिया",
+      "यह मेरी संपत्ति नहीं है", "मेरा घर नहीं है",
+      // Greek
+      "λάθος αριθμός", "δεν είμαι ο ιδιοκτήτης",
+      "το πούλησα ήδη", "δεν είναι δικό μου",
     ],
   },
   {
@@ -593,6 +705,15 @@ const OBJECTION_MAP = [
       "i don't know you", "i don't recognize this number",
       "i don't recognize this", "not a number i know",
       "who sent this", "who's messaging me",
+      // English slang / misspellings
+      "tf is this", "bruh who dis", "who dis", "whos texting me",
+      "who tf is this", "who da f is this",
+      "idk who this is", "idk u", "idk you",
+      "how u get my number", "how u get my #",
+      "how'd you get my info", "how yall get my number",
+      "this a scam", "is this spam", "u a scammer",
+      "are u real", "r u real", "u legit",
+      "dont know u", "dont kno u", "never heard of u",
       // Spanish
       "quién eres", "quién es usted", "cómo tienes mi número",
       "de dónde sacaste mi número", "de donde sacaste mi numero",
@@ -623,6 +744,33 @@ const OBJECTION_MAP = [
       // Polish
       "kim jesteś", "skąd masz mój numer",
       "co to jest", "nie znam tego numeru",
+      // Hebrew
+      "מי זה", "מי את", "מי אתה", "איך השגת את המספר שלי",
+      "מה זה", "מי שולח לי", "לא מכיר את המספר",
+      // Mandarin
+      "你是谁", "这是谁", "你怎么有我的号码",
+      "什么意思", "哪个公司", "不认识你",
+      // Korean
+      "누구세요", "이게 뭐예요", "제 번호를 어떻게",
+      "어떤 회사예요", "모르는 번호예요",
+      // Japanese
+      "誰ですか", "どちら様", "なぜ私の番号を知っていますか",
+      "何のことですか", "知らない番号です",
+      // Arabic
+      "من أنت", "من هذا", "كيف حصلت على رقمي",
+      "ما هذا", "لا أعرفك", "من أي شركة",
+      // Russian
+      "кто это", "кто вы", "откуда у вас мой номер",
+      "что это", "не знаю этот номер", "какая компания",
+      // Thai
+      "คุณเป็นใคร", "นี่ใคร", "ได้เบอร์ฉันมาจากไหน",
+      "อะไรนี่", "ไม่รู้จักเบอร์นี้",
+      // Hindi
+      "कौन हो आप", "यह कौन है", "मेरा नंबर कैसे मिला",
+      "यह क्या है", "नहीं जानता आपको",
+      // Greek
+      "ποιος είσαι", "ποιος είναι", "πώς βρήκες τον αριθμό μου",
+      "τι είναι αυτό", "δεν ξέρω αυτόν τον αριθμό",
     ],
   },
   {
@@ -642,6 +790,16 @@ const OBJECTION_MAP = [
       "not at this time", "don't bother", "don't bother me",
       "don't waste my time", "waste of time",
       "no need to reach out again",
+      // English slang / misspellings
+      "nah", "nahh", "nahhh", "naw", "naww", "nope", "nopee",
+      "hell no", "h*ll no", "heck no", "foh", "fk no",
+      "aint selling", "ain't selling", "not sellin",
+      "dont wanna sell", "dnt wanna sell",
+      "im good", "i'm good", "all good",
+      "hard pass", "big pass", "no way", "no wayy",
+      "not intrested", "not intersted", "not intressted",
+      "leave me alone", "leav me alone", "go away",
+      "kick rocks", "pound sand", "beat it",
       // Spanish
       "no estoy interesado", "no estoy interesada",
       "no me interesa", "no quiero vender",
@@ -681,6 +839,33 @@ const OBJECTION_MAP = [
       "nie jestem zainteresowany", "nie jestem zainteresowana",
       "nie chcę sprzedawać", "nie na sprzedaż",
       "zatrzymam to", "nie dziękuję", "brak zainteresowania",
+      // Hebrew
+      "לא מעוניין", "לא מעוניינת", "לא למכירה",
+      "לא רוצה למכור", "לא מוכן למכור", "שומר על זה",
+      // Mandarin
+      "不感兴趣", "不卖", "不出售", "不想卖",
+      "没兴趣", "不考虑卖", "留着",
+      // Korean
+      "관심 없습니다", "팔지 않습니다", "매매 안 합니다",
+      "관심 없어요", "안 팔아요", "팔 생각 없어요",
+      // Japanese
+      "興味ありません", "売りません", "売る気はありません",
+      "結構です", "売るつもりはない", "興味がない",
+      // Arabic
+      "غير مهتم", "غير مهتمة", "ليست للبيع",
+      "لا أريد البيع", "لا أبيع", "سأحتفظ بها",
+      // Russian
+      "не заинтересован", "не заинтересована", "не продаю",
+      "не хочу продавать", "не продается", "не интересно",
+      // Thai
+      "ไม่สนใจ", "ไม่ขาย", "ไม่ต้องการขาย",
+      "ไม่อยากขาย", "เก็บไว้เอง",
+      // Hindi
+      "रुचि नहीं है", "बेचना नहीं है", "नहीं बेचूंगा",
+      "दिलचस्पी नहीं", "बिक्री के लिए नहीं है",
+      // Greek
+      "δεν ενδιαφέρομαι", "δεν πωλείται", "δεν θέλω να πουλήσω",
+      "θα το κρατήσω", "δεν πρόκειται να πουλήσω",
     ],
   },
   {
@@ -734,6 +919,33 @@ const OBJECTION_MAP = [
       "mam agenta", "pracuję z agentem",
       "mam już kupca", "na rynku",
       "oferta przyjęta", "pod umową",
+      // Hebrew
+      "כבר ברשימה", "כבר בשוק", "יש לי סוכן",
+      "כבר יש קונה", "תחת חוזה",
+      // Mandarin
+      "已经挂牌", "在市场上", "有经纪人",
+      "已经有买家", "在合同中",
+      // Korean
+      "이미 매물로 나왔어요", "시장에 나와 있어요",
+      "중개사가 있어요", "이미 매수자가 있어요", "계약 중이에요",
+      // Japanese
+      "すでに掲載中", "市場に出ています", "エージェントがいます",
+      "すでに買い手がいます", "契約中です",
+      // Arabic
+      "معروض بالفعل", "في السوق", "لدي وكيل",
+      "لدي مشتري بالفعل", "تحت العقد",
+      // Russian
+      "уже выставлено", "на рынке", "у меня есть агент",
+      "уже есть покупатель", "под контрактом",
+      // Thai
+      "ลงขายแล้ว", "อยู่ในตลาด", "มีนายหน้าแล้ว",
+      "มีผู้ซื้อแล้ว", "อยู่ในสัญญา",
+      // Hindi
+      "पहले से लिस्ट है", "बाजार में है", "एजेंट है मेरे पास",
+      "खरीदार मिल गया", "कॉन्ट्रैक्ट में है",
+      // Greek
+      "ήδη καταχωρημένο", "στην αγορά", "έχω μεσίτη",
+      "ήδη έχω αγοραστή", "υπό συμβόλαιο",
     ],
   },
   {
@@ -752,6 +964,15 @@ const OBJECTION_MAP = [
       "was hoping for more", "is that the best you can do",
       "i expected more", "that's insulting", "thats insulting",
       "need at least", "minimum is", "my floor is",
+      // English slang / misspellings
+      "lowballin", "lowballin me", "lo ball", "lo-ball",
+      "thats cap", "that's cap", "nah thats too low",
+      "cmon", "c'mon", "come on bruh", "u can do better",
+      "do better", "step it up", "bring more to the table",
+      "to low", "2 low", "wayyy to low", "wayy too low",
+      "ridiculously low", "rediculous", "rediculus offer",
+      "thats a joke", "thats a slap in the face",
+      "not enuff", "not enuf", "aint enough", "ain't enough",
       // Spanish
       "es muy bajo", "muy bajo", "necesito más", "necesito mas",
       "suba la oferta", "no es suficiente",
@@ -784,6 +1005,33 @@ const OBJECTION_MAP = [
       "za mało", "potrzebuję więcej",
       "zwiększ ofertę", "to nie wystarczy",
       "spodziewałem się więcej",
+      // Hebrew
+      "זה נמוך מדי", "צריך יותר", "תעלה את ההצעה",
+      "לא מספיק", "ציפיתי ליותר",
+      // Mandarin
+      "太低了", "需要更多", "提高报价",
+      "不够", "出价太低",
+      // Korean
+      "너무 낮아요", "더 필요합니다", "제안을 올려주세요",
+      "충분하지 않아요", "더 높은 가격이 필요해요",
+      // Japanese
+      "低すぎます", "もっと必要です", "オファーを上げてください",
+      "足りません", "期待していた金額より低い",
+      // Arabic
+      "قليل جدا", "أحتاج أكثر", "ارفع العرض",
+      "غير كافي", "كنت أتوقع أكثر",
+      // Russian
+      "слишком мало", "нужно больше", "повысьте предложение",
+      "недостаточно", "ожидал больше",
+      // Thai
+      "ต่ำเกินไป", "ต้องการมากกว่า", "เพิ่มราคา",
+      "ไม่พอ", "คาดหวังมากกว่านี้",
+      // Hindi
+      "बहुत कम है", "ज्यादा चाहिए", "ऑफर बढ़ाओ",
+      "काफी नहीं है", "उम्मीद ज्यादा थी",
+      // Greek
+      "πολύ χαμηλά", "χρειάζομαι περισσότερα", "ανεβάστε την προσφορά",
+      "δεν αρκεί", "περίμενα περισσότερα",
     ],
   },
   {
@@ -803,6 +1051,14 @@ const OBJECTION_MAP = [
       "maybe in a few", "will reach out when ready",
       "touch base later", "not the right time",
       "timing isn't right", "bad timing",
+      // English slang / misspellings
+      "gimme time", "gimme some time", "gimmie time",
+      "not rn", "not rn bro", "maybe l8r", "l8r",
+      "hmu later", "hit me up later", "hit me later",
+      "lmk later", "lemmie think", "lemme think",
+      "idk yet", "idk rn", "stil thinking", "stil deciding",
+      "not redy", "not redy yet", "eventualy",
+      "down the line", "sometime down the line",
       // Spanish
       "necesito tiempo", "no estoy listo", "no estoy lista",
       "más adelante", "mas adelante",
@@ -840,6 +1096,33 @@ const OBJECTION_MAP = [
       "nie jestem gotowa", "później",
       "jeszcze myślę", "jeszcze nie",
       "to nie jest dobry moment",
+      // Hebrew
+      "צריך זמן", "לא מוכן עדיין", "אולי אחר כך",
+      "אני חושב על זה", "לא עכשיו", "עוד לא",
+      // Mandarin
+      "需要时间", "还没准备好", "以后再说",
+      "我在考虑", "现在不行", "还没决定",
+      // Korean
+      "시간이 필요합니다", "아직 준비 안 됐어요", "나중에요",
+      "생각 중입니다", "지금은 아니에요",
+      // Japanese
+      "時間が必要です", "まだ準備ができていません", "後で",
+      "考え中です", "今はだめです", "まだです",
+      // Arabic
+      "أحتاج وقت", "لست مستعدا بعد", "لاحقا",
+      "أفكر في الأمر", "ليس الآن", "لم أقرر بعد",
+      // Russian
+      "нужно время", "ещё не готов", "позже",
+      "я думаю об этом", "не сейчас", "ещё не решил",
+      // Thai
+      "ต้องการเวลา", "ยังไม่พร้อม", "ไว้ทีหลัง",
+      "กำลังคิดอยู่", "ไม่ใช่ตอนนี้",
+      // Hindi
+      "समय चाहिए", "अभी तैयार नहीं", "बाद में",
+      "सोच रहा हूं", "अभी नहीं",
+      // Greek
+      "χρειάζομαι χρόνο", "δεν είμαι έτοιμος ακόμα", "αργότερα",
+      "το σκέφτομαι", "όχι τώρα",
     ],
   },
   {
@@ -862,6 +1145,13 @@ const OBJECTION_MAP = [
       "need to talk to my mom", "need to talk to my dad",
       "need to talk to my parents", "need my family's blessing",
       "family has to agree", "all owners need to agree",
+      // English slang / misspellings
+      "gotta talk to my wife", "gotta ask my wife",
+      "gotta talk to the mrs", "gotta run it by the wife",
+      "gotta run it by the hubby", "gotta ask the hubby",
+      "lemme talk to my fam", "gotta check with fam",
+      "wifey gotta approve", "hubby gotta approve",
+      "need to talk to my ol lady",
       // Spanish
       "hablar con mi esposa", "hablar con mi esposo",
       "hablar con mi familia", "necesito consultarlo",
@@ -897,6 +1187,34 @@ const OBJECTION_MAP = [
       "porozmawiać z żoną", "porozmawiać z mężem",
       "skonsultować z rodziną", "żona musi zdecydować",
       "mąż musi zdecydować",
+      // Hebrew
+      "צריך לדבר עם אשתי", "צריך לדבר עם בעלי",
+      "המשפחה צריכה להסכים",
+      // Mandarin
+      "需要和老婆商量", "需要和老公商量",
+      "需要和家人商量", "家人需要同意",
+      // Korean
+      "아내와 상의해야 해요", "남편과 상의해야 해요",
+      "가족과 상의해야 해요",
+      // Japanese
+      "妻と相談しなければ", "夫と相談しなければ",
+      "家族と相談が必要です",
+      // Arabic
+      "أحتاج أتكلم مع زوجتي", "أحتاج أتكلم مع زوجي",
+      "العائلة لازم توافق",
+      // Russian
+      "нужно поговорить с женой", "нужно поговорить с мужем",
+      "семья должна согласиться",
+      // Thai
+      "ต้องคุยกับภรรยา", "ต้องคุยกับสามี",
+      "ครอบครัวต้องเห็นด้วย",
+      // Hindi
+      "पत्नी से बात करनी होगी", "पति से बात करनी होगी",
+      "परिवार की सहमति चाहिए",
+      // Greek
+      "πρέπει να μιλήσω με τη γυναίκα μου",
+      "πρέπει να μιλήσω με τον άντρα μου",
+      "η οικογένεια πρέπει να συμφωνήσει",
     ],
   },
   {
@@ -914,6 +1232,13 @@ const OBJECTION_MAP = [
       "send first", "offer first", "show me the number",
       "what's it worth to you", "how much is it worth to you",
       "what would you offer", "ballpark figure",
+      // English slang / misspellings
+      "wats ur offer", "wat u offerin", "whats the #",
+      "gimme a number", "gimme a #", "give me a #",
+      "how much u willin to pay", "how much u gonna give",
+      "throw me a number", "shoot me a number",
+      "whatcha offering", "whatchu offerin",
+      "jus send the offer", "just send it",
       // Spanish
       "cuánto ofrecen", "cuanto ofrecen",
       "mándame una oferta", "mandame una oferta",
@@ -946,6 +1271,32 @@ const OBJECTION_MAP = [
       // Polish
       "ile oferujecie", "prześlijcie ofertę",
       "jaka jest wasza oferta", "powiedzcie mi cenę",
+      // Hebrew
+      "מה ההצעה שלך", "שלח לי הצעה", "כמה אתה מציע",
+      "תשלח מספר", "מה אתה נותן",
+      // Mandarin
+      "你出多少钱", "给我个报价", "你的出价是多少",
+      "先出价", "价格多少",
+      // Korean
+      "얼마 제안하세요", "제안서를 보내주세요", "가격이 얼마예요",
+      "먼저 제안해 주세요",
+      // Japanese
+      "いくらですか", "オファーを送ってください",
+      "価格を教えてください", "まずオファーを",
+      // Arabic
+      "كم تعرض", "أرسل لي عرض", "ما هو عرضك",
+      "العرض أولا", "كم السعر",
+      // Russian
+      "сколько предлагаете", "отправьте мне предложение",
+      "какое ваше предложение", "сначала предложение",
+      // Thai
+      "เสนอเท่าไหร่", "ส่งข้อเสนอมา", "ราคาเท่าไหร่",
+      // Hindi
+      "कितना देंगे", "ऑफर भेजो", "आपकी पेशकश क्या है",
+      "पहले ऑफर दो",
+      // Greek
+      "πόσα προσφέρετε", "στείλτε μου μια προσφορά",
+      "ποια είναι η προσφορά σας",
     ],
   },
   {
@@ -961,6 +1312,13 @@ const OBJECTION_MAP = [
       "lease ends", "lease doesn't end", "month to month",
       "long-term tenant", "tenant in place", "currently rented",
       "tenant has rights", "tenant protections",
+      // English slang / misspellings
+      "tennant", "tennants", "tenet", "tenent",
+      "ppl living there", "someone livin there",
+      "cant get em out", "cant kick em out",
+      "squatter", "squatters", "squater",
+      "they wont leave", "wont move out",
+      "got renters in it", "rented out rn",
       // Spanish
       "inquilino", "inquilinos", "arrendatario", "arrendatarios",
       "está ocupada", "está rentada", "rentada", "rentado",
@@ -990,6 +1348,33 @@ const OBJECTION_MAP = [
       // Polish
       "wynajmowane", "lokator", "lokatorka",
       "nie mogę wyeksmitować", "ma lokatorów",
+      // Hebrew
+      "שוכר", "שוכרים", "מושכר",
+      "יש דיירים", "לא יכול לפנות אותם",
+      // Mandarin
+      "租客", "有租客", "已租出",
+      "无法赶走租客", "有人住",
+      // Korean
+      "세입자", "세입자가 있어요", "임대 중이에요",
+      "내보낼 수 없어요",
+      // Japanese
+      "テナント", "入居者がいます", "賃貸中です",
+      "退去できません",
+      // Arabic
+      "مستأجر", "يوجد مستأجرين", "مؤجر",
+      "لا أستطيع إخراجهم",
+      // Russian
+      "арендатор", "есть арендаторы", "сдано в аренду",
+      "не могу выселить",
+      // Thai
+      "ผู้เช่า", "มีผู้เช่าอยู่", "ให้เช่าอยู่",
+      "ไล่ผู้เช่าไม่ได้",
+      // Hindi
+      "किरायेदार", "किरायेदार है", "भाड़े पर है",
+      "निकाल नहीं सकता",
+      // Greek
+      "ενοικιαστής", "έχει ενοικιαστές", "ενοικιάζεται",
+      "δεν μπορώ να τους βγάλω",
     ],
   },
   {
@@ -1011,6 +1396,17 @@ const OBJECTION_MAP = [
       "hoarder", "hoarder house", "hoarder situation",
       "needs total renovation", "major renovation needed",
       "hazardous", "environmental issues", "asbestos",
+      // English slang / misspellings
+      "fixer uper", "fixr upper", "fixer-upper",
+      "fallin apart", "fallin down", "falling down",
+      "trashed", "its trashed", "place is trashed",
+      "its a dump", "its a wreck", "total wreck",
+      "beat up", "beat down", "ran down", "run down",
+      "needs alot of work", "needs alotta work",
+      "moldy", "moldey", "got mold",
+      "roofs leaking", "roof is leakin",
+      "condemed", "uninhabitable", "unlivable",
+      "needs everyting", "needs everthing",
       // Spanish
       "necesita reparaciones", "está en mal estado",
       "muchos daños", "necesita mucho trabajo",
@@ -1040,6 +1436,33 @@ const OBJECTION_MAP = [
       // Polish
       "wymaga remontu", "zły stan",
       "dużo uszkodzeń", "potrzeba dużo pracy",
+      // Hebrew
+      "צריך שיפוץ", "מצב רע", "נזקי מים",
+      "בעיות מבניות", "גג דולף", "עובש",
+      // Mandarin
+      "需要修理", "状况很差", "漏水",
+      "结构问题", "屋顶损坏", "发霉",
+      // Korean
+      "수리가 필요해요", "상태가 안 좋아요", "누수",
+      "구조적 문제", "지붕 손상", "곰팡이",
+      // Japanese
+      "修理が必要", "状態が悪い", "雨漏り",
+      "構造的な問題", "屋根の損傷", "カビ",
+      // Arabic
+      "يحتاج إصلاح", "حالة سيئة", "تسرب مياه",
+      "مشاكل هيكلية", "السقف تالف",
+      // Russian
+      "нужен ремонт", "плохое состояние", "протечка",
+      "структурные проблемы", "крыша повреждена", "плесень",
+      // Thai
+      "ต้องซ่อม", "สภาพไม่ดี", "น้ำรั่ว",
+      "ปัญหาโครงสร้าง", "หลังคาเสียหาย",
+      // Hindi
+      "मरम्मत चाहिए", "खराब हालत", "पानी रिसाव",
+      "नींव की समस्या", "छत की समस्या",
+      // Greek
+      "χρειάζεται επισκευή", "κακή κατάσταση", "υγρασία",
+      "δομικά προβλήματα", "ζημιά στη στέγη",
     ],
   },
   {
@@ -1083,6 +1506,33 @@ const OBJECTION_MAP = [
       // Polish
       "spadek", "postępowanie spadkowe",
       "odziedziczyłem nieruchomość", "właściciel zmarł",
+      // Hebrew
+      "צוואה", "ירושה", "עיזבון",
+      "הבעלים נפטר", "יורשים",
+      // Mandarin
+      "遗产继承", "继承了房产", "业主去世了",
+      "遗嘱", "继承人",
+      // Korean
+      "상속", "유산", "상속받았어요",
+      "소유자가 돌아가셨어요", "상속인",
+      // Japanese
+      "相続", "遺産", "相続しました",
+      "オーナーが亡くなりました", "相続人",
+      // Arabic
+      "ميراث", "تركة", "ورثت العقار",
+      "المالك توفي", "ورثة",
+      // Russian
+      "наследство", "наследовал имущество",
+      "владелец умер", "наследник",
+      // Thai
+      "มรดก", "มรดกที่ดิน", "สืบทอดมา",
+      "เจ้าของเสียชีวิตแล้ว", "ทายาท",
+      // Hindi
+      "विरासत", "विरासत में मिली", "मालिक गुजर गया",
+      "वारिस",
+      // Greek
+      "κληρονομιά", "κληρονόμησα το ακίνητο",
+      "ο ιδιοκτήτης πέθανε", "κληρονόμος",
     ],
   },
   {
@@ -1127,6 +1577,33 @@ const OBJECTION_MAP = [
       "w trakcie rozwodu", "rozwód",
       "moja była żona", "mój były mąż",
       "separacja", "nakaz sądowy sprzedaży",
+      // Hebrew
+      "גירושין", "בהליך גירושין", "האקס שלי",
+      "האקסית שלי", "פירוד",
+      // Mandarin
+      "离婚", "正在离婚", "前妻",
+      "前夫", "分居",
+      // Korean
+      "이혼", "이혼 중이에요", "전 아내",
+      "전 남편", "별거",
+      // Japanese
+      "離婚", "離婚中です", "元妻",
+      "元夫", "別居",
+      // Arabic
+      "طلاق", "في طلاق", "طليقتي",
+      "طليقي", "انفصال",
+      // Russian
+      "развод", "в процессе развода", "бывшая жена",
+      "бывший муж", "раздельное проживание",
+      // Thai
+      "หย่าร้าง", "กำลังหย่า", "อดีตสามี",
+      "อดีตภรรยา", "แยกกันอยู่",
+      // Hindi
+      "तलाक", "तलाक की प्रक्रिया में", "पूर्व पत्नी",
+      "पूर्व पति", "अलगाव",
+      // Greek
+      "διαζύγιο", "σε διαδικασία διαζυγίου",
+      "πρώην σύζυγος", "χωρισμός",
     ],
   },
   {
@@ -1185,6 +1662,33 @@ const OBJECTION_MAP = [
       "egzekucja hipoteczna",
       "zaległe podatki", "nie mogę zapłacić",
       "jestem pod wodą",
+      // Hebrew
+      "פיגורים בתשלומים", "עיקול", "חובות על הנכס",
+      "לא יכול לשלם", "פשיטת רגל",
+      // Mandarin
+      "拖欠贷款", "止赎", "欠税",
+      "付不起", "负债超过房价", "破产",
+      // Korean
+      "대출 납부 연체", "압류", "체납 세금",
+      "납부할 수 없어요", "매각이 대출보다 낮아요", "파산",
+      // Japanese
+      "ローン滋納", "差し押さえ", "滋納税",
+      "支払えません", "ローンが価値を超えています", "破産",
+      // Arabic
+      "متأخر في الدفع", "حجز عقاري", "ضرائب متأخرة",
+      "لا أستطيع الدفع", "إفلاس",
+      // Russian
+      "задолженность по кредиту", "взыскание", "налоговая задолженность",
+      "не могу платить", "банкротство",
+      // Thai
+      "ค้างชำระ", "ยึดทรัพย์สิน", "ภาษีค้างจ่าย",
+      "จ่ายไม่ไหว", "ล้มละลาย",
+      // Hindi
+      "लोन की किस्त बकाया", "जब्ती", "टैक्स बकाया",
+      "भुगतान नहीं कर सकता", "दिवालिया",
+      // Greek
+      "καθυστέρηση πληρωμής", "κατάσχεση", "καθυστερούμενοι φόροι",
+      "δεν μπορώ να πληρώσω", "πτώχευση",
     ],
   },
   {
@@ -1222,6 +1726,24 @@ const OBJECTION_MAP = [
       // Polish
       "mam inną ofertę", "mam już kupca",
       "inny kupiec jest zainteresowany",
+      // Hebrew
+      "יש לי הצעה אחרת", "כבר יש קונה", "מישהו אחר הציע",
+      // Mandarin
+      "有其他报价", "已经有买家了", "别人出价更高",
+      // Korean
+      "다른 제안이 있어요", "이미 매수자가 있어요",
+      // Japanese
+      "他にオファーがあります", "すでに買い手がいます",
+      // Arabic
+      "لدي عرض آخر", "لدي مشتري بالفعل",
+      // Russian
+      "есть другое предложение", "уже есть покупатель",
+      // Thai
+      "มีข้อเสนออื่นแล้ว", "มีผู้ซื้อแล้ว",
+      // Hindi
+      "दूसरी पेशकश है", "पहले से खरीदार है",
+      // Greek
+      "έχω άλλη προσφορά", "ήδη έχω αγοραστή",
     ],
   },
   {
@@ -1259,6 +1781,26 @@ const OBJECTION_MAP = [
       // Polish
       "chcę ceny rynkowej", "wiem ile to warte",
       "nie poniżej ceny rynkowej",
+      // Hebrew
+      "רוצה מחיר שוק", "אני יודע מה זה שווה",
+      "לא מתחת למחיר השוק",
+      // Mandarin
+      "要市场价", "我知道值多少", "不会低于市场价",
+      // Korean
+      "시장 가격을 원해요", "얼마인지 알아요", "시세 이하로는 안 팔아요",
+      // Japanese
+      "市場価格が欲しいです", "価値を知っています", "市場価格以下は受けません",
+      // Arabic
+      "أريد سعر السوق", "أعرف قيمته", "لن أبيع بأقل من السوق",
+      // Russian
+      "хочу рыночную цену", "я знаю сколько это стоит",
+      "не ниже рыночной цены",
+      // Thai
+      "ต้องการราคาตลาด", "รู้ว่ามันคุ้มเท่าไหร่",
+      // Hindi
+      "बाजार मूल्य चाहिए", "मुझे पता है कितना है",
+      // Greek
+      "θέλω τιμή αγοράς", "ξέρω πόσο αξίζει",
     ],
   },
   {
@@ -1271,6 +1813,11 @@ const OBJECTION_MAP = [
       "call me at", "you can reach me at",
       "give me a ring", "prefer a call",
       "better to talk", "easier to explain over the phone",
+      // English slang / misspellings
+      "hit my line", "hit me up", "ring me", "ring me up",
+      "hmu", "call my cell", "jus call me", "just call",
+      "rather talk than text", "lets talk on the phone",
+      "can u call", "can u call me", "plz call", "pls call",
       // Spanish
       "llámame", "puedes llamarme", "me llamas",
       "prefiero hablar por teléfono",
@@ -1296,6 +1843,24 @@ const OBJECTION_MAP = [
       // Polish
       "zadzwoń do mnie", "czy możesz zadzwonić",
       "wolę rozmawiać przez telefon",
+      // Hebrew
+      "תתקשר אלי", "אני מעדיף טלפון", "תרים לי טלפון",
+      // Mandarin
+      "给我打电话", "我喜欢打电话", "打电话给我",
+      // Korean
+      "전화해 주세요", "전화 통화가 좋겠어요", "전화주세요",
+      // Japanese
+      "電話してください", "電話の方がいいです", "電話ください",
+      // Arabic
+      "اتصل بي", "أفضل الهاتف", "كلمني تليفون",
+      // Russian
+      "позвоните мне", "предпочитаю по телефону", "перезвоните",
+      // Thai
+      "โทรหาฉัน", "ชอบคุยทางโทรศัพท์มากกว่า", "โทรมานะ",
+      // Hindi
+      "मुझे कॉल करो", "फोन पर बात करना चाहूंगा", "फोन करो",
+      // Greek
+      "τηλεφώνησέ μου", "προτιμώ τηλέφωνο", "πάρε με τηλέφωνο",
     ],
   },
   {
@@ -1326,6 +1891,24 @@ const OBJECTION_MAP = [
       "gửi email cho tôi", "thích liên lạc qua email",
       // Polish
       "wyślij mi email", "wolę kontakt przez email",
+      // Hebrew
+      "שלח לי מייל", "מעדיף אימייל",
+      // Mandarin
+      "给我发邮件", "我喜欢邮件",
+      // Korean
+      "이메일로 보내주세요", "이메일이 좋겠어요",
+      // Japanese
+      "メールで送ってください", "メールがいいです",
+      // Arabic
+      "أرسل لي إيميل", "أفضل الإيميل",
+      // Russian
+      "отправьте на почту", "предпочитаю почту",
+      // Thai
+      "ส่งอีเมลให้ฉัน", "ชอบอีเมลมากกว่า",
+      // Hindi
+      "ईमेल भेजो", "ईमेल पसंद करूंगा",
+      // Greek
+      "στείλε μου email", "προτιμώ email",
     ],
   },
   {
@@ -1358,6 +1941,24 @@ const OBJECTION_MAP = [
       "gửi bằng văn bản", "muốn xem bằng văn bản",
       // Polish
       "prześlij na piśmie", "chcę to zobaczyć na piśmie",
+      // Hebrew
+      "שלח בכתב", "רוצה לראות בכתב",
+      // Mandarin
+      "发个书面的", "我要看书面的",
+      // Korean
+      "서면으로 보내주세요", "서면으로 보고 싶어요",
+      // Japanese
+      "書面で送ってください", "書面で見たいです",
+      // Arabic
+      "أرسل كتابيا", "أريد أشوفه مكتوب",
+      // Russian
+      "отправьте письменно", "хочу видеть письменно",
+      // Thai
+      "ส่งเป็นลายลักษณ์อักษร", "อยากเห็นเป็นลายลักษณ์อักษร",
+      // Hindi
+      "लिखित में भेजो", "लिखित में देखना चाहूंगा",
+      // Greek
+      "στείλτε γραπτά", "θέλω να το δω γραπτά",
     ],
   },
   {
@@ -1388,6 +1989,24 @@ const OBJECTION_MAP = [
       "chứng minh tài chính", "bạn có đủ tiền không",
       // Polish
       "dowód posiadania środków", "udowodnij że masz pieniądze",
+      // Hebrew
+      "הוכחת יכולת קנייה", "אתה קונה אמיתי",
+      // Mandarin
+      "资金证明", "你是真正的买家吗",
+      // Korean
+      "자금 증명", "진짜 구매자마요",
+      // Japanese
+      "資金証明", "本当の買い手ですか",
+      // Arabic
+      "إثبات الأموال", "هل أنت مشتري حقيقي",
+      // Russian
+      "подтверждение средств", "вы реальный покупатель",
+      // Thai
+      "หลักฐานทางการเงิน", "คุณเป็นผู้ซื้อจริงหรือ",
+      // Hindi
+      "फंड का सबूत", "क्या आप असली खरीदार हो",
+      // Greek
+      "απόδειξη κεφαλαίων", "είστε αληθινός αγοραστής",
     ],
   },
 ];
@@ -1426,6 +2045,14 @@ const EMOTION_MAP = [
       "motivated to sell", "very motivated",
       "need the cash", "need money fast",
       "need to close soon", "close in days",
+      // English slang / misspellings
+      "lets gooo", "let's gooo", "lessgo", "lesgo",
+      "lets get it", "let's get it", "lets get this bread",
+      "im ready to go", "im rdy", "rdy to sell",
+      "jus wanna get rid of it", "get it outta my hands",
+      "need it gone asap", "need it gone rn",
+      "asap plz", "asap pls", "motavated", "motivaed",
+      "wanna sell", "wana sell", "tryna sell",
       // Spanish
       "necesito vender", "necesito vender ya",
       "listo para vender", "lista para vender",
@@ -1457,6 +2084,33 @@ const EMOTION_MAP = [
       // Polish
       "muszę sprzedać", "gotowy do sprzedaży",
       "chcę sprzedać teraz", "muszę sprzedać szybko",
+      // Hebrew
+      "צריך למכור", "מוכן למכור", "רוצה למכור עכשיו",
+      "צריך כסף", "בדחיפות", "מונע למכור",
+      // Mandarin
+      "需要卖", "准备好卖了", "想快点卖",
+      "急需卖", "越快越好", "需要钱",
+      // Korean
+      "팔아야 합니다", "매도할 준비됐어요", "빨리 팔고 싶어요",
+      "급합니다", "돈이 필요해요",
+      // Japanese
+      "売らなければなりません", "売る準備ができています", "すぐ売りたい",
+      "急いでいます", "お金が必要です",
+      // Arabic
+      "أحتاج أبيع", "جاهز للبيع", "أريد أبيع بسرعة",
+      "محتاج فلوس", "عاجل",
+      // Russian
+      "нужно продать", "готов продать", "хочу продать быстро",
+      "срочно", "нужны деньги",
+      // Thai
+      "ต้องขาย", "พร้อมขาย", "อยากขายเร็วๆ",
+      "เร่งด่วน", "ต้องการเงิน",
+      // Hindi
+      "बेचना है", "बेचने को तैयार", "जल्दी बेचना चाहता हूं",
+      "जरूरी है", "पैसों की जरूरत है",
+      // Greek
+      "πρέπει να πουλήσω", "είμαι έτοιμος να πουλήσω",
+      "θέλω να πουλήσω γρήγορα", "επείγον",
     ],
   },
   {
@@ -1478,6 +2132,15 @@ const EMOTION_MAP = [
       "what makes you different", "why should i use you",
       "how are you different from a realtor",
       "tell me about the process", "curious about this",
+      // English slang / misspellings
+      "how dis work", "how does dis work", "how it work",
+      "whats the process", "wats the process",
+      "tell me bout it", "tell me bout this",
+      "more deets", "gimme deets", "gimme details",
+      "whats next", "wats next", "wat do i do",
+      "any hidden fees", "hidden costs",
+      "how u guys pay", "how yall pay",
+      "intrested to know more", "wanna know more",
       // Spanish
       "cómo funciona", "como funciona",
       "explícame más", "explicame mas",
@@ -1516,6 +2179,33 @@ const EMOTION_MAP = [
       "jak to działa", "powiedz mi więcej",
       "co się dzieje dalej", "jak długo to trwa",
       "co muszę zrobić",
+      // Hebrew
+      "איך זה עובד", "ספר לי עוד", "מה התהליך",
+      "כמה זמן זה לוקח", "מה צריך לעשות",
+      // Mandarin
+      "怎么操作", "告诉我更多", "什么流程",
+      "需要多久", "我需要做什么",
+      // Korean
+      "어떻게 진행되나요", "더 알려주세요", "과정이 어떻게 되나요",
+      "얼마나 걸리나요", "제가 뭐 해야 하나요",
+      // Japanese
+      "どういう仕組みですか", "もっと教えてください", "プロセスは何ですか",
+      "どのくらいかかりますか", "何をすればいいですか",
+      // Arabic
+      "كيف يعمل هذا", "أخبرني المزيد", "ما هي العملية",
+      "كم يستغرق", "ماذا علي أن أفعل",
+      // Russian
+      "как это работает", "расскажите подробнее", "какой процесс",
+      "сколько времени займет", "что мне делать",
+      // Thai
+      "มันทำงานอย่างไร", "บอกฉันเพิ่มเติม",
+      "กระบวนการเป็นอย่างไร", "ใช้เวลานานแค่ไหน",
+      // Hindi
+      "यह कैसे काम करता है", "और बताओ", "प्रक्रिया क्या है",
+      "कितना समय लगता है", "मुझे क्या करना होगा",
+      // Greek
+      "πώς λειτουργεί", "πες μου περισσότερα",
+      "ποια είναι η διαδικασία", "πόσο διαρκεί",
     ],
   },
   {
@@ -1537,6 +2227,15 @@ const EMOTION_MAP = [
       "researching you", "looking you up",
       "taking my time", "doing my research",
       "not falling for this", "seen this before",
+      // English slang / misspellings
+      "cap", "thats cap", "sus", "hella sus", "sketchy",
+      "sketch", "sketchey", "shady af",
+      "sus af", "this is sus", "u legit",
+      "seems fishy", "somethin aint right",
+      "bet this is a scam", "prolly a scam", "probably a scam",
+      "yall legit", "r u legit", "for real tho",
+      "idk bout this", "idk about this",
+      "not buyin it", "not buying it",
       // Spanish
       "parece fraude", "suena a estafa",
       "es una estafa", "qué trampa tiene",
@@ -1566,6 +2265,33 @@ const EMOTION_MAP = [
       // Polish
       "brzmi jak oszustwo", "zbyt piękne żeby prawdziwe",
       "co jest haczykiem", "nie jestem przekonany",
+      // Hebrew
+      "נשמע כמו הונאה", "זה אמיתי", "למה לסמוך עליך",
+      "מה הקאצ'", "לא משכנע",
+      // Mandarin
+      "听起来像骗局", "这是真的吗", "为什么要信你",
+      "有什么陷阱", "不确定",
+      // Korean
+      "사기 같아요", "이게 진짜예요", "왜 당신을 믿어야 하나요",
+      "뭔가 수상해요",
+      // Japanese
+      "詐欺みたいです", "これは本物ですか", "なぜ信じるべきですか",
+      "何かおかしいです",
+      // Arabic
+      "يبدو كاحتيال", "هل هذا حقيقي", "لماذا أثق بك",
+      "ما الخدعة",
+      // Russian
+      "похоже на мошенничество", "это реально", "почему я должен вам верить",
+      "в чём подвох",
+      // Thai
+      "ดูเหมือนหลอกลวง", "นี่ของจริงหรือ", "ทำไมต้องเชื่อ",
+      "มีอะไรไม่ชอบ",
+      // Hindi
+      "धोखा लगता है", "क्या यह असली है", "आप पर भरोसा क्यों करूं",
+      "क्या चाल है",
+      // Greek
+      "μοιάζει με απάτη", "είναι αληθινό", "γιατί να σε εμπιστευτώ",
+      "ποιο είναι το κόλπο",
     ],
   },
   {
@@ -1582,6 +2308,16 @@ const EMOTION_MAP = [
       "keep texting me", "keep calling me", "won't stop",
       "harassment", "harassing me", "this is harassment",
       "get off my back", "back off",
+      // English slang / misspellings
+      "bruh", "bruhh", "smh", "smdh", "wtf", "wth",
+      "omg stop", "ffs", "jfc", "stfu",
+      "leave me tf alone", "tf is wrong with you",
+      "quit it", "knock it off", "cut it out",
+      "for real stop", "fr stop", "fr tho stop",
+      "ugh", "ughhh", "so annoying", "sooo annoying",
+      "stop textin me", "stop txting me", "quit txting",
+      "how many times i gotta tell u",
+      "alredy told u", "already told u",
       // Spanish
       "déjame en paz", "dejame en paz",
       "deja de molestarme", "me tienes harto",
@@ -1610,6 +2346,33 @@ const EMOTION_MAP = [
       // Polish
       "zostaw mnie w spokoju", "przestań mi przeszkadzać",
       "irytujące", "już ci mówiłem",
+      // Hebrew
+      "עזוב אותי", "תפסיק להטריד", "מטריד אותי",
+      "כבר אמרתי לך", "נמאס מזה",
+      // Mandarin
+      "别烦我", "别打扰我", "烦死了",
+      "已经告诉你了", "太烦人了",
+      // Korean
+      "귀찮게 하지 마세요", "나를 내버려 두세요", "짜증나요",
+      "이미 말했잖아요",
+      // Japanese
+      "邪魔しないでください", "もうやめてください", "迷惑です",
+      "もう言いました",
+      // Arabic
+      "اتركني وشأني", "توقف عن إزعاجي", "مزعج",
+      "قلت لك بالفعل",
+      // Russian
+      "оставьте меня в покое", "перестаньте беспокоить", "надоели",
+      "я уже говорил",
+      // Thai
+      "อย่ายุ่งกับฉัน", "หยุดรบกวน", "น่ารำคาญ",
+      "บอกแล้ว",
+      // Hindi
+      "मुझे अकेला छोड़ दो", "परेशान करना बंद करो", "तंग मत करो",
+      "पहले भी बोल चुका हूं",
+      // Greek
+      "αφήστε με ήσυχο", "σταμάτα να με ενοχλείς",
+      "είναι ενοχλητικό", "σου το είπα ήδη",
     ],
   },
   {
@@ -1726,6 +2489,33 @@ const EMOTION_MAP = [
       "nie wiem co zrobić",
       "za dużo rzeczy naraz",
       "skomplikowana sytuacja",
+      // Hebrew
+      "הרבה קורה", "מאוד לחוץ", "לא יודע מה לעשות",
+      "יותר מדי בבת אחת", "מצב מסובך",
+      // Mandarin
+      "很多事情", "压力很大", "不知道怎么办",
+      "太多事情同时发生", "情况复杂",
+      // Korean
+      "많은 일이 있어요", "매우 스트레스받아요", "어떻게 해야 할지 모르겠어요",
+      "복잡한 상황이에요",
+      // Japanese
+      "いろいろあります", "とてもストレスです", "どうしたらいいかわかりません",
+      "複雑な状況です",
+      // Arabic
+      "كثير يحصل", "ضغط كبير", "لا أعرف ماذا أفعل",
+      "وضع معقد",
+      // Russian
+      "много происходит", "очень стрессово", "не знаю что делать",
+      "сложная ситуация",
+      // Thai
+      "หลายเรื่องเกิดขึ้น", "เครียดมาก", "ไม่รู้จะทำอย่างไร",
+      "สถานการณ์ซับซ้อน",
+      // Hindi
+      "बहुत कुछ चल रहा है", "बहुत तनाव", "क्या करूं समझ नहीं आ रहा",
+      "मुश्किल हालात",
+      // Greek
+      "πολλά συμβαίνουν", "πολύ στρεσαρισμένος",
+      "δεν ξέρω τι να κάνω", "περίπλοκη κατάσταση",
     ],
   },
   {
@@ -1799,6 +2589,42 @@ const EMOTION_MAP = [
       "straciłem", "straciłam",
       "właśnie zmarł", "właśnie zmarła",
       "jesteśmy w żałobie", "po pogrzebie",
+      // Hebrew
+      "אמא שלי נפטרה", "אבא שלי נפטר",
+      "בעלי נפטר", "אשתי נפטרה",
+      "איבדנו מישהו", "עדיין באבל",
+      // Mandarin
+      "我妈去世了", "我爸去世了",
+      "我丈夫去世了", "我妻子去世了",
+      "刚去世", "在哀悼中",
+      // Korean
+      "어머니가 돌아가셨어요", "아버지가 돌아가셨어요",
+      "남편이 돌아가셨어요", "아내가 돌아가셨어요",
+      "방금 돌아가셨어요", "애도 중이에요",
+      // Japanese
+      "母が亡くなりました", "父が亡くなりました",
+      "夫が亡くなりました", "妻が亡くなりました",
+      "最近亡くなりました", "喪中です",
+      // Arabic
+      "أمي توفت", "أبي توفي",
+      "زوجي توفي", "زوجتي توفت",
+      "توفي مؤخرا", "نحن في حداد",
+      // Russian
+      "моя мать умерла", "мой отец умер",
+      "мой муж умер", "моя жена умерла",
+      "недавно умер", "мы в трауре",
+      // Thai
+      "แม่เสียชีวิต", "พ่อเสียชีวิต",
+      "สามีเสียชีวิต", "ภรรยาเสียชีวิต",
+      "เพิ่งเสียชีวิต", "กำลังไว้อาลัย",
+      // Hindi
+      "मेरी माँ गुजर गई", "मेरे पिताजी गुजर गए",
+      "मेरे पति गुजर गए", "मेरी पत्नी गुजर गई",
+      "हाल ही में गुजरे", "शोक में हैं",
+      // Greek
+      "η μητέρα μου πέθανε", "ο πατέρας μου πέθανε",
+      "ο σύζυγός μου πέθανε",
+      "πρόσφατα πέθανε", "είμαστε σε πένθος",
     ],
   },
 ];
@@ -1826,6 +2652,19 @@ const POSITIVE_SIGNAL_MAP = [
       "open to hearing", "willing to listen",
       "could work", "might work", "worth discussing",
       "absolutely", "definitely", "for sure", "roger that",
+      // English slang / misspellings
+      "ya", "yea", "yah", "yess", "yesss", "yasss",
+      "bet", "fo sho", "fasho", "fa sho", "ight", "aight",
+      "say less", "less go", "lessgo", "lets goo",
+      "im down", "i'm down", "down for it", "im in",
+      "hmu", "hit me up", "lmk", "let me kno",
+      "suree", "surre", "yeahh", "yeahhh", "okk", "okie",
+      "intrested", "interesed", "intersted",
+      "def", "defintely", "definately", "definetly",
+      "absoutely", "absolutley", "forsure", "4sure",
+      "kk", "k", "cool", "coo", "coool", "sounds great",
+      "no cap", "fax", "facts", "word", "word up", "true",
+      "send it", "shoot", "do it", "pull up",
       // Spanish
       "sí", "si", "claro", "por supuesto", "de acuerdo",
       "está bien", "sale", "órale", "ándale",
@@ -1849,6 +2688,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "tak", "oczywiście", "dobrze", "zgadzam się",
       "interesuje mnie", "powiedz mi więcej",
+      // Hebrew
+      "כן", "בטח", "בסדר", "מעוניין", "ספר לי עוד",
+      // Mandarin
+      "是的", "好的", "可以", "感兴趣", "告诉我更多",
+      // Korean
+      "네", "좋아요", "관심 있어요", "더 알려주세요",
+      // Japanese
+      "はい", "いいですよ", "興味あります", "もっと教えてください",
+      // Arabic
+      "نعم", "أكيد", "موافق", "مهتم", "أخبرني المزيد",
+      // Russian
+      "да", "конечно", "хорошо", "заинтересован", "расскажите больше",
+      // Thai
+      "ใช่", "ได้", "ตกลง", "สนใจ", "บอกฉันเพิ่มเติม",
+      // Hindi
+      "हाँ", "ठीक है", "जरूर", "दिलचस्पी है", "और बताओ",
+      // Greek
+      "ναι", "βέβαια", "εντάξει", "ενδιαφέρομαι",
     ],
   },
   {
@@ -1859,6 +2716,11 @@ const POSITIVE_SIGNAL_MAP = [
       "no one there", "unoccupied", "sitting empty", "been empty",
       "vacant for", "no tenants", "no one in it",
       "abandoned", "sitting vacant",
+      // English slang / misspellings
+      "vacent", "vaccant", "emty", "abondoned",
+      "aint nobody there", "ain't nobody there",
+      "nobody there", "no ones there", "no one there rn",
+      "nobody in it", "been sitting", "just sitting there",
       // Spanish
       "vacía", "vacia", "desocupada", "nadie vive ahí",
       "nadie vive alli", "sin inquilinos", "está vacía",
@@ -1881,6 +2743,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "pusta", "niezamieszkała", "nikt tam nie mieszka",
       "bez lokatorów", "opuszczona",
+      // Hebrew
+      "ריק", "אף אחד לא גר שם", "ללא דיירים", "נטוש",
+      // Mandarin
+      "空的", "没人住", "没有租客", "废弃的",
+      // Korean
+      "비어 있어요", "아무도 안 살아요", "세입자 없어요",
+      // Japanese
+      "空いています", "誰も住んでいません", "空き家です",
+      // Arabic
+      "فارغ", "لا أحد يسكن", "لا مستأجرين", "مهجور",
+      // Russian
+      "пустой", "никто не живёт", "нет арендаторов", "заброшенный",
+      // Thai
+      "ว่างเปล่า", "ไม่มีคนอยู่", "ไม่มีผู้เช่า",
+      // Hindi
+      "खाली है", "कोई नहीं रहता", "किरायेदार नहीं है",
+      // Greek
+      "κενό", "κανείς δεν ζει εκεί", "χωρίς ενοικιαστές",
     ],
   },
   {
@@ -1892,6 +2772,12 @@ const POSITIVE_SIGNAL_MAP = [
       "as soon as possible", "need to move fast",
       "need to close fast", "no time to waste",
       "in a hurry", "time sensitive",
+      // English slang / misspellings
+      "a.s.a.p", "a s a p", "rn", "right now",
+      "quickley", "imediately", "immediatly", "immedietly",
+      "urgant", "urgnt", "rite away", "need this done asap",
+      "hurry", "hurry up", "real quick", "hella fast",
+      "yesterday", "need this done yesterday",
       // Spanish
       "pronto", "urgente", "lo antes posible",
       "esta semana", "este mes", "de inmediato",
@@ -1916,6 +2802,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "szybko", "pilne", "jak najszybciej",
       "w tym tygodniu", "w tym miesiącu", "natychmiast",
+      // Hebrew
+      "בדחיפות", "מהר", "בהקדם", "מיד",
+      // Mandarin
+      "尽快", "快", "马上", "立刻", "紧急",
+      // Korean
+      "빨리요", "급해요", "이번 주에", "바로요",
+      // Japanese
+      "至急", "すぐに", "急いでいます", "今すぐ",
+      // Arabic
+      "عاجل", "بسرعة", "في أقرب وقت", "فوراً",
+      // Russian
+      "срочно", "быстро", "как можно скорее", "немедленно",
+      // Thai
+      "เร็ว", "ด่วน", "เร็วที่สุด", "ทันที",
+      // Hindi
+      "जल्दी", "तुरंत", "जितनी जल्दी हो सके",
+      // Greek
+      "επειγόντως", "γρήγορα", "αμέσως", "το συντομότερο",
     ],
   },
   {
@@ -1925,6 +2829,8 @@ const POSITIVE_SIGNAL_MAP = [
       "cash", "all cash", "cash offer", "cash buyer",
       "cash sale", "pay cash", "buying with cash",
       "no financing", "no mortgage needed",
+      // English slang / misspellings
+      "cah", "ca$h", "strait cash", "straight cash",
       // Spanish
       "efectivo", "pago en efectivo", "oferta en efectivo",
       "comprador de efectivo", "sin financiamiento",
@@ -1946,6 +2852,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "gotówka", "płatność gotówką",
       "oferta gotówkowa", "bez finansowania",
+      // Hebrew
+      "מזומן", "תשלום במזומן", "ללא מימון",
+      // Mandarin
+      "现金", "全款", "现金报价", "不需要贷款",
+      // Korean
+      "현금", "현금 거래", "현금 제안",
+      // Japanese
+      "現金", "キャッシュ", "融資不要",
+      // Arabic
+      "نقداً", "دفع نقدي", "عرض نقدي",
+      // Russian
+      "наличные", "за наличные", "без ипотеки",
+      // Thai
+      "เงินสด", "จ่ายเงินสด",
+      // Hindi
+      "नकद", "कैश", "बिना लोन",
+      // Greek
+      "μετρητά", "πληρωμή μετρητοίς",
     ],
   },
   {
@@ -1956,6 +2880,10 @@ const POSITIVE_SIGNAL_MAP = [
       "willing to sell as is", "don't want to fix anything",
       "don't want to do repairs", "sell it the way it is",
       "won't fix anything",
+      // English slang / misspellings
+      "asis", "as-is condition", "dont wanna fix",
+      "aint fixing nothing", "ain't fixing nothing",
+      "not fixin it", "not fixin anything", "sell it like it is",
       // Spanish
       "como está", "tal como está", "sin reparaciones",
       "vender como está", "no quiero arreglar nada",
@@ -1977,6 +2905,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "w stanie jakim jest", "bez napraw",
       "sprzedać w stanie jakim jest",
+      // Hebrew
+      "כמו שזה", "בלי תיקונים", "למכור כמו שזה",
+      // Mandarin
+      "现状出售", "不修理", "按现状卖",
+      // Korean
+      "현 상태로", "수리 없이", "그대로 팔겠어요",
+      // Japanese
+      "現状のまま", "修理なしで", "そのまま売りたい",
+      // Arabic
+      "كما هو", "بدون إصلاحات", "بيعها كما هي",
+      // Russian
+      "как есть", "без ремонта", "продать как есть",
+      // Thai
+      "ตามสภาพ", "ไม่ซ่อม", "ขายตามสภาพ",
+      // Hindi
+      "जैसा है वैसा", "मरम्मत नहीं", "जैसा है वैसा बेचना",
+      // Greek
+      "ως έχει", "χωρίς επισκευές", "πούλησε το ως έχει",
     ],
   },
   {
@@ -1987,6 +2933,13 @@ const POSITIVE_SIGNAL_MAP = [
       "tax lien", "back taxes", "can't afford",
       "under water", "need the money", "financial pressure",
       "desperate", "losing the house", "about to lose",
+      // English slang / misspellings
+      "cant afford", "cant pay", "cant make payments",
+      "foreclousure", "forclosure", "foeclosure",
+      "bankrupcy", "bankrupt", "bankruptsy",
+      "upside down", "lis pendens", "deed in lieu",
+      "short sale", "heloc", "arm loan",
+      "drowning in debt", "bout to lose it",
       // Spanish
       "debo", "atrasado", "ejecución", "gravámenes",
       "impuestos atrasados", "no puedo pagar",
@@ -2016,6 +2969,24 @@ const POSITIVE_SIGNAL_MAP = [
       "jestem winien", "zalegam", "egzekucja",
       "zaległe podatki", "nie mogę zapłacić",
       "potrzebuję pieniędzy",
+      // Hebrew
+      "חובות", "עיקול", "צריך כסף", "לא יכול לשלם",
+      // Mandarin
+      "欠债", "止赎", "税务问题", "付不起", "需要钱",
+      // Korean
+      "뺚", "압류", "세금 연체", "납부할 수 없어요",
+      // Japanese
+      "借金", "差し押さえ", "税金滋納", "支払えません",
+      // Arabic
+      "ديون", "حجز", "ضرائب", "لا أستطيع الدفع",
+      // Russian
+      "долги", "взыскание", "налоговый долг", "не могу платить",
+      // Thai
+      "หนี้", "ยึด", "ภาษีค้าง", "จ่ายไม่ไหว",
+      // Hindi
+      "कर्ज", "जब्ती", "टैक्स बकाया", "भुगतान नहीं",
+      // Greek
+      "χρέη", "κατάσχεση", "φορολογικά χρέη", "δεν μπορώ να πληρώσω",
     ],
   },
   {
@@ -2027,6 +2998,9 @@ const POSITIVE_SIGNAL_MAP = [
       "not local", "live in another state",
       "inherited and don't live there",
       "managing from a distance",
+      // English slang / misspellings
+      "outta state", "dont live there", "dont live at the property",
+      "moved out", "moved out of state", "long distance owner",
       // Spanish
       "fuera del estado", "me mudé", "no vivo ahí",
       "vivo lejos", "me reubiqué", "no soy local",
@@ -2052,6 +3026,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "poza stanem", "przeprowadziłem się",
       "nie mieszkam tam", "mieszkam daleko",
+      // Hebrew
+      "גר מחוץ למדינה", "עברתי דירה", "לא גר שם",
+      // Mandarin
+      "外州", "搬走了", "不住在那里",
+      // Korean
+      "古州에 살아요", "이사했어요", "거기 안 살아요",
+      // Japanese
+      "他州に住んでいます", "引っ越しました", "そこに住んでいません",
+      // Arabic
+      "خارج الولاية", "انتقلت", "لا أسكن هناك",
+      // Russian
+      "за пределами штата", "переехал", "не живу там",
+      // Thai
+      "อยู่ต่างรัฐ", "ย้ายไปแล้ว", "ไม่ได้อยู่ที่นั่น",
+      // Hindi
+      "दूसरे राज्य में", "शिफ्ट हो गया", "वहां नहीं रहता",
+      // Greek
+      "εκτός πολιτείας", "μετακόμισα", "δεν μένω εκεί",
     ],
   },
   {
@@ -2062,6 +3054,11 @@ const POSITIVE_SIGNAL_MAP = [
       "curious about the price", "what are you paying",
       "what would you pay", "ballpark", "rough estimate",
       "give me a range",
+      // English slang / misspellings
+      "howmuch", "how much u pay", "how much you pay",
+      "wuts your offer", "whats ur offer", "wat u pay",
+      "what u payin", "how much yall pay", "how much y'all pay",
+      "whatll you give me", "what'll you give me",
       // Spanish
       "cuánto", "cuanto", "qué ofrecen",
       "curioso sobre el precio", "cuánto pagan",
@@ -2085,6 +3082,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "ile", "jaka jest oferta",
       "ciekaw ceny", "ile płacicie",
+      // Hebrew
+      "כמה", "מה ההצעה", "מה אתה משלם",
+      // Mandarin
+      "多少钱", "你的报价是多少", "估计多少",
+      // Korean
+      "얼마예요", "제안이 얼마예요", "대충 얼마예요",
+      // Japanese
+      "いくらですか", "オファーはいくらですか", "目安は",
+      // Arabic
+      "كم", "ما هو عرضك", "كم تدفعون",
+      // Russian
+      "сколько", "какое предложение", "приблизительно",
+      // Thai
+      "เท่าไหร่", "ข้อเสนอเท่าไหร่",
+      // Hindi
+      "कितना", "आपकी पेशकश क्या है",
+      // Greek
+      "πόσα", "ποια είναι η προσφορά σας",
     ],
   },
   {
@@ -2094,6 +3109,10 @@ const POSITIVE_SIGNAL_MAP = [
       "inherited", "just inherited", "recently inherited",
       "inherited the property", "left to me", "left it to me",
       "was left to me", "family left me",
+      // English slang / misspellings
+      "inhereted", "inheritd", "inhertied",
+      "got it from my parents", "parents left it to me",
+      "grandma left it", "grandpa left it", "mama left it",
       // Spanish
       "heredé", "recién heredé", "recientemente heredé",
       "me dejaron", "me lo dejaron",
@@ -2115,6 +3134,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "odziedziczyłem", "właśnie odziedziczyłem",
       "mi to zostawiono",
+      // Hebrew
+      "ירשתי", "זה עבר אלי בירושה", "הורישו לי",
+      // Mandarin
+      "继承的", "刚继承", "父母留给我的",
+      // Korean
+      "상속받았어요", "부모님이 남겨주셨어요",
+      // Japanese
+      "相続しました", "親からもらいました",
+      // Arabic
+      "ورثتها", "تركها لي أهلي",
+      // Russian
+      "унаследовал", "родители оставили",
+      // Thai
+      "สืบทอดมา", "พ่อแม่ทิ้งไว้ให้",
+      // Hindi
+      "विरासत में मिली", "माता-पिता ने दी",
+      // Greek
+      "κληρονόμησα", "μου το άφησαν",
     ],
   },
   {
@@ -2124,6 +3161,10 @@ const POSITIVE_SIGNAL_MAP = [
       "multiple properties", "several properties", "portfolio",
       "i have others", "other properties", "more than one property",
       "few properties", "a few properties", "handful of properties",
+      // English slang / misspellings
+      "got a couple properties", "couple properties", "bunch of properties",
+      "got a few", "i got others", "got other houses",
+      "multipel properties", "mutliple properties",
       // Spanish
       "varias propiedades", "múltiples propiedades",
       "tengo otras", "otras propiedades",
@@ -2147,6 +3188,24 @@ const POSITIVE_SIGNAL_MAP = [
       // Polish
       "kilka nieruchomości", "inne nieruchomości",
       "więcej niż jedna nieruchomość", "portfel",
+      // Hebrew
+      "כמה נכסים", "יש לי עוד", "תיק נכסים",
+      // Mandarin
+      "多套房产", "还有其他的", "几套房子",
+      // Korean
+      "여러 부동산", "다른 부동산도 있어요",
+      // Japanese
+      "複数の物件", "他にもあります",
+      // Arabic
+      "عدة عقارات", "عندي عقارات أخرى",
+      // Russian
+      "несколько объектов", "есть другие",
+      // Thai
+      "หลายทรัพย์สิน", "มีอีกหลายแห่ง",
+      // Hindi
+      "कई संपत्तियां", "और भी हैं मेरे पास",
+      // Greek
+      "πολλά ακίνητα", "έχω κι άλλα",
     ],
   },
 ];
@@ -2306,13 +3365,22 @@ function computeHeuristicConfidence({
     confidence += 0.04 * Math.min(positive_signals.length, 3);
   }
 
-  // Script-detected languages are near-certain
+  // Script-detected languages — only boost confidence when the heuristic
+  // actually matched meaningful signals. Without AI, a blind boost hides
+  // the fact that no objection/emotion/signal was detected.
   const SCRIPT_LANGUAGES = new Set([
     "Hebrew", "Mandarin", "Korean", "Arabic",
-    "Russian", "Hindi", "Thai", "Japanese",
+    "Russian", "Hindi", "Thai", "Japanese", "Greek",
   ]);
   if (SCRIPT_LANGUAGES.has(language)) {
-    confidence = Math.max(confidence, 0.95);
+    const has_meaningful_signal =
+      objection !== null ||
+      (emotion !== "calm" && emotion !== "guarded") ||
+      positive_signals.length > 0;
+    if (has_meaningful_signal) {
+      confidence = Math.max(confidence, 0.95);
+    }
+    // Without signals, keep base confidence — no blind boost
   }
 
   return Math.min(0.98, confidence);
