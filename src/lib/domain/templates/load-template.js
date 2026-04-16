@@ -185,7 +185,23 @@ function buildRemoteFilterRequests({
       { paginate: true }
     );
   } else {
+    const requested_language = clean(selector_input?.language) || null;
+    const language_filter_value = requested_language
+      ? getTemplateCategoryValue("language", requested_language) || null
+      : null;
+
     for (const use_case of use_case_candidates) {
+      // Language-specific use_case filter first (ensures correct-language
+      // templates are returned even when the total active count exceeds the
+      // per-request limit of 200).
+      if (language_filter_value) {
+        addRequest(`use_case_lang:${use_case}:${requested_language}`, {
+          "use-case-2": use_case,
+          language: language_filter_value,
+          active: active_value,
+        });
+      }
+
       addRequest(`use_case_template:${use_case}`, {
         "use-case-2": use_case,
         active: active_value,
