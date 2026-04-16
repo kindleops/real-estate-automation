@@ -192,6 +192,11 @@ function scoreTemplate(template, desired) {
     if (lang_norm === desired_lang_norm) {
       score += 80;
       reasons.push("language_match");
+    } else if (lang_norm === "english") {
+      score += 40;
+      reasons.push("english_fallback");
+    } else if (lang_norm) {
+      return { score: -9999, reasons: ["language_mismatch"] };
     }
   }
 

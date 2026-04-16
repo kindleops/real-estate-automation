@@ -17,6 +17,7 @@ import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { PHONE_FIELDS } from "@/lib/podio/apps/phone-numbers.js";
 import { TEXTGRID_NUMBER_FIELDS } from "@/lib/podio/apps/textgrid-numbers.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
+import { resolvePreferredContactLanguage } from "@/lib/domain/context/resolve-preferred-language.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
@@ -67,7 +68,6 @@ import {
   isPodioRateLimitError,
   safeCategoryEquals,
   getTextValue,
-  normalizeLanguage,
   updateItem,
 } from "@/lib/providers/podio.js";
 import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
@@ -2110,6 +2110,7 @@ function extractLatestOwnerContactTimestamp(owner_item, history) {
 function buildOwnerContext({
   owner_item,
   phone_item,
+  prospect_item = null,
   property_item = null,
   market_item = null,
   brain_item = null,
@@ -2125,7 +2126,9 @@ function buildOwnerContext({
     getFirstAppReferenceId(property_item, "market-2", null) ??
     getFirstAppReferenceId(phone_item, PHONE_FIELDS.market, null) ??
     null;
-  const prospect_id = getFirstAppReferenceId(phone_item, PHONE_FIELDS.linked_contact, null);
+  const prospect_id =
+    prospect_item?.item_id ??
+    getFirstAppReferenceId(phone_item, PHONE_FIELDS.linked_contact, null);
 
   const recent_templates = loadRecentTemplates({
     brain_item,
@@ -2140,6 +2143,7 @@ function buildOwnerContext({
     phone_item,
     brain_item,
     master_owner_item: owner_item,
+    prospect_item,
     property_item,
     agent_item,
     market_item,
@@ -2161,7 +2165,7 @@ function buildOwnerContext({
       brain_item,
       phone_item,
       master_owner_item: owner_item,
-      prospect_item: null,
+      prospect_item,
       property_item,
       market_item,
       agent_item,
@@ -2172,11 +2176,7 @@ function buildOwnerContext({
         getCategoryValue(brain_item, "conversation-stage", null) ||
         deriveOwnerStageHint(owner_item),
       brain_ai_route: getCategoryValue(brain_item, "ai-route", null),
-      language_preference: normalizeLanguage(
-        getCategoryValue(owner_item, MASTER_OWNER_FIELDS.language_primary, null) ||
-          getCategoryValue(brain_item, "language-preference", "English") ||
-          "English"
-      ),
+      language_preference: base_summary.language_preference,
       seller_profile: getCategoryValue(brain_item, "seller-profile", null),
       status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
       follow_up_trigger_state: getCategoryValue(brain_item, "follow-up-trigger-state", null),
@@ -3001,10 +3001,27 @@ async function evaluateOwner({
         },
       })
     : null;
+  const prospect_id = getFirstAppReferenceId(
+    selected_phone_record.phone_item,
+    PHONE_FIELDS.linked_contact,
+    null
+  );
+  const prospect_item = prospect_id
+    ? await safeGetItem(prospect_id, {
+        runtime,
+        log,
+        call_name: "master_owner_feeder.podio_get_prospect_item",
+        meta: {
+          master_owner_id,
+          prospect_id,
+        },
+      })
+    : null;
 
   const context = buildOwnerContext({
     owner_item,
     phone_item: selected_phone_record.phone_item,
+    prospect_item,
     property_item,
     market_item,
     brain_item,
@@ -3014,11 +3031,11 @@ async function evaluateOwner({
   });
 
   const stage_hint = deriveOwnerStageHint(owner_item);
-  const language = normalizeLanguage(
-    getCategoryValue(owner_item, MASTER_OWNER_FIELDS.language_primary, null) ||
-      context.summary.language_preference ||
-      "English"
-  );
+  const language = resolvePreferredContactLanguage({
+    master_owner_item: owner_item,
+    prospect_item,
+    brain_item,
+  });
 
   const classification = buildSyntheticClassification({
     owner_item,

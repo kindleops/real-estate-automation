@@ -84,12 +84,16 @@ function scoreTemplate(template, query) {
     return { score: -1, matches, mismatches };
   }
 
-  // Language (required match for primary pass)
+  // Language (hard filter — mismatch rejects unless English fallback)
   if (lc(template.language) === lc(query.language)) {
     score += 500;
     matches.push("language");
+  } else if (lc(template.language) === "english") {
+    score += 300;
+    matches.push("english_fallback");
   } else {
     mismatches.push("language");
+    return { score: -1, matches, mismatches };
   }
 
   // First touch / follow-up flags

@@ -5,8 +5,8 @@ import {
   getFieldValues,
   getNumberValue,
   getTextValue,
-  normalizeLanguage,
 } from "@/lib/providers/podio.js";
+import { resolvePreferredContactLanguage } from "@/lib/domain/context/resolve-preferred-language.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -144,9 +144,12 @@ export function deriveContextSummary({
       follow_up_step: getCategoryValue(brain_item, "follow-up-step", "None"),
       next_follow_up_due_at: getDateValue(brain_item, "next-follow-up-due-at", null),
       last_detected_intent: getCategoryValue(brain_item, "last-detected-intent", "Unknown"),
-      language_preference: normalizeLanguage(
-        getCategoryValue(brain_item, "language-preference", "English")
-      ),
+      language_preference: resolvePreferredContactLanguage({
+        master_owner_item,
+        owner_item,
+        prospect_item,
+        brain_item,
+      }),
       seller_profile: getCategoryValue(brain_item, "seller-profile", null),
       status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
       deal_priority_tag: getCategoryValue(brain_item, "deal-prioirty-tag", null),

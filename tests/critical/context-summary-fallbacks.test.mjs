@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
 import {
+  categoryField,
   createPodioItem,
   textField,
 } from "../helpers/test-helpers.js";
@@ -57,4 +58,37 @@ test("deriveContextSummary returns empty property fields when property_item is n
   // Other fields still resolve correctly
   assert.equal(summary.owner_name, "Zelford Smith Jr");
   assert.equal(summary.seller_first_name, "Sam");
+});
+
+test("deriveContextSummary prefers master owner language over prospect and brain language", () => {
+  const summary = deriveContextSummary({
+    master_owner_item: createPodioItem(10, {
+      "owner-full-name": textField("Jose Martinez"),
+      "language-primary": categoryField("Spanish"),
+    }),
+    prospect_item: createPodioItem(20, {
+      language: categoryField("Italian"),
+    }),
+    brain_item: createPodioItem(30, {
+      "language-preference": categoryField("Greek"),
+    }),
+  });
+
+  assert.equal(summary.language_preference, "Spanish");
+});
+
+test("deriveContextSummary falls back to prospect language before stale brain language", () => {
+  const summary = deriveContextSummary({
+    master_owner_item: createPodioItem(10, {
+      "owner-full-name": textField("Neicie Johnson"),
+    }),
+    prospect_item: createPodioItem(20, {
+      language: categoryField("English"),
+    }),
+    brain_item: createPodioItem(30, {
+      "language-preference": categoryField("Greek"),
+    }),
+  });
+
+  assert.equal(summary.language_preference, "English");
 });

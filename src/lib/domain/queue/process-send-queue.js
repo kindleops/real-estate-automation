@@ -12,7 +12,6 @@ import {
   updateItem,
   createMessageEvent,
   PodioError,
-  normalizeLanguage,
   isRevisionLimitExceeded,
 } from "@/lib/providers/podio.js";
 
@@ -42,6 +41,7 @@ import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
 import { loadRecentTemplates } from "@/lib/domain/context/load-recent-templates.js";
 import { deriveContextSummary } from "@/lib/domain/context/derive-context-summary.js";
+import { resolvePreferredContactLanguage } from "@/lib/domain/context/resolve-preferred-language.js";
 import { buildTemplateSelectorInput } from "@/lib/domain/templates/template-selector.js";
 import { findPropertyItems } from "@/lib/podio/apps/properties.js";
 import { normalizeTemplateItem } from "@/lib/podio/apps/templates.js";
@@ -377,6 +377,7 @@ function buildDeferredQueueContext({
   phone_item,
   brain_item,
   master_owner_item,
+  prospect_item = null,
   property_item,
   market_item,
   agent_item,
@@ -393,7 +394,9 @@ function buildDeferredQueueContext({
       brain_item_id: brain_item?.item_id ?? null,
       phone_item_id: phone_item?.item_id ?? null,
       master_owner_id: master_owner_item?.item_id ?? null,
-      prospect_id: getFirstAppReferenceId(phone_item, "linked-contact", null),
+      prospect_id:
+        prospect_item?.item_id ??
+        getFirstAppReferenceId(phone_item, "linked-contact", null),
       property_id: property_item?.item_id ?? null,
       market_id: market_item?.item_id ?? null,
       assigned_agent_id: agent_item?.item_id ?? null,
@@ -402,7 +405,7 @@ function buildDeferredQueueContext({
       phone_item,
       brain_item,
       master_owner_item,
-      prospect_item: null,
+      prospect_item,
       property_item,
       market_item,
       agent_item,
@@ -411,6 +414,7 @@ function buildDeferredQueueContext({
       phone_item,
       brain_item,
       master_owner_item,
+      prospect_item,
       property_item,
       agent_item,
       market_item,
@@ -463,6 +467,10 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
   const property_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.properties, null);
   const market_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.market, null);
   const sms_agent_id = getFirstAppReferenceId(queue_item, QUEUE_FIELDS.sms_agent, null);
+  const prospect_id =
+    getFirstAppReferenceId(queue_item, QUEUE_FIELDS.prospects, null) ||
+    getFirstAppReferenceId(phone_item, "linked-contact", null) ||
+    null;
 
   warn("queue.deferred_resolution_legacy_path", {
     queue_item_id,
@@ -478,8 +486,9 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
 
   const started_at = Date.now();
 
-  const [master_owner_item, queued_property_item, queued_market_item, agent_item] = await Promise.all([
+  const [master_owner_item, prospect_item, queued_property_item, queued_market_item, agent_item] = await Promise.all([
     safeGetItem(master_owner_id),
+    safeGetItem(prospect_id),
     safeGetItem(property_id),
     safeGetItem(market_id),
     safeGetItem(sms_agent_id),
@@ -521,6 +530,7 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
     phone_item,
     brain_item,
     master_owner_item,
+    prospect_item,
     property_item,
     market_item,
     agent_item,
@@ -530,11 +540,11 @@ async function resolveDeferredQueueMessage(queue_item, { queue_item_id, phone_it
   const stage_hint = master_owner_item
     ? deriveOwnerStageHint(master_owner_item)
     : context.summary?.conversation_stage || "Ownership";
-  const language = normalizeLanguage(
-    getCategoryValue(master_owner_item, "language-primary", null) ||
-      context.summary?.language_preference ||
-      "English"
-  );
+  const language = resolvePreferredContactLanguage({
+    master_owner_item,
+    prospect_item,
+    brain_item,
+  });
   const classification = {
     message: "",
     language,

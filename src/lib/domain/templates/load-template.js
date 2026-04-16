@@ -312,7 +312,7 @@ function scoreLanguage(template_language = null, requested_language = "English")
     return 140;
   }
 
-  return clean(template_language) ? 90 : 60;
+  return clean(template_language) ? 0 : 60;
 }
 
 function scoreTouchType(template_touch_type = TEMPLATE_TOUCH_TYPES.ANY, requested_touch_type = TEMPLATE_TOUCH_TYPES.ANY) {
@@ -540,6 +540,15 @@ function evaluateTemplateCandidate(
     })
   ) {
     rejection_reasons.push("deal_strategy_mismatch");
+  }
+
+  const requested_lang = selector_input?.language || "English";
+  if (
+    clean(template?.language) &&
+    !safeCategoryEquals(template?.language, requested_lang) &&
+    !safeCategoryEquals(template?.language, "English")
+  ) {
+    rejection_reasons.push("language_mismatch");
   }
 
   if (!clean(template?.text)) {

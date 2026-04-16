@@ -285,8 +285,8 @@ test("strict Touch 1 Podio mode ranks by language, then Any Residential, then 1s
 
   assert.deepEqual(
     candidates.map((candidate) => candidate.item_id),
-    [9101, 9104, 9103, 9102],
-    "strict Touch 1 Podio mode must rank valid templates by language, Any Residential, then 1st Touch"
+    [9101, 9104, 9103],
+    "strict Touch 1 Podio mode must rank valid templates by language, Any Residential, then 1st Touch and reject non-matching languages"
   );
   assert.equal(candidates[0]?.source, "podio");
 });
