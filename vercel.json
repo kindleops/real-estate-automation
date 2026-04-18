@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/queue/run",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/textgrid/reset-daily",
+      "schedule": "0 0 * * *"
+    }
+  ]
+}
