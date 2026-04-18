@@ -1,7 +1,11 @@
+import crypto from "node:crypto";
+
 import APP_IDS from "@/lib/config/app-ids.js";
 import {
   DEFAULT_FEEDER_BATCH_SIZE,
+  DEFAULT_FEEDER_EVALUATION_LOCK_HOURS,
   DEFAULT_FEEDER_SCAN_LIMIT,
+  getRolloutControls,
 } from "@/lib/config/rollout-controls.js";
 import {
   MASTER_OWNER_FIELDS,
@@ -52,7 +56,7 @@ import {
   resolveQueueSchedule,
   resolveSchedulingContactWindow,
 } from "@/lib/domain/queue/queue-schedule.js";
-import { findSendQueueItemByQueueId, findAllSendQueueItemsByQueueId } from "@/lib/podio/apps/send-queue.js";
+import { findAllSendQueueItemsByQueueId } from "@/lib/podio/apps/send-queue.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
   fetchAllItems,
@@ -73,6 +77,7 @@ import {
 import { collapseConversationStageToLegacy } from "@/lib/domain/communications-engine/state-machine.js";
 import { parseMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
 import { isNegativeReply } from "@/lib/domain/classification/is-negative-reply.js";
+import { acquireRunLock } from "@/lib/domain/runs/run-locks.js";
 import { child, info, warn } from "@/lib/logging/logger.js";
 
 const DEFAULT_BATCH_SIZE = DEFAULT_FEEDER_BATCH_SIZE;
@@ -113,6 +118,65 @@ const QUEUE_DUPLICATE_RECENT_STATUSES = new Set([
   "queued",
   "sending",
   "sent",
+]);
+
+const TERMINAL_NON_BLOCKING_QUEUE_STATUSES = new Set([
+  "blocked",
+  "cancelled",
+  "failed",
+]);
+
+const QUEUE_IN_FLIGHT_STATUSES = new Set([
+  "queued",
+  "sending",
+]);
+
+const DUPLICATE_SKIP_REASONS = new Set([
+  "duplicate_queue_id",
+  "duplicate_pending_queue_item",
+  "duplicate_within_suppression_window",
+  "same_day_touch_advancement_blocked",
+]);
+
+const ALREADY_IN_FLIGHT_SKIP_REASONS = new Set([
+  "duplicate_pending_queue_item",
+  "pending_prior_touch_blocks_advancement",
+  "already_in_flight_active_queue_row",
+]);
+
+const RECENTLY_EVALUATED_SKIP_REASONS = new Set([
+  "recently_evaluated_lock_active",
+]);
+
+const SUPPRESSION_SKIP_REASONS = new Set([
+  "contact_status_dnc",
+  "recent_contact_within_suppression_window",
+  "duplicate_within_suppression_window",
+  "same_day_touch_advancement_blocked",
+  "recent_negative_inbound",
+]);
+
+const NO_PROPERTY_SKIP_REASONS = new Set([
+  "missing_property_relation_for_first_touch",
+  "real_property_required_for_live_queue",
+]);
+
+const CHEAP_SKIP_REASONS = new Set([
+  "sms_not_eligible",
+  "terminal_contact_status",
+  "contact_status_dnc",
+  "owner_has_contract_or_closing",
+  "next_follow_up_not_due",
+  "no_usable_phone",
+  "duplicate_queue_id",
+  "duplicate_pending_queue_item",
+  "pending_prior_touch_blocks_advancement",
+  "already_in_flight_active_queue_row",
+  "recent_contact_within_suppression_window",
+  "duplicate_within_suppression_window",
+  "same_day_touch_advancement_blocked",
+  "recent_negative_inbound",
+  "recently_evaluated_lock_active",
 ]);
 
 // ── First-touch guardrail constants ──────────────────────────────────────────
@@ -269,16 +333,26 @@ function createRunState({
   test_mode = false,
   page_size = 50,
   source = null,
+  evaluation_lock_ms = DEFAULT_FEEDER_EVALUATION_LOCK_HOURS * 60 * 60 * 1000,
 } = {}) {
+  const run_id = crypto.randomUUID();
   return {
     dry_run,
     test_mode,
     page_size,
     source,
+    run_id,
+    evaluation_lock_ms,
+    lock_owner: `master_owner_feeder:${run_id}`,
     item_cache: new Map(),
     owners_by_id: new Map(),
     owner_history_by_id: new Map(),
+    evaluation_lock_cache: new Map(),
     textgrid_number_pool: null,
+    template_eval_count: 0,
+    queue_create_attempt_count: 0,
+    queue_create_success_count: 0,
+    queue_create_duplicate_cancel_count: 0,
   };
 }
 
@@ -309,26 +383,99 @@ function summarizeDate(value) {
 }
 
 function summarizeSource(source = null, overrides = {}) {
+  const requested_view_id =
+    overrides.requested_view_id ?? source?.requested_view_id ?? null;
+  const requested_view_name =
+    overrides.requested_view_name ?? source?.requested_view_name ?? null;
+  const resolved_view_id = source?.view_id ?? overrides.resolved_view_id ?? null;
+  const resolved_view_name = source?.view_name ?? overrides.resolved_view_name ?? null;
+
   if (!source) {
     return {
       type:
         overrides.type ||
-        (overrides.requested_view_id || overrides.requested_view_name ? "view" : "recent_items"),
+        (requested_view_id || requested_view_name ? "view" : "recent_items"),
       app_id: APP_IDS.master_owners,
-      view_id: null,
-      view_name: null,
-      requested_view_id: overrides.requested_view_id ?? null,
-      requested_view_name: overrides.requested_view_name ?? null,
+      view_id: resolved_view_id,
+      view_name: resolved_view_name,
+      requested_view_id,
+      requested_view_name,
+      resolved_view_id,
+      resolved_view_name,
+      fallback_occurred: Boolean(overrides.fallback_occurred),
+      fallback_reason: clean(overrides.fallback_reason) || null,
+      resolution_strategy: clean(overrides.resolution_strategy) || null,
     };
   }
 
   return {
     type: source.type || "recent_items",
     app_id: APP_IDS.master_owners,
-    view_id: source.view_id ?? null,
-    view_name: source.view_name ?? null,
-    requested_view_id: source.requested_view_id ?? null,
-    requested_view_name: source.requested_view_name ?? null,
+    view_id: resolved_view_id,
+    view_name: resolved_view_name,
+    requested_view_id,
+    requested_view_name,
+    resolved_view_id,
+    resolved_view_name,
+    fallback_occurred: Boolean(
+      overrides.fallback_occurred ?? source.fallback_occurred
+    ),
+    fallback_reason: clean(
+      overrides.fallback_reason ?? source.fallback_reason
+    ) || null,
+    resolution_strategy: clean(
+      overrides.resolution_strategy ?? source.resolution_strategy
+    ) || null,
+  };
+}
+
+function incrementRuntimeCounter(runtime, key, delta = 1) {
+  if (!runtime || !key) return;
+  const current = Number(runtime[key] || 0) || 0;
+  runtime[key] = current + delta;
+}
+
+function countSkippedByReasons(results = [], reasons = new Set()) {
+  return results.filter(
+    (result) => result?.skipped && reasons.has(result?.reason)
+  ).length;
+}
+
+function buildFeederRunCounters({
+  results = [],
+  deep_eval_count = 0,
+  template_eval_count = 0,
+  queue_create_attempt_count = 0,
+  queue_create_success_count = 0,
+  queue_create_duplicate_cancel_count = 0,
+} = {}) {
+  return {
+    cheap_skip_count: countSkippedByReasons(results, CHEAP_SKIP_REASONS),
+    deep_eval_count: Number(deep_eval_count || 0) || 0,
+    template_eval_count: Number(template_eval_count || 0) || 0,
+    duplicate_skip_count: countSkippedByReasons(results, DUPLICATE_SKIP_REASONS),
+    already_in_flight_skip_count: countSkippedByReasons(
+      results,
+      ALREADY_IN_FLIGHT_SKIP_REASONS
+    ),
+    recently_evaluated_skip_count: countSkippedByReasons(
+      results,
+      RECENTLY_EVALUATED_SKIP_REASONS
+    ),
+    suppression_skip_count: countSkippedByReasons(results, SUPPRESSION_SKIP_REASONS),
+    no_phone_skip_count: countSkippedByReasons(
+      results,
+      new Set(["no_usable_phone"])
+    ),
+    no_property_skip_count: countSkippedByReasons(results, NO_PROPERTY_SKIP_REASONS),
+    template_not_found_count: countSkippedByReasons(
+      results,
+      new Set(["template_not_found"])
+    ),
+    queue_create_attempt_count: Number(queue_create_attempt_count || 0) || 0,
+    queue_create_success_count: Number(queue_create_success_count || 0) || 0,
+    queue_create_duplicate_cancel_count:
+      Number(queue_create_duplicate_cancel_count || 0) || 0,
   };
 }
 
@@ -832,6 +979,9 @@ function buildEmptyHistory() {
     queue_items: [],
     outbound_events: [],
     inbound_events: [],
+    queue_items_loaded: false,
+    outbound_events_loaded: false,
+    inbound_events_loaded: false,
   };
 }
 
@@ -1782,86 +1932,114 @@ async function preloadOwnerHistories(master_owner_ids, { runtime = null, log = l
   }
 
   for (const owner_id of unresolved_owner_ids) {
-    runtime.owner_history_by_id.set(
-      String(owner_id),
-      history_by_owner_id.get(String(owner_id)) || buildEmptyHistory()
-    );
+    const history =
+      history_by_owner_id.get(String(owner_id)) || buildEmptyHistory();
+    history.queue_items_loaded = true;
+    history.outbound_events_loaded = true;
+    runtime.owner_history_by_id.set(String(owner_id), history);
   }
 }
 
-async function loadOwnerHistory(master_owner_id, { runtime = null, log = logger } = {}) {
+async function loadOwnerHistory(
+  master_owner_id,
+  {
+    runtime = null,
+    log = logger,
+    include_inbound = false,
+  } = {}
+) {
   const cache_key = String(master_owner_id || "");
-  if (runtime?.owner_history_by_id?.has(cache_key)) {
-    return runtime.owner_history_by_id.get(cache_key);
+  const cached_history = runtime?.owner_history_by_id?.get(cache_key) || null;
+  if (
+    cached_history &&
+    cached_history.queue_items_loaded &&
+    cached_history.outbound_events_loaded &&
+    (!include_inbound || cached_history.inbound_events_loaded)
+  ) {
+    return cached_history;
   }
 
   const page_size = runtime?.test_mode ? 25 : MAX_HISTORY_ITEMS;
 
+  const should_load_queue_items = !cached_history?.queue_items_loaded;
+  const should_load_outbound_events = !cached_history?.outbound_events_loaded;
+  const should_load_inbound_events =
+    Boolean(include_inbound) && !cached_history?.inbound_events_loaded;
+
   const [queue_items, outbound_events, inbound_events] = await Promise.all([
-    timedStage(
-      log,
-      "master_owner_feeder.queue_duplicate_fetch",
-      {
-        master_owner_id,
-        page_size,
-      },
-      () =>
-        fetchAllItems(
-          APP_IDS.send_queue,
+    should_load_queue_items
+      ? timedStage(
+          log,
+          "master_owner_feeder.queue_duplicate_fetch",
           {
-            "master-owner": master_owner_id,
-            "queue-status": ["Queued", "Sending", "Sent"],
-          },
-          {
+            master_owner_id,
             page_size,
-          }
-        )
-    ),
-    timedStage(
-      log,
-      "master_owner_feeder.message_event_duplicate_fetch",
-      {
-        master_owner_id,
-        page_size,
-      },
-      () =>
-        fetchAllItems(
-          APP_IDS.message_events,
-          {
-            "master-owner": master_owner_id,
-            direction: "Outbound",
           },
+          () =>
+            fetchAllItems(
+              APP_IDS.send_queue,
+              {
+                "master-owner": master_owner_id,
+                "queue-status": ["Queued", "Sending", "Sent"],
+              },
+              {
+                page_size,
+              }
+            )
+        )
+      : Promise.resolve(cached_history?.queue_items || []),
+    should_load_outbound_events
+      ? timedStage(
+          log,
+          "master_owner_feeder.message_event_duplicate_fetch",
           {
+            master_owner_id,
             page_size,
-          }
-        )
-    ),
-    // Fetch recent inbound events so the feeder can detect negative replies
-    // before creating new queue rows (prevents re-queuing after opt-out).
-    timedStage(
-      log,
-      "master_owner_feeder.inbound_event_fetch",
-      {
-        master_owner_id,
-      },
-      () =>
-        fetchAllItems(
-          APP_IDS.message_events,
-          {
-            "master-owner": master_owner_id,
-            direction: "Inbound",
           },
-          {
-            page_size: Math.min(page_size, 25),
-          }
+          () =>
+            fetchAllItems(
+              APP_IDS.message_events,
+              {
+                "master-owner": master_owner_id,
+                direction: "Outbound",
+              },
+              {
+                page_size,
+              }
+            )
         )
-    ),
+      : Promise.resolve(cached_history?.outbound_events || []),
+    should_load_inbound_events
+      ? timedStage(
+          log,
+          "master_owner_feeder.inbound_event_fetch",
+          {
+            master_owner_id,
+          },
+          () =>
+            fetchAllItems(
+              APP_IDS.message_events,
+              {
+                "master-owner": master_owner_id,
+                direction: "Inbound",
+              },
+              {
+                page_size: Math.min(page_size, 25),
+              }
+            )
+        )
+      : Promise.resolve(cached_history?.inbound_events || []),
   ]);
 
   const history = {
     queue_items,
     outbound_events,
     inbound_events,
+    queue_items_loaded: true,
+    outbound_events_loaded: true,
+    inbound_events_loaded: include_inbound
+      ? true
+      : Boolean(cached_history?.inbound_events_loaded),
   };
 
   if (runtime?.owner_history_by_id) {
@@ -1886,6 +2064,326 @@ function deriveOwnerTouchCount(history) {
   }).length;
 
   return Math.max(max_queue_touch, valid_event_count);
+}
+
+function buildMasterOwnerQueueId(master_owner_id, phone_item_id, touch_number) {
+  return [
+    "mo",
+    clean(master_owner_id),
+    clean(phone_item_id),
+    clean(touch_number),
+  ].join(":");
+}
+
+function getQueueItemQueueId(queue_item) {
+  return clean(getTextValue(queue_item, "queue-id-2", "")) || null;
+}
+
+function getQueueItemStatus(queue_item) {
+  return lower(getCategoryValue(queue_item, "queue-status", null));
+}
+
+function getQueueItemTouch(queue_item) {
+  const touch_number = Number(getNumberValue(queue_item, "touch-number", 0) || 0);
+  return touch_number > 0 ? touch_number : null;
+}
+
+function getQueueItemPhoneItemId(queue_item) {
+  return getFirstAppReferenceId(queue_item, "phone-number", null);
+}
+
+function getQueueItemPropertyItemId(queue_item) {
+  return getFirstAppReferenceId(queue_item, "properties", null);
+}
+
+function findHistoryQueueItemByQueueId(history, queue_id) {
+  if (!queue_id) return null;
+  return (
+    (Array.isArray(history?.queue_items) ? history.queue_items : []).find(
+      (item) => getQueueItemQueueId(item) === queue_id
+    ) || null
+  );
+}
+
+function findAlreadyInFlightQueueRow(
+  history,
+  {
+    phone_item_id = null,
+    touch_number = null,
+    queue_id = null,
+  } = {}
+) {
+  return (
+    (Array.isArray(history?.queue_items) ? history.queue_items : []).find((item) => {
+      if (!QUEUE_IN_FLIGHT_STATUSES.has(getQueueItemStatus(item))) return false;
+      if (queue_id && getQueueItemQueueId(item) === queue_id) return false;
+
+      const candidate_phone_item_id = getQueueItemPhoneItemId(item);
+      const candidate_touch_number = getQueueItemTouch(item);
+
+      if (
+        phone_item_id &&
+        String(candidate_phone_item_id || "") === String(phone_item_id || "")
+      ) {
+        return true;
+      }
+
+      if (touch_number !== null && candidate_touch_number === touch_number) {
+        return true;
+      }
+
+      return false;
+    }) || null
+  );
+}
+
+function findPropertyQueueConflict(
+  history,
+  {
+    property_item_id = null,
+    phone_item_id = null,
+    touch_number = null,
+    queue_id = null,
+  } = {}
+) {
+  if (!property_item_id) return null;
+
+  return (
+    (Array.isArray(history?.queue_items) ? history.queue_items : []).find((item) => {
+      if (!QUEUE_IN_FLIGHT_STATUSES.has(getQueueItemStatus(item))) return false;
+      if (queue_id && getQueueItemQueueId(item) === queue_id) return false;
+
+      const candidate_property_item_id = getQueueItemPropertyItemId(item);
+      if (
+        String(candidate_property_item_id || "") !== String(property_item_id || "")
+      ) {
+        return false;
+      }
+
+      const candidate_phone_item_id = getQueueItemPhoneItemId(item);
+      const candidate_touch_number = getQueueItemTouch(item);
+
+      if (
+        phone_item_id &&
+        String(candidate_phone_item_id || "") === String(phone_item_id || "")
+      ) {
+        return true;
+      }
+
+      if (touch_number !== null && candidate_touch_number === touch_number) {
+        return true;
+      }
+
+      return false;
+    }) || null
+  );
+}
+
+function applyPreDeepEvaluationGuards({
+  history = null,
+  owner_summary = null,
+  selected_phone_record = null,
+  touch_number = null,
+  queue_id = null,
+  recently_evaluated_lock = null,
+} = {}) {
+  const existing_queue_row = findHistoryQueueItemByQueueId(history, queue_id);
+  if (existing_queue_row?.item_id) {
+    const existing_status = getQueueItemStatus(existing_queue_row);
+    if (!TERMINAL_NON_BLOCKING_QUEUE_STATUSES.has(existing_status)) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "duplicate_queue_id",
+        owner: owner_summary,
+        phone: selected_phone_record?.summary || null,
+        duplicate_queue_item_id: existing_queue_row.item_id,
+        duplicate_queue_status: getCategoryValue(existing_queue_row, "queue-status", null),
+        queue_id,
+      };
+    }
+  }
+
+  const pending_duplicate = findPendingDuplicate(
+    history,
+    selected_phone_record?.phone_item_id ?? null,
+    touch_number
+  );
+  if (pending_duplicate) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "duplicate_pending_queue_item",
+      owner: owner_summary,
+      phone: selected_phone_record?.summary || null,
+      duplicate_queue_item_id: pending_duplicate.item_id,
+      duplicate_queue_status: getCategoryValue(pending_duplicate, "queue-status", null),
+    };
+  }
+
+  const pending_prior_touch = findPendingPriorTouch(
+    history,
+    selected_phone_record?.phone_item_id ?? null,
+    touch_number
+  );
+  if (pending_prior_touch) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "pending_prior_touch_blocks_advancement",
+      owner: owner_summary,
+      phone: selected_phone_record?.summary || null,
+      blocking_queue_item_id: pending_prior_touch.item_id,
+      blocking_touch_number: Number(
+        getNumberValue(pending_prior_touch, "touch-number", 0) || 0
+      ),
+      blocking_queue_status: getCategoryValue(pending_prior_touch, "queue-status", null),
+    };
+  }
+
+  const active_queue_row = findAlreadyInFlightQueueRow(history, {
+    phone_item_id: selected_phone_record?.phone_item_id ?? null,
+    touch_number,
+    queue_id,
+  });
+  if (active_queue_row) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "already_in_flight_active_queue_row",
+      owner: owner_summary,
+      phone: selected_phone_record?.summary || null,
+      active_queue_item_id: active_queue_row.item_id,
+      active_queue_status: getCategoryValue(active_queue_row, "queue-status", null),
+      active_queue_phone_item_id: getQueueItemPhoneItemId(active_queue_row),
+      active_queue_touch_number: getQueueItemTouch(active_queue_row),
+    };
+  }
+
+  if (recently_evaluated_lock?.active) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "recently_evaluated_lock_active",
+      owner: owner_summary,
+      phone: selected_phone_record?.summary || null,
+      evaluation_lock_scope: recently_evaluated_lock.scope || null,
+      evaluation_lock_expires_at: recently_evaluated_lock.expires_at || null,
+      evaluation_lock_record_item_id:
+        recently_evaluated_lock.record_item_id || null,
+    };
+  }
+
+  return null;
+}
+
+function applyPostPropertyEvaluationGuards({
+  history = null,
+  owner_summary = null,
+  owner_item = null,
+  selected_phone_record = null,
+  property_item = null,
+  touch_number = null,
+  queue_id = null,
+} = {}) {
+  const property_conflict = findPropertyQueueConflict(history, {
+    property_item_id: property_item?.item_id ?? null,
+    phone_item_id: selected_phone_record?.phone_item_id ?? null,
+    touch_number,
+    queue_id,
+  });
+
+  if (!property_conflict) return null;
+
+  return {
+    ok: false,
+    skipped: true,
+    reason: "already_in_flight_active_queue_row",
+    owner: owner_summary,
+    phone: selected_phone_record?.summary || null,
+    property: summarizeProperty(property_item, owner_item),
+    active_queue_item_id: property_conflict.item_id,
+    active_queue_status: getCategoryValue(property_conflict, "queue-status", null),
+    active_queue_phone_item_id: getQueueItemPhoneItemId(property_conflict),
+    active_queue_property_item_id: getQueueItemPropertyItemId(property_conflict),
+    active_queue_touch_number: getQueueItemTouch(property_conflict),
+  };
+}
+
+function buildEvaluationLockScope({
+  master_owner_id = null,
+  phone_item_id = null,
+  touch_number = null,
+} = {}) {
+  if (!master_owner_id || !phone_item_id || !touch_number) return null;
+  return `master_owner_feeder_eval:${master_owner_id}:${phone_item_id}:${touch_number}`;
+}
+
+async function acquireOwnerEvaluationLock({
+  master_owner_id = null,
+  phone_item_id = null,
+  touch_number = null,
+  runtime = null,
+  log = logger,
+  owner_summary = null,
+} = {}) {
+  const scope = buildEvaluationLockScope({
+    master_owner_id,
+    phone_item_id,
+    touch_number,
+  });
+
+  if (!scope) {
+    return {
+      ok: true,
+      acquired: false,
+      active: false,
+      scope: null,
+      reason: "missing_evaluation_lock_scope",
+    };
+  }
+
+  if (runtime?.evaluation_lock_cache?.has(scope)) {
+    return runtime.evaluation_lock_cache.get(scope);
+  }
+
+  const lock = await timedStage(
+    log,
+    "master_owner_feeder.evaluation_lock_acquire",
+    {
+      master_owner_id,
+      phone_item_id,
+      touch_number,
+      scope,
+      evaluation_lock_ms: runtime?.evaluation_lock_ms ?? null,
+    },
+    () =>
+      acquireRunLock({
+        scope,
+        lease_ms: runtime?.evaluation_lock_ms ?? (DEFAULT_FEEDER_EVALUATION_LOCK_HOURS * 60 * 60 * 1000),
+        owner: runtime?.lock_owner || "master_owner_feeder",
+        metadata: {
+          master_owner_id,
+          phone_item_id,
+          touch_number,
+          seller_id: owner_summary?.seller_id || null,
+        },
+      })
+  );
+
+  const normalized = {
+    ...lock,
+    scope,
+    active: Boolean(lock?.ok && !lock?.acquired),
+    expires_at: lock?.meta?.expires_at || null,
+    record_item_id: lock?.record_item_id || null,
+  };
+
+  if (runtime?.evaluation_lock_cache) {
+    runtime.evaluation_lock_cache.set(scope, normalized);
+  }
+
+  return normalized;
 }
 
 // Checks for an active (Queued/Sending) duplicate for the given phone.
@@ -2215,6 +2713,7 @@ async function queueOwnerFallbackMinimal({
   owner_item,
   selected_phone_record,
   error,
+  runtime = null,
   log = logger,
 }) {
   const master_owner_id = owner_item?.item_id ?? null;
@@ -2234,6 +2733,7 @@ async function queueOwnerFallbackMinimal({
     error: diagnostics,
   });
 
+  incrementRuntimeCounter(runtime, "queue_create_attempt_count");
   const queue_result = await buildSendQueueItem({
     context,
     rendered_message_text: null,
@@ -2261,6 +2761,7 @@ async function queueOwnerFallbackMinimal({
     textgrid_number_item_id: outbound_number?.textgrid_number_item_id ?? null,
     queue_item_id: queue_result?.queue_item_id ?? null,
   });
+  incrementRuntimeCounter(runtime, "queue_create_success_count");
 
   return queue_result;
 }
@@ -2557,10 +3058,55 @@ async function evaluateOwner({
     {
       evaluation_depth,
     },
-    () => loadOwnerHistory(master_owner_id, { runtime, log })
+    () =>
+      loadOwnerHistory(master_owner_id, {
+        runtime,
+        log,
+        include_inbound: false,
+      })
   );
   const owner_touch_count = deriveOwnerTouchCount(history);
   const touch_number = owner_touch_count + 1;
+  const explicit_follow_up_due = next_follow_up_ts !== null && next_follow_up_ts <= now_ts;
+  const idempotency_queue_id = buildMasterOwnerQueueId(
+    master_owner_id,
+    selected_phone_record.phone_item_id,
+    touch_number
+  );
+
+  // Detect first-touch here so suppression logic below can reference it.
+  // A lead whose contact_status and contact_status_2 are both blank has no
+  // CRM-confirmed engagement. Stale history from prior bad queue rows must not
+  // permanently suppress them — only pending same-phone rows do.
+  const is_first_touch = detectFirstTouch({ owner_item });
+  const strict_touch_one_mode = touch_number === 1;
+  const template_stage_lock = strict_touch_one_mode || is_first_touch;
+
+  const pre_deep_guard = await timedStage(
+    log,
+    "master_owner_feeder.pre_deep_guard_check",
+    {
+      evaluation_depth,
+      phone_item_id: selected_phone_record.phone_item_id,
+      touch_number,
+      queue_id: idempotency_queue_id,
+    },
+    () =>
+      Promise.resolve(
+        applyPreDeepEvaluationGuards({
+          history,
+          owner_summary,
+          selected_phone_record,
+          touch_number,
+          queue_id: idempotency_queue_id,
+        })
+      )
+  );
+
+  if (pre_deep_guard) {
+    return pre_deep_guard;
+  }
+
   const latest_contact_at = timedStage(
     log,
     "master_owner_feeder.latest_contact_resolution",
@@ -2575,15 +3121,6 @@ async function evaluateOwner({
   );
   const resolved_latest_contact_at = await latest_contact_at;
   const latest_contact_ts = toTimestamp(resolved_latest_contact_at);
-  const explicit_follow_up_due = next_follow_up_ts !== null && next_follow_up_ts <= now_ts;
-
-  // Detect first-touch here so suppression logic below can reference it.
-  // A lead whose contact_status and contact_status_2 are both blank has no
-  // CRM-confirmed engagement. Stale history from prior bad queue rows must not
-  // permanently suppress them — only pending same-phone rows do.
-  const is_first_touch = detectFirstTouch({ owner_item });
-  const strict_touch_one_mode = touch_number === 1;
-  const template_stage_lock = strict_touch_one_mode || is_first_touch;
 
   // For engaged/follow-up leads, suppress if contacted recently.
   // For first-touch blank-status leads, skip this entirely — their stale outbound
@@ -2602,82 +3139,6 @@ async function evaluateOwner({
       phone: selected_phone_record.summary,
       latest_contact_at: resolved_latest_contact_at,
       suppression_window_days: cadence_days,
-    };
-  }
-
-  const pending_duplicate = await timedStage(
-    log,
-    "master_owner_feeder.pending_queue_duplicate_check",
-    {
-      evaluation_depth,
-      phone_item_id: selected_phone_record.phone_item_id,
-    },
-    () =>
-      Promise.resolve(
-        findPendingDuplicate(history, selected_phone_record.phone_item_id, touch_number)
-      )
-  );
-  if (pending_duplicate) {
-    log.info("master_owner_feeder.duplicate_active_queue_blocked", {
-      master_owner_id,
-      phone_item_id: selected_phone_record.phone_item_id,
-      touch_number,
-      duplicate_queue_item_id: pending_duplicate.item_id,
-      duplicate_queue_status: getCategoryValue(pending_duplicate, "queue-status", null),
-    });
-    return {
-      ok: false,
-      skipped: true,
-      reason: "duplicate_pending_queue_item",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      duplicate_queue_item_id: pending_duplicate.item_id,
-      duplicate_queue_status: getCategoryValue(pending_duplicate, "queue-status", null),
-    };
-  }
-
-  // Block touch N+1 while touch N is still pending in the queue.  A lower-touch
-  // row in Queued/Sending status means the sequence hasn't been delivered yet.
-  // findPendingDuplicate only catches same-touch duplicates; this catches cross-touch
-  // advancement (touch 2 created while touch 1 is still Queued).
-  const pending_prior_touch = timedStage(
-    log,
-    "master_owner_feeder.pending_prior_touch_check",
-    {
-      evaluation_depth,
-      phone_item_id: selected_phone_record.phone_item_id,
-    },
-    () =>
-      Promise.resolve(
-        findPendingPriorTouch(history, selected_phone_record.phone_item_id, touch_number)
-      )
-  );
-  const resolved_pending_prior_touch = await pending_prior_touch;
-  if (resolved_pending_prior_touch) {
-    log.info("master_owner_feeder.pending_prior_touch_blocks_advancement", {
-      master_owner_id,
-      phone_item_id: selected_phone_record.phone_item_id,
-      requested_touch_number: touch_number,
-      blocking_touch_number: Number(
-        getNumberValue(resolved_pending_prior_touch, "touch-number", 0) || 0
-      ),
-      blocking_queue_item_id: resolved_pending_prior_touch.item_id,
-      blocking_queue_status: getCategoryValue(
-        resolved_pending_prior_touch,
-        "queue-status",
-        null
-      ),
-    });
-    return {
-      ok: false,
-      skipped: true,
-      reason: "pending_prior_touch_blocks_advancement",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      blocking_queue_item_id: resolved_pending_prior_touch.item_id,
-      blocking_touch_number: Number(
-        getNumberValue(resolved_pending_prior_touch, "touch-number", 0) || 0
-      ),
     };
   }
 
@@ -2725,31 +3186,6 @@ async function evaluateOwner({
         duplicate_timestamp: same_day_block.timestamp || null,
       };
     }
-  }
-
-  // ── Negative-inbound suppression guard ──────────────────────────────────
-  // If the owner has sent a negative reply in the last 7 days, do not create
-  // any new queue rows.  This catches the case where the inbound webhook
-  // already canceled queued items but the feeder is running concurrently and
-  // would regenerate them.
-  const recent_negative_inbound = findRecentNegativeInbound(history);
-  if (recent_negative_inbound) {
-    log.info("master_owner_feeder.skipped_recent_negative_inbound", {
-      master_owner_id,
-      phone_item_id: selected_phone_record.phone_item_id,
-      inbound_event_id: recent_negative_inbound.item_id,
-      inbound_timestamp: recent_negative_inbound.timestamp,
-      inbound_message: recent_negative_inbound.message,
-    });
-    return {
-      ok: false,
-      skipped: true,
-      reason: "recent_negative_inbound",
-      owner: owner_summary,
-      phone: selected_phone_record.summary,
-      inbound_event_id: recent_negative_inbound.item_id,
-      inbound_timestamp: recent_negative_inbound.timestamp,
-    };
   }
 
   // For first-touch leads, skip sent-history suppression for the same reason as above:
@@ -2808,12 +3244,72 @@ async function evaluateOwner({
         phone_item_id: selected_phone_record.phone_item_id,
         phone: selected_phone_record.summary,
         touch_number,
+        queue_id: idempotency_queue_id,
         send_priority,
         priority_score,
         suppression_window_days: cadence_days,
         next_follow_up_at: summarizeDate(next_follow_up_at),
         latest_contact_at: summarizeDate(resolved_latest_contact_at),
       },
+    };
+  }
+
+  if (!dry_run) {
+    const evaluation_lock = await acquireOwnerEvaluationLock({
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      touch_number,
+      runtime,
+      log,
+      owner_summary,
+    });
+
+    const evaluation_lock_guard = applyPreDeepEvaluationGuards({
+      history,
+      owner_summary,
+      selected_phone_record,
+      touch_number,
+      queue_id: idempotency_queue_id,
+      recently_evaluated_lock: evaluation_lock,
+    });
+
+    if (evaluation_lock_guard) {
+      return evaluation_lock_guard;
+    }
+  }
+
+  const history_with_inbound = await timedStage(
+    log,
+    "master_owner_feeder.history_inbound_resolution",
+    {
+      phone_item_id: selected_phone_record.phone_item_id,
+    },
+    () =>
+      loadOwnerHistory(master_owner_id, {
+        runtime,
+        log,
+        include_inbound: true,
+      })
+  );
+
+  // If the owner has sent a recent negative reply, do not create any new queue rows.
+  const recent_negative_inbound = findRecentNegativeInbound(history_with_inbound);
+  if (recent_negative_inbound) {
+    log.info("master_owner_feeder.skipped_recent_negative_inbound", {
+      master_owner_id,
+      phone_item_id: selected_phone_record.phone_item_id,
+      inbound_event_id: recent_negative_inbound.item_id,
+      inbound_timestamp: recent_negative_inbound.timestamp,
+      inbound_message: recent_negative_inbound.message,
+    });
+    return {
+      ok: false,
+      skipped: true,
+      reason: "recent_negative_inbound",
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      inbound_event_id: recent_negative_inbound.item_id,
+      inbound_timestamp: recent_negative_inbound.timestamp,
     };
   }
 
@@ -2917,6 +3413,19 @@ async function evaluateOwner({
       synthetic_property_address: property_item._synthetic_property_address ?? null,
       dry_run,
     });
+  }
+
+  const property_queue_guard = applyPostPropertyEvaluationGuards({
+    history,
+    owner_summary,
+    owner_item,
+    selected_phone_record,
+    property_item,
+    touch_number,
+    queue_id: idempotency_queue_id,
+  });
+  if (property_queue_guard) {
+    return property_queue_guard;
   }
 
   const sms_agent_id = getFirstAppReferenceId(owner_item, MASTER_OWNER_FIELDS.sms_agent, null);
@@ -3237,6 +3746,7 @@ async function evaluateOwner({
     ...template_resolution_inputs,
   });
 
+  incrementRuntimeCounter(runtime, "template_eval_count");
   let selected_template = await timedStage(
     log,
     "master_owner_feeder.template_selection",
@@ -3600,6 +4110,7 @@ async function evaluateOwner({
               )),
     },
     touch_number,
+    queue_id: idempotency_queue_id,
     send_priority,
     priority_score,
     suppression_window_days: cadence_days,
@@ -3618,46 +4129,6 @@ async function evaluateOwner({
     };
   }
 
-  // Part 4 — Deterministic idempotency key for queue rows.
-  // If two cron runs attempt to create the same first/follow-up touch for the same
-  // owner+phone, the pending duplicate check (findPendingDuplicate) blocks the second
-  // run. The idempotency key is written to the queue-id field as a cross-run signal —
-  // it makes duplicates identifiable even after the queue is processed.
-  const idempotency_queue_id = [
-    "mo",
-    master_owner_id,
-    selected_phone_record.phone_item_id,
-    touch_number,
-  ].join(":");
-  const existing_queue_row = await timedStage(
-    log,
-    "master_owner_feeder.queue_id_duplicate_check",
-    {
-      evaluation_depth,
-      queue_id: idempotency_queue_id,
-    },
-    () => findSendQueueItemByQueueId(idempotency_queue_id)
-  );
-
-  if (existing_queue_row?.item_id) {
-    // Skip cancelled/blocked queue rows — they should not prevent re-queuing.
-    const existing_status = lower(
-      getCategoryValue(existing_queue_row, "queue-status", null)
-    );
-    const terminal_non_blocking = new Set(["cancelled", "blocked", "failed"]);
-    if (!terminal_non_blocking.has(existing_status)) {
-      return {
-        ok: false,
-        skipped: true,
-        reason: "duplicate_queue_id",
-        owner: owner_summary,
-        phone: selected_phone_record.summary,
-        duplicate_queue_item_id: existing_queue_row.item_id,
-        queue_id: idempotency_queue_id,
-      };
-    }
-  }
-
   const queue_message_type = strict_touch_one_mode
     ? TOUCH_ONE_MESSAGE_TYPE
     : effective_follow_up_plan
@@ -3668,6 +4139,7 @@ async function evaluateOwner({
         );
 
   try {
+    incrementRuntimeCounter(runtime, "queue_create_attempt_count");
     const queue_result = await buildSendQueueItem({
       context,
       rendered_message_text,
@@ -3696,6 +4168,7 @@ async function evaluateOwner({
         : (selected_template?.use_case || null),
       strict_cold_outbound: strict_touch_one_mode,
     });
+    incrementRuntimeCounter(runtime, "queue_create_success_count");
 
     // Post-creation duplicate verification — if a concurrent feeder run created
     // an item with the same queue_id during the TOCTOU window, detect and cancel
@@ -3711,6 +4184,11 @@ async function evaluateOwner({
           );
           const keeper = sorted[0];
           const duplicates_to_cancel = sorted.slice(1);
+          incrementRuntimeCounter(
+            runtime,
+            "queue_create_duplicate_cancel_count",
+            duplicates_to_cancel.length
+          );
           for (const dup of duplicates_to_cancel) {
             try {
               await updateItem(dup.item_id, {
@@ -3799,6 +4277,7 @@ async function evaluateOwner({
         owner_item,
         selected_phone_record,
         error,
+        runtime,
         log,
       });
 
@@ -3878,10 +4357,21 @@ async function resolveMasterOwnerSource({
             (view) =>
               lower(view?.name || view?.title || "") === lower(requested_view_name)
           );
-          if (matched) return matched;
+          if (matched) {
+            return {
+              ...matched,
+              resolution_strategy: "view_name_exact_match",
+            };
+          }
         }
 
-        return getMasterOwnerView(selector);
+        const view = await getMasterOwnerView(selector);
+        return {
+          ...view,
+          resolution_strategy: requested_view_id
+            ? "view_id_lookup"
+            : "view_selector_lookup",
+        };
       } catch (error) {
         const status = error?.status ?? error?.cause?.status ?? null;
         if (status === 404) {
@@ -3917,6 +4407,11 @@ async function resolveMasterOwnerSource({
     view_name: view_name || null,
     requested_view_id,
     requested_view_name,
+    resolved_view_id: view_id,
+    resolved_view_name: view_name || null,
+    fallback_occurred: false,
+    fallback_reason: null,
+    resolution_strategy: clean(resolved?.resolution_strategy) || null,
     raw: resolved,
   };
 }
@@ -4459,6 +4954,12 @@ export async function runMasterOwnerOutboundFeeder({
   const raw_scan_cap = test_mode
     ? 100
     : Math.max(effective_scan_limit * 10, 200);
+  const rollout_controls = getRolloutControls();
+  const evaluation_lock_hours = toPositiveInteger(
+    rollout_controls?.feeder_evaluation_lock_hours,
+    DEFAULT_FEEDER_EVALUATION_LOCK_HOURS
+  );
+  const evaluation_lock_ms = evaluation_lock_hours * 60 * 60 * 1000;
 
   function ownerIdFromResult(result) {
     return result?.plan?.master_owner_id ?? result?.owner?.item_id ?? null;
@@ -4477,6 +4978,7 @@ export async function runMasterOwnerOutboundFeeder({
       test_mode,
       page_size,
       source,
+      evaluation_lock_ms,
     });
 
     info("master_owner_feeder.run_started", {
@@ -4492,6 +4994,8 @@ export async function runMasterOwnerOutboundFeeder({
       master_owner_id: master_owner_id || null,
       source: summarizeSource(source),
       create_brain_if_missing,
+      evaluation_lock_hours,
+      evaluation_lock_ms,
     });
 
     const seed_owner = await loadSeedOwner({
@@ -4513,8 +5017,22 @@ export async function runMasterOwnerOutboundFeeder({
         seller_id: seller_id || null,
         master_owner_id: master_owner_id || null,
         scanned_count: 0,
+        cheap_skip_count: 0,
+        deep_eval_count: 0,
+        template_eval_count: 0,
         queued_count: 0,
+        duplicate_skip_count: 0,
+        already_in_flight_skip_count: 0,
+        recently_evaluated_skip_count: 0,
+        suppression_skip_count: 0,
+        no_phone_skip_count: 0,
+        no_property_skip_count: 0,
+        template_not_found_count: 0,
+        queue_create_attempt_count: 0,
+        queue_create_success_count: 0,
+        queue_create_duplicate_cancel_count: 0,
         skipped_count: 0,
+        skip_reason_counts: [],
         limit: effective_limit,
         scan_limit: effective_scan_limit,
         results: [],
@@ -4736,6 +5254,15 @@ export async function runMasterOwnerOutboundFeeder({
     const queued_owner_ids = queued_results
       .map((result) => result?.plan?.master_owner_id ?? result?.owner?.item_id ?? null)
       .filter(Boolean);
+    const run_counters = buildFeederRunCounters({
+      results: final_results,
+      deep_eval_count: deep_results_by_owner_id.size,
+      template_eval_count: runtime.template_eval_count,
+      queue_create_attempt_count: runtime.queue_create_attempt_count,
+      queue_create_success_count: runtime.queue_create_success_count,
+      queue_create_duplicate_cancel_count:
+        runtime.queue_create_duplicate_cancel_count,
+    });
 
     const summary = {
       ok: true,
@@ -4759,6 +5286,7 @@ export async function runMasterOwnerOutboundFeeder({
         template: true,
         brain_suppression: true,
       },
+      ...run_counters,
       skipped_count: skipped_results.length,
       skip_reason_counts,
       template_resolution_diagnostics,
@@ -4778,10 +5306,27 @@ export async function runMasterOwnerOutboundFeeder({
       eligible_owner_count: summary.eligible_owner_count,
       queued_count: summary.queued_count,
       skipped_count: summary.skipped_count,
+      cheap_skip_count: summary.cheap_skip_count,
+      deep_eval_count: summary.deep_eval_count,
+      template_eval_count: summary.template_eval_count,
+      duplicate_skip_count: summary.duplicate_skip_count,
+      already_in_flight_skip_count: summary.already_in_flight_skip_count,
+      recently_evaluated_skip_count: summary.recently_evaluated_skip_count,
+      suppression_skip_count: summary.suppression_skip_count,
+      no_phone_skip_count: summary.no_phone_skip_count,
+      no_property_skip_count: summary.no_property_skip_count,
+      template_not_found_count: summary.template_not_found_count,
+      queue_create_attempt_count: summary.queue_create_attempt_count,
+      queue_create_success_count: summary.queue_create_success_count,
+      queue_create_duplicate_cancel_count:
+        summary.queue_create_duplicate_cancel_count,
       skip_reason_counts,
       template_resolution_diagnostics,
-      effective_source_view_name: summary.source?.requested_view_name || summary.source?.view_name || null,
-      resolved_source_view_name: summary.source?.view_name || null,
+      requested_source_view_name: summary.source?.requested_view_name || null,
+      requested_source_view_id: summary.source?.requested_view_id || null,
+      resolved_source_view_name: summary.source?.resolved_view_name || null,
+      resolved_source_view_id: summary.source?.resolved_view_id || null,
+      source_view_fallback_occurred: summary.source?.fallback_occurred || false,
       page_size,
     });
 
@@ -4820,8 +5365,22 @@ export async function runMasterOwnerOutboundFeeder({
         : null,
       diagnostics,
       scanned_count: 0,
+      cheap_skip_count: 0,
+      deep_eval_count: 0,
+      template_eval_count: 0,
       queued_count: 0,
+      duplicate_skip_count: 0,
+      already_in_flight_skip_count: 0,
+      recently_evaluated_skip_count: 0,
+      suppression_skip_count: 0,
+      no_phone_skip_count: 0,
+      no_property_skip_count: 0,
+      template_not_found_count: 0,
+      queue_create_attempt_count: 0,
+      queue_create_success_count: 0,
+      queue_create_duplicate_cancel_count: 0,
       skipped_count: 0,
+      skip_reason_counts: [],
       limit: effective_limit,
       scan_limit: effective_scan_limit,
       page_size,
@@ -4839,6 +5398,15 @@ export {
   normalizeStreetAddress,
   addressLookupVariants,
   buildSyntheticPropertyFromSellerId,
+  summarizeSource,
+  buildMasterOwnerQueueId,
+  findHistoryQueueItemByQueueId,
+  findAlreadyInFlightQueueRow,
+  findPropertyQueueConflict,
+  applyPreDeepEvaluationGuards,
+  applyPostPropertyEvaluationGuards,
+  buildEvaluationLockScope,
+  buildFeederRunCounters,
   findPendingDuplicate,
   findRecentDuplicate,
   deriveOwnerTouchCount,

@@ -113,6 +113,33 @@ function buildSourceViewLogMeta({
   };
 }
 
+function buildRolloutSourceViewMeta({
+  requested_source_view_id = null,
+  requested_source_view_name = null,
+  effective_source_view_id = null,
+  effective_source_view_name = null,
+  resolved_source_view_id = null,
+  resolved_source_view_name = null,
+  source_view_fallback_occurred = false,
+  source_view_fallback_reason = null,
+} = {}) {
+  const keepIfPresent = (value) => {
+    const normalized = clean(value);
+    return normalized ? value : null;
+  };
+
+  return {
+    requested_source_view_id: keepIfPresent(requested_source_view_id),
+    requested_source_view_name: clean(requested_source_view_name) || null,
+    effective_source_view_id: keepIfPresent(effective_source_view_id),
+    effective_source_view_name: clean(effective_source_view_name) || null,
+    resolved_source_view_id: keepIfPresent(resolved_source_view_id),
+    resolved_source_view_name: clean(resolved_source_view_name) || null,
+    source_view_fallback_occurred: Boolean(source_view_fallback_occurred),
+    source_view_fallback_reason: clean(source_view_fallback_reason) || null,
+  };
+}
+
 export function normalizeFeederRequest(input = {}) {
   const defaults = getRolloutControls();
   const limit_was_provided = Boolean(clean(input?.limit));
@@ -391,6 +418,16 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
   );
   const effective_master_owner_id = safe_owner_scope.effective_id || null;
   const effective_dry_run = dry_run_resolution.effective_dry_run;
+  const rollout_source_view_meta = buildRolloutSourceViewMeta({
+    requested_source_view_id: source_view_id,
+    requested_source_view_name: source_view_name,
+    effective_source_view_id: view_scope.source_view_id,
+    effective_source_view_name: view_scope.source_view_name,
+    resolved_source_view_id: view_scope.source_view_id,
+    resolved_source_view_name: view_scope.source_view_name,
+    source_view_fallback_occurred: false,
+    source_view_fallback_reason: null,
+  });
   const lock_scope = effective_master_owner_id
     ? `feeder:${effective_master_owner_id}`
     : view_scope.source_view_id
@@ -419,10 +456,7 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
       effective_scan_limit,
       requested_master_owner_id: master_owner_id || null,
       effective_master_owner_id,
-      effective_source_view_id: view_scope.source_view_id,
-      effective_source_view_name: view_scope.source_view_name,
-      resolved_source_view_id: view_scope.source_view_id,
-      resolved_source_view_name: view_scope.source_view_name,
+      ...rollout_source_view_meta,
     },
   });
 
@@ -603,10 +637,7 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
           effective_scan_limit,
           requested_master_owner_id: master_owner_id || null,
           effective_master_owner_id,
-          effective_source_view_id: view_scope.source_view_id,
-          effective_source_view_name: view_scope.source_view_name,
-          resolved_source_view_id: view_scope.source_view_id,
-          resolved_source_view_name: view_scope.source_view_name,
+          ...rollout_source_view_meta,
           queue_inventory,
         },
       };
@@ -667,10 +698,24 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
           effective_scan_limit,
           requested_master_owner_id: master_owner_id || null,
           effective_master_owner_id,
-          effective_source_view_id: view_scope.source_view_id,
-          effective_source_view_name: view_scope.source_view_name,
-          resolved_source_view_id: result?.source?.view_id ?? view_scope.source_view_id,
-          resolved_source_view_name: result?.source?.view_name ?? view_scope.source_view_name,
+          ...buildRolloutSourceViewMeta({
+            requested_source_view_id: source_view_id,
+            requested_source_view_name: source_view_name,
+            effective_source_view_id: view_scope.source_view_id,
+            effective_source_view_name: view_scope.source_view_name,
+            resolved_source_view_id:
+              result?.source?.resolved_view_id ??
+              result?.source?.view_id ??
+              view_scope.source_view_id,
+            resolved_source_view_name:
+              result?.source?.resolved_view_name ??
+              result?.source?.view_name ??
+              view_scope.source_view_name,
+            source_view_fallback_occurred:
+              result?.source?.fallback_occurred ?? false,
+            source_view_fallback_reason:
+              result?.source?.fallback_reason ?? null,
+          }),
         },
       });
     }
@@ -688,10 +733,24 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
         effective_scan_limit,
         requested_master_owner_id: master_owner_id || null,
         effective_master_owner_id,
-        effective_source_view_id: view_scope.source_view_id,
-        effective_source_view_name: view_scope.source_view_name,
-        resolved_source_view_id: result?.source?.view_id ?? view_scope.source_view_id,
-        resolved_source_view_name: result?.source?.view_name ?? view_scope.source_view_name,
+        ...buildRolloutSourceViewMeta({
+          requested_source_view_id: source_view_id,
+          requested_source_view_name: source_view_name,
+          effective_source_view_id: view_scope.source_view_id,
+          effective_source_view_name: view_scope.source_view_name,
+          resolved_source_view_id:
+            result?.source?.resolved_view_id ??
+            result?.source?.view_id ??
+            view_scope.source_view_id,
+          resolved_source_view_name:
+            result?.source?.resolved_view_name ??
+            result?.source?.view_name ??
+            view_scope.source_view_name,
+          source_view_fallback_occurred:
+            result?.source?.fallback_occurred ?? false,
+          source_view_fallback_reason:
+            result?.source?.fallback_reason ?? null,
+        }),
         queue_inventory,
       },
     };
@@ -711,12 +770,20 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
     );
 
     route_logger.info("master_owner_feeder.completed", {
+      requested_source_view_name:
+        resolved_result?.rollout?.requested_source_view_name ?? null,
+      requested_source_view_id:
+        resolved_result?.rollout?.requested_source_view_id ?? null,
       effective_source_view_name:
         resolved_result?.rollout?.effective_source_view_name ?? null,
       resolved_source_view_name:
         resolved_result?.rollout?.resolved_source_view_name ?? null,
       resolved_source_view_id:
         resolved_result?.rollout?.resolved_source_view_id ?? null,
+      source_view_fallback_occurred:
+        resolved_result?.rollout?.source_view_fallback_occurred ?? false,
+      source_view_fallback_reason:
+        resolved_result?.rollout?.source_view_fallback_reason ?? null,
       scanned_count: resolved_result?.scanned_count ?? 0,
       eligible_owner_count: resolved_result?.eligible_owner_count ?? 0,
       queued_count: resolved_result?.queued_count ?? 0,

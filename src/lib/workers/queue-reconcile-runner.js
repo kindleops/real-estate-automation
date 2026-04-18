@@ -100,6 +100,14 @@ function mapFailureBucketToQueueReason(failure_bucket = "") {
   return null;
 }
 
+function getProviderMessageId(event_item = null) {
+  return (
+    clean(getTextValue(event_item, "text-2", "")) ||
+    clean(getTextValue(event_item, "message-id", "")) ||
+    null
+  );
+}
+
 export async function findQueueEvidenceEvents(queue_item_id) {
   const [send_events, failed_events, delivery_events] = await Promise.all([
     findMessageEventsByTriggerName(buildQueueSendTriggerName(queue_item_id), 20, 0, {
@@ -143,7 +151,7 @@ export function classifyQueueEvidence(events = []) {
 
   for (const event_item of sorted_events) {
     const delivery_status = lower(getCategoryValue(event_item, "status-3", ""));
-    const provider_message_id = clean(getTextValue(event_item, "message-id", ""));
+    const provider_message_id = getProviderMessageId(event_item);
 
     if (
       isQueueSendEventItem(event_item) ||
@@ -175,7 +183,7 @@ export async function recoverQueueItemFromEvidence(
   const event_item = evidence?.event_item || null;
   const event_timestamp = getEventOccurredAt(event_item) || now;
   const failure_bucket = getCategoryValue(event_item, "failure-bucket", null);
-  const provider_message_id = clean(getTextValue(event_item, "message-id", ""));
+  const provider_message_id = getProviderMessageId(event_item);
 
   if (evidence?.kind === "delivered") {
     await update(queue_item_id, {

@@ -72,15 +72,22 @@ test("buildOutboundMessageEventFields: property and market relations are set whe
     market_id: 801,
     phone_item_id: 401,
     outbound_number_item_id: 501,
+    sms_agent_id: 9011,
+    property_address: "123 Main St",
     message_body: "Full message body here.",
     queue_item_id: 100,
+    client_reference_id: "queue-100",
     send_result: { ok: true, status: "sent", message_id: "msg-1" },
   });
 
+  assert.equal(fields["message-id"], "outbound:queue-100");
+  assert.equal(fields["text-2"], "msg-1");
   assert.deepEqual(fields["property"], [601], "property field must be array app-ref");
   assert.deepEqual(fields["market"], [801], "market field must be array app-ref");
   assert.deepEqual(fields["master-owner"], [201]);
   assert.deepEqual(fields["phone-number"], [401]);
+  assert.deepEqual(fields["sms-agent"], [9011]);
+  assert.equal(fields["property-address"], "123 Main St");
 });
 
 test("buildOutboundMessageEventFields: property and market fields are omitted when ids are null", () => {
@@ -109,6 +116,8 @@ test("buildFailedOutboundMessageEventFields: property and market relations are s
     property_id: 601,
     market_id: 801,
     phone_item_id: 401,
+    sms_agent_id: 911,
+    property_address: "123 Main St",
     outbound_number_item_id: 501,
     template_id: 901,
     message_body: "Hi there.",
@@ -125,8 +134,11 @@ test("buildFailedOutboundMessageEventFields: property and market relations are s
     client_reference_id: "queue-100",
   });
 
+  assert.equal(fields["message-id"], "failure:queue-100");
   assert.deepEqual(fields["property"], [601]);
   assert.deepEqual(fields["market"], [801]);
+  assert.deepEqual(fields["sms-agent"], [911]);
+  assert.equal(fields["property-address"], "123 Main St");
   assert.equal(fields["failure-bucket"], "Hard Bounce", "404 must map to Hard Bounce");
   assert.equal(fields["status-2"], "404", "raw carrier status must be the HTTP status code");
 });

@@ -85,6 +85,7 @@ export async function runLiveTextgridSendVerification({
   try {
     event = await createMessageEvent({
       "message-id": send_result.message_id,
+      "text-2": send_result.message_id,
       "timestamp": { start: nowIso() },
       "trigger-name": trigger_name,
       "direction": "Outbound",
@@ -131,6 +132,7 @@ export async function getLiveTextgridVerificationStatus({
   ]);
   const {
     findMessageEventsByMessageId,
+    findMessageEventsByProviderMessageSid,
     findMessageEventsByTriggerName,
   } = messageEvents;
 
@@ -144,7 +146,7 @@ export async function getLiveTextgridVerificationStatus({
         0
       )
     : normalized_provider_message_id
-      ? await findMessageEventsByMessageId(normalized_provider_message_id, 50, 0)
+      ? await findMessageEventsByProviderMessageSid(normalized_provider_message_id, 50, 0)
       : [];
 
   const verification_send_events = sortNewestFirst(
@@ -156,11 +158,12 @@ export async function getLiveTextgridVerificationStatus({
   const primary_send_event = verification_send_events[0] || null;
   const resolved_provider_message_id =
     normalized_provider_message_id ||
+    clean(getTextValue(primary_send_event, "text-2", "")) ||
     clean(getTextValue(primary_send_event, "message-id", ""));
 
   const delivery_events = resolved_provider_message_id
     ? sortNewestFirst(
-        await findMessageEventsByMessageId(resolved_provider_message_id, 50, 0)
+        await findMessageEventsByProviderMessageSid(resolved_provider_message_id, 50, 0)
       ).filter((event_item) => !isVerificationTextgridSendEventItem(event_item))
     : [];
 

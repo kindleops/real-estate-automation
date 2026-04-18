@@ -413,6 +413,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     const prospect_id = context.ids?.prospect_id || null;
     const property_id = context.ids?.property_id || null;
     const phone_item_id = context.ids?.phone_item_id || null;
+    const market_id = context.ids?.market_id || null;
+    const sms_agent_id = context.ids?.assigned_agent_id || null;
+    const property_address = context.summary?.property_address || null;
+    const latest_outbound_event =
+      context.recent?.recent_events?.find(
+        (event) => clean(event?.direction).toLowerCase() === "outbound"
+      ) || null;
+    const inbound_number_item_id =
+      latest_outbound_event?.textgrid_number_item_id || null;
+    const prior_message_id = latest_outbound_event?.message_id || null;
+    const response_to_message_id = prior_message_id;
+    const stage_before = context.summary?.conversation_stage || null;
 
     if (inbound_debug_stage === "after_brain_lookup") {
       return { ok: true, stage: "after_brain_lookup", brain_id, master_owner_id };
@@ -426,20 +438,22 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     }
 
     // ── SEGMENT: message_event_create ─────────────────────────────────────
-    // Enrich the idempotency record with actual inbound event data so Podio
-    // contains exactly one Message Events row per inbound SMS with the real
-    // seller message text, correct character count, and proper linkages.
-    const inbound_number_item_id = null;
+    // Create the canonical seller Message Events row early, then rehydrate
+    // that same row later if the Brain / stage context becomes richer during
+    // the rest of the inbound pipeline.
+    let inbound_message_event_id = null;
     try {
-      await runtimeDeps.logInboundMessageEvent({
-        record_item_id: idempotency.record_item_id,
+      const inbound_event = await runtimeDeps.logInboundMessageEvent({
         brain_item,
         conversation_item_id: brain_id,
         master_owner_id,
         prospect_id,
         property_id,
+        market_id,
         phone_item_id,
         inbound_number_item_id,
+        sms_agent_id,
+        property_address,
         message_body,
         provider_message_id: extracted.message_id,
         raw_carrier_status: extracted.status || "received",
@@ -447,7 +461,13 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         processed_by: "Manual Sender",
         source_app: "External API",
         trigger_name: "textgrid-inbound",
+        inbound_from,
+        inbound_to,
+        prior_message_id,
+        response_to_message_id,
+        stage_before,
       });
+      inbound_message_event_id = inbound_event?.item_id || null;
       message_event_enriched = true;
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_message_event_create", err);
@@ -535,6 +555,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           follow_up_trigger_state:
             deterministic_state?.follow_up_trigger_state || "AI Running",
           deterministic_state,
+          extra_fields: {
+            "master-owner": master_owner_id || undefined,
+            prospect: prospect_id || undefined,
+            ...(property_id ? { properties: [property_id] } : {}),
+            ...(sms_agent_id ? { "sms-agent": sms_agent_id } : {}),
+          },
         });
       }
     } catch (err) {
@@ -646,6 +672,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             follow_up_trigger_state:
               deterministic_state?.follow_up_trigger_state || "AI Running",
             deterministic_state,
+            extra_fields: {
+              "master-owner": master_owner_id || undefined,
+              prospect: prospect_id || undefined,
+              ...(property_id ? { properties: [property_id] } : {}),
+              ...(sms_agent_id ? { "sms-agent": sms_agent_id } : {}),
+            },
           });
         }
       }
@@ -719,6 +751,52 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         contract_item_id: contract?.contract_item_id || null,
         notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
       });
+
+      if (inbound_message_event_id) {
+        await runtimeDeps.logInboundMessageEvent({
+          record_item_id: inbound_message_event_id,
+          brain_item,
+          conversation_item_id: brain_id,
+          master_owner_id,
+          prospect_id,
+          property_id,
+          market_id,
+          phone_item_id,
+          inbound_number_item_id,
+          sms_agent_id,
+          property_address,
+          message_body,
+          provider_message_id: extracted.message_id,
+          raw_carrier_status: extracted.status || "received",
+          received_at:
+            extracted.received_at ||
+            payload?.http_received_at ||
+            new Date().toISOString(),
+          processed_by: "Manual Sender",
+          source_app: "External API",
+          trigger_name: "textgrid-inbound",
+          inbound_from,
+          inbound_to,
+          prior_message_id,
+          response_to_message_id,
+          stage_before,
+          stage_after:
+            seller_stage_reply?.brain_stage ||
+            deterministic_state?.conversation_stage ||
+            route?.stage ||
+            null,
+          is_opt_out:
+            seller_stage_reply?.plan?.selected_use_case === SELLER_FLOW_STAGES.STOP_OR_OPT_OUT ||
+            inbound_is_negative,
+          metadata: {
+            classification_source: classification?.source || null,
+            route_stage: route?.stage || null,
+            route_use_case: route?.use_case || null,
+            seller_stage_use_case:
+              seller_stage_reply?.plan?.selected_use_case || null,
+          },
+        });
+      }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_podio_write", err);
     }

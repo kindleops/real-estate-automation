@@ -1,35 +1,28 @@
-// ─── log-inbound-message-event.js ────────────────────────────────────────
 import { createMessageEvent, updateMessageEvent, getCategoryValue } from "@/lib/providers/podio.js";
 import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
+import { buildQueueMessageEventMetadata } from "@/lib/domain/events/message-event-metadata.js";
+import {
+  buildBaseSellerMessageEventFields,
+  buildInboundMessageEventKey,
+  extractOptOutDetails,
+} from "@/lib/domain/events/seller-message-event.js";
 
-const EVENT_FIELDS = {
-  message_id: "message-id",
-  provider_message_sid: "text-2",
-  timestamp: "timestamp",
-  direction: "direction",
-  event_type: "category",
-  master_owner: "master-owner",
-  prospect: "linked-seller",
-  property: "property",
-  market: "market",
-  textgrid_number: "textgrid-number",
-  phone_number: "phone-number",
-  sms_agent: "sms-agent",
-  property_address: "property-address",
-  conversation: "conversation",
-  ai_route: "ai-route",
-  processed_by: "processed-by",
-  source_app: "source-app",
-  trigger_name: "trigger-name",
-  message: "message",
-  character_count: "character-count",
-  delivery_status: "status-3",
-  raw_carrier_status: "status-2",
-  ai_output: "ai-output",
+const defaultDeps = {
+  createMessageEvent,
+  updateMessageEvent,
+  getCategoryValue,
+  linkMessageEventToBrain,
 };
 
-function nowIso() {
-  return new Date().toISOString();
+let runtimeDeps = { ...defaultDeps };
+
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
+function asValidId(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 // Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago so that
@@ -50,20 +43,6 @@ function nowCentral() {
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
-function asArrayAppRef(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
-}
-
-const defaultDeps = {
-  createMessageEvent,
-  updateMessageEvent,
-  getCategoryValue,
-  linkMessageEventToBrain,
-};
-
-let runtimeDeps = { ...defaultDeps };
-
 export function __setLogInboundMessageEventTestDeps(overrides = {}) {
   runtimeDeps = { ...runtimeDeps, ...overrides };
 }
@@ -72,8 +51,7 @@ export function __resetLogInboundMessageEventTestDeps() {
   runtimeDeps = { ...defaultDeps };
 }
 
-export async function logInboundMessageEvent({
-  record_item_id = null,
+export function buildInboundMessageEventFields({
   brain_item = null,
   conversation_item_id = null,
   master_owner_id = null,
@@ -91,71 +69,108 @@ export async function logInboundMessageEvent({
   processed_by = "Manual Sender",
   source_app = "External API",
   trigger_name = "textgrid-inbound",
+  inbound_from = null,
+  inbound_to = null,
+  prior_message_id = null,
+  response_to_message_id = null,
+  stage_before = null,
+  stage_after = null,
+  metadata = {},
+  opt_out_keyword = null,
+  is_opt_out = null,
 } = {}) {
+  const resolved_conversation_item_id =
+    asValidId(conversation_item_id) ||
+    asValidId(brain_item?.item_id) ||
+    null;
   const ai_route = runtimeDeps.getCategoryValue(brain_item, "ai-route", null);
-  const normalized_message = String(message_body || "");
+  const detected_opt_out = extractOptOutDetails(message_body);
+  const explicit_opt_out = Boolean(is_opt_out);
 
-  const fields = {
-    [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
-    [EVENT_FIELDS.direction]: "Inbound",
-    [EVENT_FIELDS.event_type]: "Seller Inbound SMS",
-    [EVENT_FIELDS.timestamp]: { start: received_at || nowCentral() },
-    [EVENT_FIELDS.message]: normalized_message,
-    [EVENT_FIELDS.character_count]: normalized_message.length,
-    [EVENT_FIELDS.delivery_status]: "Received",
-    [EVENT_FIELDS.raw_carrier_status]: raw_carrier_status,
-    [EVENT_FIELDS.processed_by]: processed_by,
-    [EVENT_FIELDS.source_app]: source_app,
-    [EVENT_FIELDS.trigger_name]: trigger_name,
-    ...(asArrayAppRef(master_owner_id)
-      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
-      : {}),
-    ...(asArrayAppRef(prospect_id)
-      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
-      : {}),
-    ...(asArrayAppRef(property_id)
-      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
-      : {}),
-    ...(asArrayAppRef(market_id)
-      ? { [EVENT_FIELDS.market]: asArrayAppRef(market_id) }
-      : {}),
-    ...(asArrayAppRef(phone_item_id)
-      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
-      : {}),
-    ...(asArrayAppRef(inbound_number_item_id)
-      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(inbound_number_item_id) }
-      : {}),
-    ...(asArrayAppRef(conversation_item_id || brain_item?.item_id)
-      ? {
-          [EVENT_FIELDS.conversation]: asArrayAppRef(
-            conversation_item_id || brain_item?.item_id
-          ),
-        }
-      : {}),
-    ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
-    ...(asArrayAppRef(sms_agent_id)
-      ? { [EVENT_FIELDS.sms_agent]: asArrayAppRef(sms_agent_id) }
-      : {}),
-    ...(String(property_address ?? "").trim()
-      ? { [EVENT_FIELDS.property_address]: String(property_address).trim() }
-      : {}),
-  };
+  return buildBaseSellerMessageEventFields({
+    message_event_key: buildInboundMessageEventKey({
+      provider_message_id,
+      from: inbound_from,
+      to: inbound_to,
+      message_body,
+      received_at,
+    }),
+    provider_message_id,
+    timestamp: received_at || nowCentral(),
+    direction: "Inbound",
+    event_type: "Seller Inbound SMS",
+    message_body,
+    delivery_status: "Received",
+    raw_carrier_status,
+    property_address,
+    ai_route,
+    processed_by,
+    source_app,
+    trigger_name,
+    prior_message_id,
+    response_to_message_id,
+    stage_before,
+    stage_after,
+    relationship_ids: {
+      master_owner_id,
+      prospect_id,
+      property_id,
+      market_id,
+      phone_item_id,
+      textgrid_number_item_id: inbound_number_item_id,
+      sms_agent_id,
+      conversation_item_id: resolved_conversation_item_id,
+    },
+    metadata: buildQueueMessageEventMetadata({
+      event_kind: "inbound_message",
+      provider_message_id,
+      message_event_key: buildInboundMessageEventKey({
+        provider_message_id,
+        from: inbound_from,
+        to: inbound_to,
+        message_body,
+        received_at,
+      }),
+      inbound_from: clean(inbound_from) || null,
+      inbound_to: clean(inbound_to) || null,
+      master_owner_id: asValidId(master_owner_id),
+      prospect_id: asValidId(prospect_id),
+      property_id: asValidId(property_id),
+      market_id: asValidId(market_id),
+      phone_item_id: asValidId(phone_item_id),
+      inbound_number_item_id: asValidId(inbound_number_item_id),
+      sms_agent_id: asValidId(sms_agent_id),
+      conversation_item_id: resolved_conversation_item_id,
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+    }),
+    opt_out: explicit_opt_out || detected_opt_out["is-opt-out"] === "Yes",
+    opt_out_keyword:
+      clean(opt_out_keyword) ||
+      clean(detected_opt_out["opt-out-keyword"]) ||
+      null,
+  });
+}
+
+export async function logInboundMessageEvent({
+  record_item_id = null,
+  ...payload
+} = {}) {
+  const fields = buildInboundMessageEventFields(payload);
 
   let created;
   if (record_item_id) {
-    // Update the existing idempotency record with actual event data.
-    // Preserve message-id (idempotency key) so dedup lookup still works.
     await runtimeDeps.updateMessageEvent(record_item_id, fields);
     created = { item_id: record_item_id };
   } else {
-    // Fallback: create a new record (no idempotency record to enrich).
-    fields[EVENT_FIELDS.message_id] = provider_message_id || null;
     created = await runtimeDeps.createMessageEvent(fields);
   }
 
   await runtimeDeps.linkMessageEventToBrain({
-    brain_item,
-    brain_id: conversation_item_id || brain_item?.item_id || null,
+    brain_item: payload.brain_item || null,
+    brain_id:
+      payload.conversation_item_id ||
+      payload.brain_item?.item_id ||
+      null,
     message_event_id: created?.item_id ?? null,
   });
 

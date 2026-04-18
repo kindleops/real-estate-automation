@@ -19,7 +19,8 @@ afterEach(() => {
 test("delivery correlation resolves exact queue item from provider send event metadata", async () => {
   const outboundEvent = createPodioItem(801, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("provider-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("provider-1"),
     "ai-output": textField(
       JSON.stringify({
         queue_item_id: 123,
@@ -32,7 +33,7 @@ test("delivery correlation resolves exact queue item from provider send event me
   const queueItem = createPodioItem(123);
 
   __setTextgridDeliveryTestDeps({
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
   });
@@ -52,18 +53,20 @@ test("delivery correlation refuses ambiguous exact queue matches", async () => {
   const outboundEvents = [
     createPodioItem(801, {
       "trigger-name": textField("queue-send:123"),
-      "message-id": textField("provider-2"),
+      "message-id": textField("outbound:queue-123"),
+      "text-2": textField("provider-2"),
       "ai-output": textField(JSON.stringify({ queue_item_id: 123 })),
     }),
     createPodioItem(802, {
       "trigger-name": textField("queue-send:124"),
-      "message-id": textField("provider-2"),
+      "message-id": textField("outbound:queue-124"),
+      "text-2": textField("provider-2"),
       "ai-output": textField(JSON.stringify({ queue_item_id: 124 })),
     }),
   ];
 
   __setTextgridDeliveryTestDeps({
-    findMessageEventItemsByMessageId: async () => outboundEvents,
+    findMessageEventItemsByProviderMessageId: async () => outboundEvents,
     getItem: async () => null,
     fetchAllItems: async () => [],
   });

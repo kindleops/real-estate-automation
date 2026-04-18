@@ -51,7 +51,8 @@ test("delivery webhook sets queue_status to Delivered when provider confirms del
 
   const outboundEvent = createPodioItem(801, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("msg-abc-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("msg-abc-1"),
     "ai-output": textField(
       JSON.stringify({ queue_item_id: 123, provider_message_id: "msg-abc-1" })
     ),
@@ -60,7 +61,7 @@ test("delivery webhook sets queue_status to Delivered when provider confirms del
   });
 
   __setTextgridDeliveryTestDeps({
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (id) => (Number(id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async (id, payload) => {
@@ -123,7 +124,8 @@ test("delivery webhook writes delivered_at in Central time format not UTC ISO", 
   const queueItem = createPodioItem(200);
   const outboundEvent = createPodioItem(802, {
     "trigger-name": textField("queue-send:200"),
-    "message-id": textField("msg-tz-1"),
+    "message-id": textField("outbound:queue-200"),
+    "text-2": textField("msg-tz-1"),
     "ai-output": textField(
       JSON.stringify({ queue_item_id: 200, provider_message_id: "msg-tz-1" })
     ),
@@ -132,7 +134,7 @@ test("delivery webhook writes delivered_at in Central time format not UTC ISO", 
   });
 
   __setTextgridDeliveryTestDeps({
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (id) => (Number(id) === 200 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async (id, payload) => { updates.push({ id, payload }); },
@@ -185,7 +187,8 @@ test("delivery webhook sets delivery_confirmed Failed and writes failed_reason o
   const queueItem = createPodioItem(300);
   const outboundEvent = createPodioItem(803, {
     "trigger-name": textField("queue-send:300"),
-    "message-id": textField("msg-fail-1"),
+    "message-id": textField("outbound:queue-300"),
+    "text-2": textField("msg-fail-1"),
     "ai-output": textField(
       JSON.stringify({ queue_item_id: 300, provider_message_id: "msg-fail-1" })
     ),
@@ -194,7 +197,7 @@ test("delivery webhook sets delivery_confirmed Failed and writes failed_reason o
   });
 
   __setTextgridDeliveryTestDeps({
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (id) => (Number(id) === 300 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async (id, payload) => { updates.push({ id, payload }); },

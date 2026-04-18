@@ -5,6 +5,7 @@ import {
   __resetBrainAuthorityTestDeps,
   __setBrainAuthorityTestDeps,
   applyBrainStateUpdate,
+  buildBrainRelationshipFields,
   buildDeterministicBrainStateFields,
   buildDeliveryBrainStateFields,
   buildInboundBrainStateFields,
@@ -80,6 +81,7 @@ test("buildDeterministicBrainStateFields maps inbound deterministic state onto l
       last_detected_intent: "Negotiation",
       seller_profile: "Probate",
       language_preference: "Spanish",
+      gender: "Neutral",
       status_ai_managed: "Active Negotiation",
       deal_priority_tag: "Urgent",
       seller_motivation_score: 88,
@@ -109,6 +111,7 @@ test("buildDeterministicBrainStateFields maps inbound deterministic state onto l
   assert.equal(fields["last-detected-intent"], "Negotiation");
   assert.equal(fields["seller-profile"], "Probate");
   assert.equal(fields["language-preference"], "Spanish");
+  assert.equal(fields.gender, "Neutral");
   assert.equal(fields["status-ai-managed"], "Active Negotiation");
   assert.equal(fields["deal-prioirty-tag"], "Urgent");
   assert.equal(fields["seller-motivation-score"], 88);
@@ -143,6 +146,13 @@ test("buildOutboundBrainStateFields advances follow-up automation from authorita
     current_follow_up_step: "None",
     status_ai_managed: "Warm Lead",
     now: "2026-04-11T12:00:00.000Z",
+    extra_fields: buildBrainRelationshipFields({
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: 601,
+      sms_agent_id: 701,
+    }),
   });
 
   assert.equal(fields["last-outbound-message"], "Checking back in");
@@ -150,7 +160,33 @@ test("buildOutboundBrainStateFields advances follow-up automation from authorita
   assert.equal(fields["last-template-sent"], 9901);
   assert.equal(fields["follow-up-step"], "A");
   assert.equal(fields["follow-up-trigger-state"], "Waiting");
+  assert.equal(fields["phone-number"], 401);
+  assert.equal(fields["master-owner"], 201);
+  assert.equal(fields.prospect, 301);
+  assert.deepEqual(fields.properties, [601]);
+  assert.equal(fields["sms-agent"], 701);
   assert.equal(fields["conversation-stage"], undefined);
+});
+
+test("buildBrainRelationshipFields maps authoritative thread links onto Brain fields", () => {
+  assert.deepEqual(
+    buildBrainRelationshipFields({
+      phone_item_id: 401,
+      master_owner_id: 201,
+      prospect_id: 301,
+      property_id: 601,
+      sms_agent_id: 701,
+      ai_agent_assigned_id: 701,
+    }),
+    {
+      "phone-number": 401,
+      "master-owner": 201,
+      prospect: 301,
+      properties: [601],
+      "sms-agent": 701,
+      "ai-agent-assigned": 701,
+    }
+  );
 });
 
 test("buildStageBrainStateFields normalizes live stage labels into authoritative brain stage data", () => {
@@ -206,6 +242,31 @@ test("buildInboundBrainStateFields keeps deterministic stage data while refreshi
     fields["ai-next-message"],
     "I understand. Can you tell me more about condition and timing?"
   );
+});
+
+test("buildInboundBrainStateFields updates inbound truth without sending blank outbound fields", () => {
+  const fields = buildInboundBrainStateFields({
+    message_body: "You can text me later this afternoon.",
+    follow_up_trigger_state: "AI Running",
+    extra_fields: {
+      "master-owner": 201,
+      prospect: 301,
+      properties: [601],
+      "sms-agent": 701,
+    },
+    now: new Date("2026-04-12T15:00:00.000Z"),
+  });
+
+  assert.equal(fields["last-inbound-message"], "You can text me later this afternoon.");
+  assert.deepEqual(fields["last-contact-timestamp"], { start: "2026-04-12 15:00:00" });
+  assert.equal(fields["follow-up-trigger-state"], "AI Running");
+  assert.equal(fields["master-owner"], 201);
+  assert.equal(fields.prospect, 301);
+  assert.deepEqual(fields.properties, [601]);
+  assert.equal(fields["sms-agent"], 701);
+  assert.equal("last-outbound-message" in fields, false);
+  assert.equal("last-sent-time" in fields, false);
+  assert.equal("last-template-sent" in fields, false);
 });
 
 test("buildLinkedMessageEventsFields appends a new message event without duplicating existing refs", () => {

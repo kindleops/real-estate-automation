@@ -10,20 +10,18 @@ import { warn } from "@/lib/logging/logger.js";
 // CONFIG & ENV VALIDATION
 // ══════════════════════════════════════════════════════════════════════════
 
-const TEXTGRID_BASE_URL = (
-  ENV.TEXTGRID_API_BASE_URL ||
-  process.env.TEXTGRID_BASE_URL ||
-  "https://api.textgrid.com/v1"
-).replace(/\/+$/, "");
+const TEXTGRID_API_ORIGIN = "https://api.textgrid.com";
+const TEXTGRID_API_VERSION_PATH = "/2010-04-01";
+const TEXTGRID_ACCOUNT_SID_PLACEHOLDER = "{ACCOUNT_SID}";
+const TEXTGRID_BASE_URL = `${TEXTGRID_API_ORIGIN}${TEXTGRID_API_VERSION_PATH}`;
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_DELAY_MS = 10_000;
-// TextGrid follows the Twilio-compatible REST path:
-//   POST /v1/Accounts/{AccountSid}/Messages
-// The legacy constant below is kept for the explicit-base-URL fallback only.
-const TEXTGRID_MESSAGES_RESOURCE = "/Messages";
+// TextGrid send requests must use the fixed, Twilio-compatible REST path:
+//   POST /2010-04-01/Accounts/{AccountSid}/Messages.json
+const TEXTGRID_MESSAGES_RESOURCE = "/Messages.json";
 
 const TEXTGRID_PROVIDER_CAPABILITIES = Object.freeze({
   message_status_lookup: {
@@ -101,37 +99,18 @@ export function hasTextgridSendCredentials() {
   return getTextgridSendCredentials().configured;
 }
 
-// Build the send endpoint.
+// Build the fixed TextGrid send endpoint.
 //
-// TextGrid uses a Twilio-compatible URL scheme:
-//   POST https://api.textgrid.com/v1/Accounts/{AccountSid}/Messages
-//
-// If TEXTGRID_API_BASE_URL already embeds the /Accounts/{sid} segment (e.g.
-// a custom proxy), the raw /Messages suffix is appended without duplication.
-// If account_sid is omitted and the base URL does NOT contain /accounts/, the
-// function falls back to the legacy flat path so the credential-missing guard
-// in sendTextgridSMS can surface a clean error rather than silently sending to
-// a guaranteed-404 URL.
+// The provider was previously configurable enough to drift onto incorrect
+// routes. Sending is now pinned to TextGrid's versioned Messages.json path.
 export function getTextgridSendEndpoint(account_sid = null) {
   const sid = clean(
     account_sid ||
       ENV.TEXTGRID_ACCOUNT_SID ||
       process.env.TEXTGRID_ACCOUNT_SID
   );
-
-  // Operator supplied a fully-qualified base URL that already contains the
-  // accounts segment — don't double-insert.
-  if (TEXTGRID_BASE_URL.toLowerCase().includes("/accounts/")) {
-    return `${TEXTGRID_BASE_URL}${TEXTGRID_MESSAGES_RESOURCE}`;
-  }
-
-  if (sid) {
-    return `${TEXTGRID_BASE_URL}/Accounts/${encodeURIComponent(sid)}${TEXTGRID_MESSAGES_RESOURCE}`;
-  }
-
-  // Credentials not yet available — return legacy flat path so downstream
-  // credential-missing guard fires with a recognisable endpoint in logs.
-  return `${TEXTGRID_BASE_URL}${TEXTGRID_MESSAGES_RESOURCE}`;
+  const account_segment = sid ? encodeURIComponent(sid) : TEXTGRID_ACCOUNT_SID_PLACEHOLDER;
+  return `${TEXTGRID_BASE_URL}/Accounts/${account_segment}${TEXTGRID_MESSAGES_RESOURCE}`;
 }
 
 export function getTextgridWebhookSecret() {
@@ -157,6 +136,25 @@ export function buildTextgridBearerToken({
     `${normalized_account_sid}:${normalized_auth_token}`,
     "utf8"
   ).toString("base64");
+}
+
+export function buildTextgridSendHeaders(credentials = {}) {
+  return {
+    Authorization: `Bearer ${buildTextgridBearerToken(credentials)}`,
+    "Content-Type": "application/json",
+  };
+}
+
+export function buildTextgridSendPayload({
+  body = "",
+  from = "",
+  to = "",
+} = {}) {
+  return {
+    body: String(body ?? ""),
+    from: clean(from),
+    to: clean(to),
+  };
 }
 
 function buildTextgridWebhookDigests(raw_body, webhook_secret) {
@@ -375,25 +373,20 @@ export async function sendTextgridSMS({
   }
 
   const send_endpoint = getTextgridSendEndpoint(credentials.account_sid);
-
-  const payload = {
-    to: normalized_to,
-    from: normalized_from,
+  // TextGrid rejects the legacy extras we used to send here; only the core
+  // body/from/to JSON object is accepted on the Messages.json endpoint.
+  const payload = buildTextgridSendPayload({
     body: trimmed_body,
-    type: message_type,
-    ...(Array.isArray(media_urls) && media_urls.length > 0 ? { media_urls } : {}),
-    ...(client_reference_id ? { client_reference_id } : {}),
-  };
+    from: normalized_from,
+    to: normalized_to,
+  });
 
   try {
     const res = await requestWithRetry({
       method: "post",
       url: send_endpoint,
-      data: payload,
-      headers: {
-        Authorization: `Bearer ${buildTextgridBearerToken(credentials)}`,
-        "Content-Type": "application/json",
-      },
+      data: JSON.stringify(payload),
+      headers: buildTextgridSendHeaders(credentials),
     });
 
     const data = res.data ?? {};
@@ -401,7 +394,7 @@ export async function sendTextgridSMS({
     return {
       ok: true,
       provider: "textgrid",
-      message_id: data.id ?? data.message_id ?? null,
+      message_id: data.sid ?? data.id ?? data.message_id ?? data.message_sid ?? null,
       status: data.status ?? "sent",
       raw: data,
       to: normalized_to,

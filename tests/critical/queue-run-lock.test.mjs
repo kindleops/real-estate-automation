@@ -217,40 +217,24 @@ test("runSendQueue skips safely when Podio cooldown is active", async () => {
 
 test("forceReleaseStaleLock releases a stuck lock record", async () => {
   let stored_record = {
-    item_id: 9901,
-    fields: [
-      {
-        external_id: "message-id",
-        values: [{ value: "run-lock:queue-run" }],
-      },
-      {
-        external_id: "ai-output",
-        values: [
-          {
-            value: JSON.stringify({
-              status: "locked",
-              scope: "queue-run",
-              lease_token: "tok-stale",
-              expires_at: "2099-01-01T00:00:00.000Z",
-              owner: "queue_runner",
-              acquired_at: "2026-04-04T14:55:00.000Z",
-              acquisition_count: 1,
-            }),
-          },
-        ],
-      },
-    ],
+    status: "locked",
+    scope: "queue-run",
+    lease_token: "tok-stale",
+    expires_at: "2099-01-01T00:00:00.000Z",
+    owner: "queue_runner",
+    acquired_at: "2026-04-04T14:55:00.000Z",
+    acquisition_count: 1,
   };
 
-  let updated_payload = null;
+  let written_state = null;
 
   const result = await forceReleaseStaleLock(
     { scope: "queue-run", reason: "test_manual_recovery" },
     {
-      findRunLockRecord: async () => stored_record,
-      updateMessageEvent: async (item_id, fields) => {
-        updated_payload = { item_id, fields };
-        return { ok: true, item_id };
+      readRuntimeState: async () => stored_record,
+      writeRuntimeState: async ({ state }) => {
+        written_state = state;
+        return { ok: true };
       },
     }
   );
@@ -259,16 +243,14 @@ test("forceReleaseStaleLock releases a stuck lock record", async () => {
   assert.equal(result.released, true);
   assert.equal(result.reason, "test_manual_recovery");
   assert.equal(result.scope, "queue-run");
-  assert.equal(result.record_item_id, 9901);
+  assert.equal(result.record_item_id, "run-locks:queue-run");
   assert.equal(result.was_active, true, "was_active should reflect lock was live");
   assert.equal(result.previous_owner, "queue_runner");
   assert.equal(result.previous_expires_at, "2099-01-01T00:00:00.000Z");
 
-  // The update must write status=released
-  assert.ok(updated_payload, "updateMessageEvent must be called");
-  const written_meta = JSON.parse(updated_payload.fields["ai-output"]);
-  assert.equal(written_meta.status, "released");
-  assert.equal(written_meta.outcome, "test_manual_recovery");
+  assert.ok(written_state, "writeRuntimeState must be called");
+  assert.equal(written_state.status, "released");
+  assert.equal(written_state.outcome, "test_manual_recovery");
 });
 
 // ─── test 5: forceReleaseStaleLock handles no record gracefully ───────────────
@@ -277,8 +259,8 @@ test("forceReleaseStaleLock returns ok=true with released=false when no lock rec
   const result = await forceReleaseStaleLock(
     { scope: "queue-run:999" },
     {
-      findRunLockRecord: async () => null,
-      updateMessageEvent: async () => { throw new Error("should not be called"); },
+      readRuntimeState: async () => null,
+      writeRuntimeState: async () => { throw new Error("should not be called"); },
     }
   );
 

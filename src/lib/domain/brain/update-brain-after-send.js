@@ -5,6 +5,7 @@ import {
 } from "@/lib/podio/apps/phone-numbers.js";
 import {
   applyBrainStateUpdate,
+  buildBrainRelationshipFields,
   buildOutboundBrainStateFields,
 } from "@/lib/domain/brain/brain-authority.js";
 
@@ -17,6 +18,10 @@ export async function updateBrainAfterSend({
   conversation_stage = null,
   current_follow_up_step = null,
   status_ai_managed = null,
+  master_owner_id = null,
+  prospect_id = null,
+  property_id = null,
+  sms_agent_id = null,
   now = new Date().toISOString(),
 } = {}) {
   if (!brain_id && !phone_item_id) {
@@ -37,6 +42,14 @@ export async function updateBrainAfterSend({
     current_follow_up_step,
     status_ai_managed,
     now,
+    extra_fields: buildBrainRelationshipFields({
+      phone_item_id,
+      master_owner_id,
+      prospect_id,
+      property_id,
+      sms_agent_id,
+      ai_agent_assigned_id: sms_agent_id,
+    }),
   });
 
   const phone_fields = {

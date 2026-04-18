@@ -18,7 +18,7 @@ import {
   PHONE_FIELDS,
   updatePhoneNumberItem,
 } from "@/lib/podio/apps/phone-numbers.js";
-import { findMessageEventsByMessageId as findMessageEventItemsByMessageId } from "@/lib/podio/apps/message-events.js";
+import { findMessageEventsByProviderMessageSid as findMessageEventItemsByProviderMessageId } from "@/lib/podio/apps/message-events.js";
 
 import { mapTextgridFailureBucket } from "@/lib/providers/textgrid.js";
 import {
@@ -69,7 +69,7 @@ const defaultDeps = {
   findLatestBrainByMasterOwnerId,
   findLatestBrainByProspectId,
   updatePhoneNumberItem,
-  findMessageEventItemsByMessageId,
+  findMessageEventItemsByProviderMessageId,
   mapTextgridFailureBucket,
   hashIdempotencyPayload,
   // logDeliveryEvent removed — delivery callbacks update existing events only
@@ -223,7 +223,7 @@ function mapFailureReasonToQueueCategory({ error_message, error_status }) {
 
 async function findMessageEventsByProviderMessageId(message_id) {
   if (!message_id) return [];
-  return runtimeDeps.findMessageEventItemsByMessageId(message_id, 50, 0);
+  return runtimeDeps.findMessageEventItemsByProviderMessageId(message_id, 50, 0);
 }
 
 function sortNewestFirst(items = []) {
@@ -744,9 +744,21 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
         event_item_id: event_item.item_id,
         provider_message_id: extracted.message_id,
         delivery_status: normalized_state,
+        provider_delivery_status: extracted.status || normalized_state,
         raw_carrier_status: extracted.error_status || extracted.status || normalized_state,
         failure_bucket,
         is_final_failure: normalized_state === "Failed",
+        occurred_at: extracted.delivered_at || nowIso(),
+        delivered_at:
+          normalized_state === "Delivered"
+            ? extracted.delivered_at || nowIso()
+            : null,
+        failed_at:
+          normalized_state === "Failed"
+            ? extracted.delivered_at || nowIso()
+            : null,
+        failure_code: extracted.error_status,
+        failure_reason: extracted.error_message,
       });
     }
 

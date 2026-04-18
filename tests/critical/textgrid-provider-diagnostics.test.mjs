@@ -2,14 +2,13 @@
  * textgrid-provider-diagnostics.test.mjs
  *
  * Guards that:
- *  1. getTextgridSendEndpoint includes the account SID in the URL path
- *     (TextGrid Twilio-compat scheme: /v1/Accounts/{AccountSid}/Messages).
- *  2. When TEXTGRID_API_BASE_URL already embeds "/accounts/", the SID is NOT
- *     double-inserted.
- *  3. mapTextgridFailureBucket maps HTTP 404 → "Hard Bounce" and the
+ *  1. getTextgridSendEndpoint uses TextGrid's fixed versioned Messages.json URL.
+ *  2. TextGrid auth is Bearer + base64(account_sid:auth_token).
+ *  3. The outbound request body only contains body/from/to.
+ *  4. mapTextgridFailureBucket maps HTTP 404 → "Hard Bounce" and the
  *     send_result returned by sendTextgridSMS exposes the endpoint URL so
  *     operators can diagnose wrong-URL failures from logs.
- *  4. sendTextgridSMS returns { ok: false, error_status: 404, endpoint } when
+ *  5. sendTextgridSMS returns { ok: false, error_status: 404, endpoint } when
  *     the provider responds with 404, without retrying (404 is not retryable).
  */
 
@@ -17,39 +16,72 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildTextgridBearerToken,
+  buildTextgridSendHeaders,
+  buildTextgridSendPayload,
   getTextgridSendEndpoint,
   mapTextgridFailureBucket,
-  sendTextgridSMS,
   normalizePhone,
 } from "@/lib/providers/textgrid.js";
 
-// ── 1. getTextgridSendEndpoint includes account SID ──────────────────────────
+// ── 1. getTextgridSendEndpoint uses fixed Messages.json path ─────────────────
 
-test("getTextgridSendEndpoint: embeds account SID in path for default base URL", () => {
+test("getTextgridSendEndpoint: embeds account SID in the fixed versioned path", () => {
   const endpoint = getTextgridSendEndpoint("ACtest123");
-  assert.ok(
-    endpoint.includes("/Accounts/ACtest123/Messages"),
-    `Expected /Accounts/ACtest123/Messages in "${endpoint}"`
+  assert.equal(
+    endpoint,
+    "https://api.textgrid.com/2010-04-01/Accounts/ACtest123/Messages.json"
   );
 });
 
-test("getTextgridSendEndpoint: falls back gracefully when no account_sid given", () => {
-  // Without an account_sid, the function must still return a non-empty string.
+test("getTextgridSendEndpoint: returns a template endpoint when account_sid is missing", () => {
   const endpoint = getTextgridSendEndpoint();
-  assert.ok(typeof endpoint === "string" && endpoint.startsWith("https://"), `Endpoint must start with https://: ${endpoint}`);
+  assert.equal(
+    endpoint,
+    "https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
+  );
 });
 
-test("getTextgridSendEndpoint: does not double-insert /Accounts/ when base URL already contains it", () => {
-  // Simulate an operator who set TEXTGRID_API_BASE_URL to a full accounts path.
-  // The function should detect the existing segment and not re-insert it.
-  // We test this indirectly: passing a fake sid with a base URL that already
-  // has /accounts/ does not produce a double-segment.
-  const endpoint = getTextgridSendEndpoint("ACtest123");
-  const accounts_count = (endpoint.match(/\/[Aa]ccounts\//g) || []).length;
-  assert.equal(accounts_count, 1, "'/Accounts/' segment must appear exactly once");
+// ── 2. Auth header and payload helpers ───────────────────────────────────────
+
+test("buildTextgridBearerToken: base64 encodes account_sid:auth_token", () => {
+  assert.equal(
+    buildTextgridBearerToken({
+      account_sid: "ABCD12345",
+      auth_token: "1234567890",
+    }),
+    "QUJDRDEyMzQ1OjEyMzQ1Njc4OTA="
+  );
 });
 
-// ── 2. mapTextgridFailureBucket — 404 maps to Hard Bounce ────────────────────
+test("buildTextgridSendHeaders: uses Bearer + base64(account_sid:auth_token)", () => {
+  const headers = buildTextgridSendHeaders({
+    account_sid: "ABCD12345",
+    auth_token: "1234567890",
+  });
+
+  assert.deepEqual(headers, {
+    Authorization: "Bearer QUJDRDEyMzQ1OjEyMzQ1Njc4OTA=",
+    "Content-Type": "application/json",
+  });
+});
+
+test("buildTextgridSendPayload: only includes body, from, and to", () => {
+  assert.deepEqual(
+    buildTextgridSendPayload({
+      body: "Hello there",
+      from: "+15550001111",
+      to: "+15550002222",
+    }),
+    {
+      body: "Hello there",
+      from: "+15550001111",
+      to: "+15550002222",
+    }
+  );
+});
+
+// ── 3. mapTextgridFailureBucket — 404 maps to Hard Bounce ────────────────────
 
 test("mapTextgridFailureBucket: HTTP 404 → Hard Bounce", () => {
   const bucket = mapTextgridFailureBucket({ ok: false, error_status: 404, error_message: "Not Found" });
@@ -71,7 +103,7 @@ test("mapTextgridFailureBucket: null / ok result → null (not a failure)", () =
   assert.equal(mapTextgridFailureBucket({ ok: true }), null);
 });
 
-// ── 3. sendTextgridSMS: 404 response surfaces endpoint in result ──────────────
+// ── 4. sendTextgridSMS: 404 response surfaces endpoint in result ──────────────
 //
 // We use a patched axios to simulate a 404 response without making real
 // network calls.  The result must expose the endpoint URL and error_status so
@@ -119,7 +151,7 @@ test("sendTextgridSMS: 404 response returns ok=false with error_status and endpo
   process.env.TEXTGRID_AUTH_TOKEN = saved_tok ?? "";
 });
 
-// ── 4. 404 is not in the retry set ───────────────────────────────────────────
+// ── 5. 404 is not in the retry set ───────────────────────────────────────────
 
 test("sendTextgridSMS: 404 is not a retryable status", () => {
   // The RETRYABLE_STATUSES set is: 408 409 420 425 429 500 502 503 504.
@@ -129,7 +161,7 @@ test("sendTextgridSMS: 404 is not a retryable status", () => {
   assert.ok(!retryable.has(400), "400 must NOT be a retryable status");
 });
 
-// ── 5. normalizePhone sanity check (used to build to/from in the URL) ─────────
+// ── 6. normalizePhone sanity check (used to build to/from in the URL) ─────────
 
 test("normalizePhone: 10-digit → E.164", () => {
   assert.equal(normalizePhone("9188102617"), "+19188102617");

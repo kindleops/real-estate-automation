@@ -11,8 +11,10 @@ const APP_ID = APP_IDS.message_events;
 
 const EVENT_FIELDS = {
   message_id: "message-id",
+  provider_message_sid: "text-2",
   direction: "direction",
   delivery_status: "status-3",
+  provider_delivery_status: "delivery-status",
   raw_carrier_status: "status-2",
   failure_bucket: "failure-bucket",
 };
@@ -39,6 +41,16 @@ export async function findMessageEventByMessageId(message_id) {
   return findByField(APP_ID, EVENT_FIELDS.message_id, message_id);
 }
 
+export async function findMessageEventByProviderMessageSid(provider_message_sid) {
+  if (!provider_message_sid) return null;
+
+  return (
+    (await findByField(APP_ID, EVENT_FIELDS.provider_message_sid, provider_message_sid)) ||
+    (await findMessageEventByMessageId(provider_message_sid)) ||
+    null
+  );
+}
+
 export async function findMessageEventsByMessageId(
   message_id,
   limit = 50,
@@ -52,6 +64,33 @@ export async function findMessageEventsByMessageId(
     offset,
     options
   );
+}
+
+export async function findMessageEventsByProviderMessageSid(
+  provider_message_sid,
+  limit = 50,
+  offset = 0,
+  options = {}
+) {
+  if (!provider_message_sid) return [];
+
+  const [by_provider_sid, by_legacy_message_id] = await Promise.all([
+    findMessageEvents(
+      { [EVENT_FIELDS.provider_message_sid]: provider_message_sid },
+      limit,
+      offset,
+      options
+    ),
+    findMessageEventsByMessageId(provider_message_sid, limit, offset, options),
+  ]);
+
+  const deduped = new Map();
+  for (const item of [...(by_provider_sid || []), ...(by_legacy_message_id || [])]) {
+    if (!item?.item_id) continue;
+    deduped.set(Number(item.item_id), item);
+  }
+
+  return [...deduped.values()];
 }
 
 export async function findMessageEventsByTriggerName(
@@ -77,6 +116,8 @@ export default {
   updateMessageEvent,
   findMessageEvents,
   findMessageEventByMessageId,
+  findMessageEventByProviderMessageSid,
   findMessageEventsByMessageId,
+  findMessageEventsByProviderMessageSid,
   findMessageEventsByTriggerName,
 };

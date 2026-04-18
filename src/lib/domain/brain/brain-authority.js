@@ -155,6 +155,11 @@ export function buildDeterministicBrainStateFields({
           ),
         }
       : {}),
+    ...(clean(deterministic_state.gender)
+      ? {
+          [BRAIN_FIELDS.gender]: clean(deterministic_state.gender),
+        }
+      : {}),
     ...(clean(deterministic_state.status_ai_managed)
       ? {
           [BRAIN_FIELDS.status_ai_managed]: clean(
@@ -247,6 +252,28 @@ export function buildDeterministicBrainStateFields({
   });
 }
 
+export function buildBrainRelationshipFields({
+  phone_item_id = null,
+  master_owner_id = null,
+  prospect_id = null,
+  property_id = null,
+  sms_agent_id = null,
+  ai_agent_assigned_id = null,
+} = {}) {
+  return compactFields({
+    ...(toId(phone_item_id) ? { [BRAIN_FIELDS.phone_number]: toId(phone_item_id) } : {}),
+    ...(toId(master_owner_id)
+      ? { [BRAIN_FIELDS.master_owner]: toId(master_owner_id) }
+      : {}),
+    ...(toId(prospect_id) ? { [BRAIN_FIELDS.prospect]: toId(prospect_id) } : {}),
+    ...(toId(property_id) ? { [BRAIN_FIELDS.properties]: [toId(property_id)] } : {}),
+    ...(toId(sms_agent_id) ? { [BRAIN_FIELDS.sms_agent]: toId(sms_agent_id) } : {}),
+    ...(toId(ai_agent_assigned_id)
+      ? { [BRAIN_FIELDS.ai_agent_assigned]: toId(ai_agent_assigned_id) }
+      : {}),
+  });
+}
+
 export function buildInboundBrainStateFields({
   message_body = "",
   follow_up_trigger_state = "AI Running",
@@ -270,6 +297,7 @@ export function buildOutboundBrainStateFields({
   current_follow_up_step = null,
   status_ai_managed = null,
   now = new Date().toISOString(),
+  extra_fields = {},
 } = {}) {
   const follow_up_state = buildOutboundFollowUpState({
     conversation_stage,
@@ -287,6 +315,7 @@ export function buildOutboundBrainStateFields({
     [BRAIN_FIELDS.status_ai_managed]: follow_up_state.status_ai_managed,
     [BRAIN_FIELDS.next_follow_up_due_at]: follow_up_state.next_follow_up_due_at ?? null,
     ...(template_id ? { [BRAIN_FIELDS.last_template_sent]: template_id } : {}),
+    ...(extra_fields || {}),
   });
 }
 
@@ -357,6 +386,7 @@ export default {
   __resetBrainAuthorityTestDeps,
   applyBrainStateUpdate,
   buildDeterministicBrainStateFields,
+  buildBrainRelationshipFields,
   buildInboundBrainStateFields,
   buildOutboundBrainStateFields,
   buildDeliveryBrainStateFields,

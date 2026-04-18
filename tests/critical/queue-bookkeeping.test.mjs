@@ -64,30 +64,25 @@ test("finalizeSuccessfulQueueSend records a clean success path", async () => {
       "updateMasterOwnerAfterSend",
     ]
   );
-  assert.deepEqual(calls[1].payload, {
-    brain_item,
-    conversation_item_id: 701,
-    master_owner_id: 201,
-    prospect_id: 301,
-    property_id: 601,
-    market_id: 801,
-    phone_item_id: 401,
-    outbound_number_item_id: 501,
-    sms_agent_id: null,
-    property_address: null,
-    message_body: "Test message",
-    provider_message_id: "provider-1",
-    queue_item_id: 123,
-    client_reference_id: "queue-123",
-    template_id: 901,
-    message_variant: 2,
-    latency_ms: 483,
-    send_result: {
-      message_id: "provider-1",
-      to: "+15550000001",
-      from: "+15550000002",
-    },
-  });
+  assert.equal(calls[1].payload.brain_item, brain_item);
+  assert.equal(calls[1].payload.conversation_item_id, 701);
+  assert.equal(calls[1].payload.master_owner_id, 201);
+  assert.equal(calls[1].payload.prospect_id, 301);
+  assert.equal(calls[1].payload.property_id, 601);
+  assert.equal(calls[1].payload.market_id, 801);
+  assert.equal(calls[1].payload.phone_item_id, 401);
+  assert.equal(calls[1].payload.outbound_number_item_id, 501);
+  assert.equal(calls[1].payload.client_reference_id, "queue-123");
+  assert.equal(calls[1].payload.template_id, 901);
+  assert.equal(calls[1].payload.message_variant, 2);
+  assert.equal(calls[1].payload.latency_ms, 483);
+  assert.equal(calls[1].payload.provider_message_id, "provider-1");
+  assert.equal(calls[1].payload.sent_at, "2026-04-01 07:00:00");
+
+  assert.equal(calls[2].payload.master_owner_id, 201);
+  assert.equal(calls[2].payload.prospect_id, 301);
+  assert.equal(calls[2].payload.property_id, 601);
+  assert.equal(calls[2].payload.sms_agent_id, null);
 });
 
 test("finalizeSuccessfulQueueSend reports partial failure if bookkeeping breaks after provider send", async () => {

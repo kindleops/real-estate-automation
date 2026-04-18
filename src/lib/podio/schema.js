@@ -49,9 +49,8 @@ const MESSAGE_EVENT_EVENT_TYPE_COMPAT_VALUES = new Set([
   "seller outbound sms",
   "delivery update",
   "send failure",
-  "stage transition",
-  "ai classification",
-  "manual note",
+  "seller opt out",
+  "seller stage transition",
 ]);
 
 const MESSAGE_EVENT_AI_ROUTE_COMPAT_VALUES = new Set([

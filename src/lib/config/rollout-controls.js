@@ -8,6 +8,7 @@ export const DEFAULT_FEEDER_BUFFER_REPLENISH_TARGET = 750;
 export const DEFAULT_FEEDER_BUFFER_HEALTHY_TARGET = 1500;
 export const DEFAULT_FEEDER_BUFFER_IDEAL_TARGET = 2000;
 export const DEFAULT_FEEDER_BUFFER_MIN_QUEUED = DEFAULT_FEEDER_BUFFER_REPLENISH_TARGET;
+export const DEFAULT_FEEDER_EVALUATION_LOCK_HOURS = 4;
 
 const FEEDER_SOURCE_VIEW_SAFE_NAME_PATTERNS = Object.freeze([
   /^SMS \/ TIER #1 \/ ALL$/i,
@@ -84,6 +85,10 @@ export function getRolloutControls() {
     feeder_buffer_healthy_target,
     feeder_buffer_ideal_target,
     feeder_max_batch: normalizePositiveInteger(ENV.ROLLOUT_FEEDER_MAX_BATCH, 1000),
+    feeder_evaluation_lock_hours: normalizePositiveInteger(
+      ENV.ROLLOUT_FEEDER_EVALUATION_LOCK_HOURS,
+      DEFAULT_FEEDER_EVALUATION_LOCK_HOURS
+    ),
     queue_max_batch: normalizePositiveInteger(ENV.ROLLOUT_QUEUE_MAX_BATCH, 50),
     retry_max_batch: normalizePositiveInteger(ENV.ROLLOUT_RETRY_MAX_BATCH, 50),
     reconcile_max_batch: normalizePositiveInteger(ENV.ROLLOUT_RECONCILE_MAX_BATCH, 50),
@@ -316,6 +321,7 @@ export default {
   DEFAULT_FEEDER_BATCH_SIZE,
   DEFAULT_FEEDER_SCAN_LIMIT,
   DEFAULT_FEEDER_BUFFER_MIN_QUEUED,
+  DEFAULT_FEEDER_EVALUATION_LOCK_HOURS,
   getRolloutControls,
   isLiveRolloutMode,
   resolveMutationDryRun,

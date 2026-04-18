@@ -528,16 +528,12 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
         allowed_currencies: null,
         referenced_app_ids: [],
         options: [
-          { id: 1, text: "Calm" },
-          { id: 2, text: "Anxious" },
-          { id: 3, text: "Motivated" },
-          { id: 4, text: "Resistant" },
-          { id: 5, text: "Grieving" },
-          { id: 6, text: "Confused" },
-          { id: 7, text: "Angry" },
-          { id: 8, text: "Excited" },
-          { id: 9, text: "Indifferent" },
-          { id: 10, text: "Unknown" }
+          { id: 1, text: "Seller Outbound SMS" },
+          { id: 2, text: "Send Failure" },
+          { id: 3, text: "Seller Inbound SMS" },
+          { id: 4, text: "Delivery Update" },
+          { id: 5, text: "Seller Opt Out" },
+          { id: 6, text: "Seller Stage Transition" },
         ],
       },
       "text-2": {
@@ -556,6 +552,15 @@ export const PODIO_ATTACHED_SCHEMA_SUPPLEMENT = Object.freeze({
         multiple: false,
         allowed_currencies: null,
         referenced_app_ids: [APP_IDS.ai_conversation_brain],
+        options: [],
+      },
+      "sms-agent": {
+        ...(BASE_MESSAGE_EVENTS_SCHEMA?.fields?.["sms-agent"] || {}),
+        label: "SMS Agent",
+        type: "app",
+        multiple: true,
+        allowed_currencies: null,
+        referenced_app_ids: [APP_IDS.agents],
         options: [],
       },
       "template": {

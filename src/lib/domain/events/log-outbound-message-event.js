@@ -1,44 +1,29 @@
-// ─── log-outbound-message-event.js ───────────────────────────────────────
 import { createMessageEvent, getCategoryValue } from "@/lib/providers/podio.js";
 import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
 import {
   buildQueueMessageEventMetadata,
   buildQueueSendTriggerName,
-  serializeMessageEventMetadata,
 } from "@/lib/domain/events/message-event-metadata.js";
+import {
+  buildBaseSellerMessageEventFields,
+  buildOutboundMessageEventKey,
+} from "@/lib/domain/events/seller-message-event.js";
 import { warn } from "@/lib/logging/logger.js";
 
-const EVENT_FIELDS = {
-  message_id: "message-id",
-  provider_message_sid: "text-2",
-  timestamp: "timestamp",
-  direction: "direction",
-  event_type: "category",
-  message_variant: "message-variant",
-  master_owner: "master-owner",
-  prospect: "linked-seller",
-  property: "property",
-  textgrid_number: "textgrid-number",
-  phone_number: "phone-number",
-  sms_agent: "sms-agent",
-  conversation: "conversation",
-  market: "market",
-  ai_route: "ai-route",
-  processed_by: "processed-by",
-  source_app: "source-app",
-  trigger_name: "trigger-name",
-  message: "message",
-  template: "template",
-  property_address: "property-address",
-  character_count: "character-count",
-  delivery_status: "status-3",
-  raw_carrier_status: "status-2",
-  latency_ms: "latency-ms",
-  ai_output: "ai-output",
+const defaultDeps = {
+  createMessageEvent,
+  linkMessageEventToBrain,
 };
+
+let runtimeDeps = { ...defaultDeps };
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function asValidId(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 // Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago so that
@@ -59,14 +44,12 @@ function nowCentral() {
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
-function mapDeliveryStatusForEvent(send_result) {
-  if (!send_result?.ok) return "Failed";
-  return "Sent";
+export function __setLogOutboundMessageEventTestDeps(overrides = {}) {
+  runtimeDeps = { ...runtimeDeps, ...overrides };
 }
 
-function asArrayAppRef(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
+export function __resetLogOutboundMessageEventTestDeps() {
+  runtimeDeps = { ...defaultDeps };
 }
 
 export function buildOutboundMessageEventFields({
@@ -96,124 +79,117 @@ export function buildOutboundMessageEventFields({
   processed_by = "Queue Runner",
   source_app = "Send Queue",
   trigger_name = "queue-send",
+  sent_at = null,
+  prior_message_id = null,
+  response_to_message_id = null,
 } = {}) {
+  const resolved_provider_message_id =
+    clean(provider_message_id) || clean(send_result?.message_id) || null;
+  const resolved_conversation_item_id =
+    asValidId(conversation_item_id) ||
+    asValidId(brain_item?.item_id) ||
+    null;
   const ai_route = getCategoryValue(brain_item, "ai-route", null);
-  const resolved_message_id = provider_message_id || client_reference_id || null;
-  const conversation_relation = asArrayAppRef(conversation_item_id || brain_item?.item_id);
-  const missing_relation_warnings = [];
+  const stage_before = getCategoryValue(brain_item, "conversation-stage", null);
+  const relationship_ids = {
+    master_owner_id,
+    prospect_id,
+    property_id,
+    market_id,
+    phone_item_id,
+    textgrid_number_item_id: outbound_number_item_id,
+    sms_agent_id,
+    conversation_item_id: resolved_conversation_item_id,
+    template_id,
+  };
+  const invalid_relationships = Object.entries({
+    master_owner_id,
+    prospect_id,
+    property_id,
+    market_id,
+    phone_item_id,
+    outbound_number_item_id,
+    sms_agent_id,
+    conversation_item_id: resolved_conversation_item_id,
+    template_id,
+  })
+    .filter(([, value]) => value !== null && value !== undefined && !asValidId(value))
+    .map(([key]) => key);
 
-  if (phone_item_id && !asArrayAppRef(phone_item_id)) {
-    missing_relation_warnings.push("phone_relation_invalid");
-  }
-  if (property_id && !asArrayAppRef(property_id)) {
-    missing_relation_warnings.push("property_relation_invalid");
-  }
-  if (template_id && !asArrayAppRef(template_id)) {
-    missing_relation_warnings.push("template_relation_invalid");
-  }
-  if ((conversation_item_id || brain_item?.item_id) && !asArrayAppRef(conversation_item_id || brain_item?.item_id)) {
-    missing_relation_warnings.push("conversation_relation_invalid");
-  }
-
-  if (missing_relation_warnings.length) {
+  if (invalid_relationships.length) {
     warn("events.outbound_relation_payload_incomplete", {
-      master_owner_id,
-      prospect_id,
-      property_id,
-      market_id,
-      phone_item_id,
-      outbound_number_item_id,
-      conversation_item_id: conversation_item_id || brain_item?.item_id || null,
-      template_id,
-      warnings: missing_relation_warnings,
+      queue_item_id,
+      invalid_relationships,
     });
   }
 
-  return {
-    [EVENT_FIELDS.message_id]: resolved_message_id,
-    [EVENT_FIELDS.provider_message_sid]: provider_message_id || null,
-    [EVENT_FIELDS.direction]: "Outbound",
-    [EVENT_FIELDS.event_type]: "Seller Outbound SMS",
-    [EVENT_FIELDS.timestamp]: { start: nowCentral() },
-    [EVENT_FIELDS.message]: String(message_body || ""),
-    [EVENT_FIELDS.character_count]: String(message_body || "").length,
-    [EVENT_FIELDS.delivery_status]: mapDeliveryStatusForEvent(send_result),
-    [EVENT_FIELDS.raw_carrier_status]:
+  return buildBaseSellerMessageEventFields({
+    message_event_key: buildOutboundMessageEventKey({
+      queue_item_id,
+      client_reference_id,
+      provider_message_id: resolved_provider_message_id,
+    }),
+    provider_message_id: resolved_provider_message_id,
+    timestamp: sent_at || nowCentral(),
+    direction: "Outbound",
+    event_type: "Seller Outbound SMS",
+    message_body,
+    delivery_status: send_result?.ok === false ? "Failed" : "Sent",
+    provider_delivery_status: send_result?.status || "sent",
+    raw_carrier_status:
       send_result?.status || send_result?.error_status || "sent",
-    [EVENT_FIELDS.processed_by]: processed_by,
-    [EVENT_FIELDS.source_app]: source_app,
-    [EVENT_FIELDS.trigger_name]:
+    message_variant,
+    latency_ms,
+    property_address,
+    ai_route,
+    processed_by,
+    source_app,
+    trigger_name:
       queue_item_id ? buildQueueSendTriggerName(queue_item_id) : trigger_name,
-    [EVENT_FIELDS.ai_output]: serializeMessageEventMetadata(
-      buildQueueMessageEventMetadata({
+    prior_message_id,
+    response_to_message_id,
+    stage_before,
+    stage_after: clean(next_expected_stage) || null,
+    relationship_ids,
+    metadata: buildQueueMessageEventMetadata({
+      queue_item_id,
+      client_reference_id,
+      provider_message_id: resolved_provider_message_id,
+      event_kind: "outbound_send",
+      message_event_key: buildOutboundMessageEventKey({
         queue_item_id,
         client_reference_id,
-        provider_message_id,
-        event_kind: "outbound_send",
-        message_variant,
-        master_owner_id,
-        prospect_id,
-        property_id,
-        market_id,
-        phone_item_id,
-        outbound_number_item_id,
-        conversation_item_id: conversation_item_id || brain_item?.item_id || null,
-        template_id,
-        selected_use_case: clean(selected_use_case) || null,
-        template_use_case: clean(template_use_case) || null,
-        next_expected_stage: clean(next_expected_stage) || null,
-        selected_variant_group: clean(selected_variant_group) || null,
-        selected_tone: clean(selected_tone) || null,
-      })
-    ),
-    ...(message_variant !== null && message_variant !== undefined
-      ? { [EVENT_FIELDS.message_variant]: Number(message_variant) || undefined }
-      : {}),
-    ...(asArrayAppRef(master_owner_id)
-      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
-      : {}),
-    ...(asArrayAppRef(prospect_id)
-      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
-      : {}),
-    ...(asArrayAppRef(property_id)
-      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
-      : {}),
-    ...(asArrayAppRef(market_id)
-      ? { [EVENT_FIELDS.market]: asArrayAppRef(market_id) }
-      : {}),
-    ...(asArrayAppRef(phone_item_id)
-      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
-      : {}),
-    ...(asArrayAppRef(outbound_number_item_id)
-      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(outbound_number_item_id) }
-      : {}),
-    ...(conversation_relation
-      ? { [EVENT_FIELDS.conversation]: conversation_relation }
-      : {}),
-    ...(asArrayAppRef(template_id)
-      ? { [EVENT_FIELDS.template]: asArrayAppRef(template_id) }
-      : {}),
-    ...(asArrayAppRef(sms_agent_id)
-      ? { [EVENT_FIELDS.sms_agent]: asArrayAppRef(sms_agent_id) }
-      : {}),
-    ...(clean(property_address)
-      ? { [EVENT_FIELDS.property_address]: clean(property_address) }
-      : {}),
-    ...(latency_ms !== null && latency_ms !== undefined
-      ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }
-      : {}),
-    ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
-  };
+        provider_message_id: resolved_provider_message_id,
+      }),
+      message_variant,
+      master_owner_id: asValidId(master_owner_id),
+      prospect_id: asValidId(prospect_id),
+      property_id: asValidId(property_id),
+      market_id: asValidId(market_id),
+      phone_item_id: asValidId(phone_item_id),
+      outbound_number_item_id: asValidId(outbound_number_item_id),
+      sms_agent_id: asValidId(sms_agent_id),
+      conversation_item_id: resolved_conversation_item_id,
+      template_id: asValidId(template_id),
+      selected_use_case: clean(selected_use_case) || null,
+      template_use_case: clean(template_use_case) || null,
+      next_expected_stage: clean(next_expected_stage) || null,
+      selected_variant_group: clean(selected_variant_group) || null,
+      selected_tone: clean(selected_tone) || null,
+    }),
+  });
 }
 
 export async function logOutboundMessageEvent(payload = {}) {
   const fields = buildOutboundMessageEventFields(payload);
+  const created = await runtimeDeps.createMessageEvent(fields);
 
-  const created = await createMessageEvent(fields);
-
-  await linkMessageEventToBrain({
+  await runtimeDeps.linkMessageEventToBrain({
     brain_item: payload.brain_item || null,
-    brain_id: payload.conversation_item_id || payload.brain_item?.item_id || null,
+    brain_id:
+      payload.conversation_item_id ||
+      payload.brain_item?.item_id ||
+      null,
     message_event_id: created?.item_id ?? null,
   });
 

@@ -32,10 +32,10 @@ import {
   buildQueueClientReferenceId,
   buildQueueMessageEventMetadata,
   buildQueueSendFailedTriggerName,
-  serializeMessageEventMetadata,
 } from "@/lib/domain/events/message-event-metadata.js";
 import { updateBrainAfterSend } from "@/lib/domain/brain/update-brain-after-send.js";
 import { updateMasterOwnerAfterSend } from "@/lib/domain/master-owners/update-master-owner-after-send.js";
+import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { renderTemplate } from "@/lib/domain/templates/render-template.js";
@@ -59,6 +59,10 @@ import {
   collapseConversationStageToLegacy,
   deriveQueueCurrentStage,
 } from "@/lib/domain/communications-engine/state-machine.js";
+import {
+  buildBaseSellerMessageEventFields,
+  buildFailedMessageEventKey,
+} from "@/lib/domain/events/seller-message-event.js";
 
 import { info, warn } from "@/lib/logging/logger.js";
 
@@ -128,8 +132,8 @@ function nowIso() {
 // Returns current time as "YYYY-MM-DD HH:MM:SS" in America/Chicago for
 // operational Podio date fields (Sent At).  Podio stores the string as-is so
 // ops sees Central hours rather than UTC.
-function nowPodioDateTimeCentral() {
-  const now = new Date();
+function nowPodioDateTimeCentral(value = null) {
+  const now = value ? new Date(value) : new Date();
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
     year: "numeric",
@@ -996,7 +1000,9 @@ export function buildFailedOutboundMessageEventFields({
   market_id,
   phone_item_id,
   outbound_number_item_id,
+  sms_agent_id = null,
   template_id,
+  property_address = null,
   message_body,
   message_variant = null,
   latency_ms = null,
@@ -1009,9 +1015,11 @@ export function buildFailedOutboundMessageEventFields({
   retry_count,
   max_retries,
   client_reference_id,
+  prior_message_id = null,
+  response_to_message_id = null,
 }) {
   const ai_route = getCategoryValue(brain_item, "ai-route", null);
-  const resolved_message_id = send_result.message_id || client_reference_id || null;
+  const stage_before = getCategoryValue(brain_item, "conversation-stage", null);
   const missing_relation_warnings = [];
 
   if (phone_item_id && !asArrayAppRef(phone_item_id)) {
@@ -1022,6 +1030,9 @@ export function buildFailedOutboundMessageEventFields({
   }
   if (template_id && !asArrayAppRef(template_id)) {
     missing_relation_warnings.push("template_relation_invalid");
+  }
+  if (sms_agent_id && !asArrayAppRef(sms_agent_id)) {
+    missing_relation_warnings.push("sms_agent_relation_invalid");
   }
   if (conversation_item_id && !asArrayAppRef(conversation_item_id)) {
     missing_relation_warnings.push("conversation_relation_invalid");
@@ -1036,86 +1047,91 @@ export function buildFailedOutboundMessageEventFields({
       market_id,
       phone_item_id,
       outbound_number_item_id,
+      sms_agent_id,
       conversation_item_id,
       template_id,
       warnings: missing_relation_warnings,
     });
   }
 
-  return {
-    [EVENT_FIELDS.message_id]: resolved_message_id,
-    [EVENT_FIELDS.provider_message_sid]: send_result.message_id || null,
-    [EVENT_FIELDS.direction]: "Outbound",
-    [EVENT_FIELDS.event_type]: "Send Failure",
-    [EVENT_FIELDS.timestamp]: { start: nowIso() },
-    [EVENT_FIELDS.message]: message_body,
-    [EVENT_FIELDS.character_count]: String(message_body || "").length,
-    [EVENT_FIELDS.delivery_status]: "Failed",
-    [EVENT_FIELDS.raw_carrier_status]: String(send_result.error_status || send_result.status || ""),
-    [EVENT_FIELDS.failure_bucket]: mapTextgridFailureBucket(send_result) || "Other",
-    [EVENT_FIELDS.is_final_failure]: retry_count + 1 >= max_retries ? "Yes" : "No",
-    [EVENT_FIELDS.processed_by]: "Queue Runner",
-    [EVENT_FIELDS.source_app]: "Send Queue",
-    [EVENT_FIELDS.trigger_name]:
+  return buildBaseSellerMessageEventFields({
+    message_event_key: buildFailedMessageEventKey({
+      queue_item_id,
+      client_reference_id,
+      provider_message_id: send_result.message_id,
+    }),
+    provider_message_id: send_result.message_id || null,
+    timestamp: nowIso(),
+    direction: "Outbound",
+    event_type: "Send Failure",
+    message_body,
+    delivery_status: "Failed",
+    provider_delivery_status: send_result.status || "failed",
+    raw_carrier_status: String(send_result.error_status || send_result.status || ""),
+    message_variant,
+    latency_ms,
+    property_address,
+    ai_route,
+    processed_by: "Queue Runner",
+    source_app: "Send Queue",
+    trigger_name:
       queue_item_id ? buildQueueSendFailedTriggerName(queue_item_id) : "queue-send-failed",
-    [EVENT_FIELDS.ai_output]: serializeMessageEventMetadata(
-      buildQueueMessageEventMetadata({
+    failure_bucket: mapTextgridFailureBucket(send_result) || "Other",
+    is_final_failure: retry_count + 1 >= max_retries,
+    prior_message_id,
+    response_to_message_id,
+    stage_before,
+    stage_after: clean(next_expected_stage) || null,
+    relationship_ids: {
+      master_owner_id,
+      prospect_id,
+      property_id,
+      market_id,
+      phone_item_id,
+      textgrid_number_item_id: outbound_number_item_id,
+      sms_agent_id,
+      conversation_item_id,
+      template_id,
+    },
+    metadata: buildQueueMessageEventMetadata({
+      queue_item_id,
+      client_reference_id,
+      provider_message_id: send_result.message_id,
+      message_event_key: buildFailedMessageEventKey({
         queue_item_id,
         client_reference_id,
         provider_message_id: send_result.message_id,
-        event_kind: "outbound_send_failed",
-        message_variant,
-        master_owner_id,
-        prospect_id,
-        property_id,
-        market_id,
-        phone_item_id,
-        outbound_number_item_id,
-        conversation_item_id,
-        template_id,
-        selected_use_case: clean(selected_use_case) || null,
-        template_use_case: clean(template_use_case) || null,
-        next_expected_stage: clean(next_expected_stage) || null,
-        selected_variant_group: clean(selected_variant_group) || null,
-        selected_tone: clean(selected_tone) || null,
-      })
-    ),
-    ...(message_variant !== null && message_variant !== undefined
-      ? { [EVENT_FIELDS.message_variant]: Number(message_variant) || 0 }
-      : {}),
-    ...(asArrayAppRef(master_owner_id)
-      ? { [EVENT_FIELDS.master_owner]: asArrayAppRef(master_owner_id) }
-      : {}),
-    ...(asArrayAppRef(prospect_id)
-      ? { [EVENT_FIELDS.prospect]: asArrayAppRef(prospect_id) }
-      : {}),
-    ...(asArrayAppRef(property_id)
-      ? { [EVENT_FIELDS.property]: asArrayAppRef(property_id) }
-      : {}),
-    ...(asArrayAppRef(market_id)
-      ? { [EVENT_FIELDS.market]: asArrayAppRef(market_id) }
-      : {}),
-    ...(asArrayAppRef(phone_item_id)
-      ? { [EVENT_FIELDS.phone_number]: asArrayAppRef(phone_item_id) }
-      : {}),
-    ...(asArrayAppRef(outbound_number_item_id)
-      ? { [EVENT_FIELDS.textgrid_number]: asArrayAppRef(outbound_number_item_id) }
-      : {}),
-    ...(asArrayAppRef(conversation_item_id)
-      ? { [EVENT_FIELDS.conversation]: asArrayAppRef(conversation_item_id) }
-      : {}),
-    ...(asArrayAppRef(template_id)
-      ? { [EVENT_FIELDS.template]: asArrayAppRef(template_id) }
-      : {}),
-    ...(latency_ms !== null && latency_ms !== undefined
-      ? { [EVENT_FIELDS.latency_ms]: Number(latency_ms) || 0 }
-      : {}),
-    ...(ai_route ? { [EVENT_FIELDS.ai_route]: ai_route } : {}),
-  };
+      }),
+      event_kind: "outbound_send_failed",
+      message_variant,
+      master_owner_id,
+      prospect_id,
+      property_id,
+      market_id,
+      phone_item_id,
+      outbound_number_item_id,
+      sms_agent_id,
+      conversation_item_id,
+      template_id,
+      selected_use_case: clean(selected_use_case) || null,
+      template_use_case: clean(template_use_case) || null,
+      next_expected_stage: clean(next_expected_stage) || null,
+      selected_variant_group: clean(selected_variant_group) || null,
+      selected_tone: clean(selected_tone) || null,
+    }),
+  });
 }
 
 export async function logFailedOutboundMessageEvent(payload = {}) {
-  return createMessageEvent(buildFailedOutboundMessageEventFields(payload));
+  const created = await createMessageEvent(buildFailedOutboundMessageEventFields(payload));
+
+  await linkMessageEventToBrain({
+    brain_item: payload.brain_item || null,
+    brain_id: payload.conversation_item_id || payload.brain_item?.item_id || null,
+    message_event_id: created?.item_id ?? null,
+  });
+
+  return created;
 }
 
 export async function failQueueItem(
@@ -1224,6 +1240,8 @@ export async function finalizeSuccessfulQueueSend({
   current_total_messages_sent = 0,
   client_reference_id = null,
   now = nowIso(),
+  prior_message_id = null,
+  response_to_message_id = null,
 } = {}, deps = {}) {
   const update = deps.updateItem || updateItem;
   const logOutbound = deps.logOutboundMessageEvent || logOutboundMessageEvent;
@@ -1232,11 +1250,12 @@ export async function finalizeSuccessfulQueueSend({
     deps.updateMasterOwnerAfterSend || updateMasterOwnerAfterSend;
 
   const bookkeeping_errors = [];
+  let outbound_event = null;
 
   // Sent At is written in America/Chicago so ops sees Central time in Podio.
   // `now` (UTC ISO) is kept for master-owner bookkeeping; the queue field gets
   // the Central-formatted string so Podio displays it without re-conversion.
-  const sent_at_central = nowPodioDateTimeCentral();
+  const sent_at_central = nowPodioDateTimeCentral(now);
 
   info("queue.sent_at_timezone_conversion", {
     queue_item_id,
@@ -1258,7 +1277,7 @@ export async function finalizeSuccessfulQueueSend({
   }
 
   try {
-    await logOutbound({
+    outbound_event = await logOutbound({
       brain_item,
       conversation_item_id: conversation_item_id || brain_id,
       master_owner_id,
@@ -1282,6 +1301,9 @@ export async function finalizeSuccessfulQueueSend({
       ...(next_expected_stage ? { next_expected_stage } : {}),
       ...(selected_variant_group ? { selected_variant_group } : {}),
       ...(selected_tone ? { selected_tone } : {}),
+      ...(prior_message_id ? { prior_message_id } : {}),
+      ...(response_to_message_id ? { response_to_message_id } : {}),
+      sent_at: sent_at_central,
     });
   } catch (error) {
     bookkeeping_errors.push(
@@ -1303,6 +1325,11 @@ export async function finalizeSuccessfulQueueSend({
       current_follow_up_step: getCategoryValue(brain_item, "follow-up-step", null),
       status_ai_managed: getCategoryValue(brain_item, "status-ai-managed", null),
       now,
+      master_owner_id,
+      prospect_id,
+      property_id,
+      sms_agent_id,
+      message_event_id: outbound_event?.item_id || null,
     });
   } catch (error) {
     bookkeeping_errors.push(
@@ -1590,7 +1617,9 @@ export async function processSendQueueItem(queue_item_id) {
         market_id,
         phone_item_id,
         outbound_number_item_id,
+        sms_agent_id,
         template_id: template_relation_id,
+        property_address,
         message_body,
         message_variant,
         latency_ms: 0,
@@ -1737,6 +1766,13 @@ export async function processSendQueueItem(queue_item_id) {
     }
   }
 
+  const latest_outbound_event =
+    recent_events_result?.events?.find(
+      (event) => lower(event.direction || "") === "outbound"
+    ) || null;
+  const prior_message_id = clean(latest_outbound_event?.message_id) || null;
+  const response_to_message_id = prior_message_id;
+
   const { property_id: resolved_property_id, market_id: resolved_market_id } =
     await resolveQueuePropertyAndMarket({
       property_id,
@@ -1846,7 +1882,9 @@ export async function processSendQueueItem(queue_item_id) {
         market_id: resolved_market_id,
         phone_item_id,
         outbound_number_item_id,
+        sms_agent_id,
         template_id: template_relation_id,
+        property_address,
         message_body,
         message_variant,
         latency_ms,
@@ -1859,6 +1897,8 @@ export async function processSendQueueItem(queue_item_id) {
         retry_count,
         max_retries,
         client_reference_id,
+        prior_message_id,
+        response_to_message_id,
       });
     } catch (error) {
       bookkeeping_errors.push(
@@ -1907,6 +1947,8 @@ export async function processSendQueueItem(queue_item_id) {
     send_result,
     current_total_messages_sent,
     client_reference_id,
+    prior_message_id,
+    response_to_message_id,
   });
 
   info("queue.process_completed", {

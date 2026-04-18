@@ -73,9 +73,13 @@ test("runFeederWithRollout defaults cron feeder source to Tier 1 ALL", async () 
   assert.equal(execute_calls.length, 1);
   assert.equal(execute_calls[0].source_view_id, null);
   assert.equal(execute_calls[0].source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
+  assert.equal(result.rollout.requested_source_view_id, null);
+  assert.equal(result.rollout.requested_source_view_name, null);
   assert.equal(result.rollout.effective_source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
   assert.equal(result.rollout.resolved_source_view_id, 61752339);
   assert.equal(result.rollout.resolved_source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
+  assert.equal(result.rollout.source_view_fallback_occurred, false);
+  assert.equal(result.rollout.source_view_fallback_reason, null);
 
   const scope = entries.find(
     (entry) => entry.event === "master_owner_feeder.source_view_scope_evaluated"
@@ -93,6 +97,7 @@ test("runFeederWithRollout defaults cron feeder source to Tier 1 ALL", async () 
   assert.ok(completed, "completion log must be emitted");
   assert.equal(completed.effective_source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
   assert.equal(completed.resolved_source_view_name, DEFAULT_LIVE_FEEDER_SOURCE_VIEW_NAME);
+  assert.equal(completed.source_view_fallback_occurred, false);
   assert.equal(completed.scanned_count, 0);
 });
 

@@ -383,7 +383,8 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
 
   const outboundEvent = createPodioItem(801, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("provider-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("provider-1"),
     "processed-by": categoryField("Scheduled Campaign"),
     "source-app": categoryField("Send Queue"),
     "ai-output": textField(
@@ -414,7 +415,7 @@ test("delivery webhook ignores replay after exact queue correlation succeeds", a
     hashIdempotencyPayload: ledger.hash,
     info: () => {},
     warn: () => {},
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async (item_id, payload) => {
@@ -466,6 +467,7 @@ test("delivery webhook updates verification send events without queue correlatio
   const verificationEvent = createPodioItem(811, {
     "trigger-name": textField("verification-textgrid-send:run-1"),
     "message-id": textField("provider-verify-1"),
+    "text-2": textField("provider-verify-1"),
     "ai-output": textField(
       JSON.stringify({
         verification_run_id: "run-1",
@@ -482,7 +484,7 @@ test("delivery webhook updates verification send events without queue correlatio
     hashIdempotencyPayload: ledger.hash,
     info: () => {},
     warn: () => {},
-    findMessageEventItemsByMessageId: async () => [verificationEvent],
+    findMessageEventItemsByProviderMessageId: async () => [verificationEvent],
     getItem: async () => null,
     fetchAllItems: async () => [],
     updateItem: async () => {
@@ -519,7 +521,8 @@ test("delivery webhook resolves brain through the phone-linked brain before owne
 
   const outboundEvent = createPodioItem(812, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("provider-phone-brain-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("provider-phone-brain-1"),
     "master-owner": appRefField(201),
     "linked-seller": appRefField(301),
     "phone-number": appRefField(401),
@@ -547,7 +550,7 @@ test("delivery webhook resolves brain through the phone-linked brain before owne
     hashIdempotencyPayload: ledger.hash,
     info: () => {},
     warn: () => {},
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async () => {},
@@ -588,7 +591,8 @@ test("delivery webhook normalizes raw TextGrid sent callbacks and updates queue 
 
   const outboundEvent = createPodioItem(821, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("provider-sent-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("provider-sent-1"),
     "ai-output": textField(
       JSON.stringify({
         queue_item_id: 123,
@@ -617,7 +621,7 @@ test("delivery webhook normalizes raw TextGrid sent callbacks and updates queue 
     hashIdempotencyPayload: ledger.hash,
     info: () => {},
     warn: () => {},
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async (item_id, payload) => {
@@ -653,7 +657,8 @@ test("delivery webhook normalizes raw TextGrid delivered callbacks and confirms 
 
   const outboundEvent = createPodioItem(822, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("provider-delivered-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("provider-delivered-1"),
     "ai-output": textField(
       JSON.stringify({
         queue_item_id: 123,
@@ -682,7 +687,7 @@ test("delivery webhook normalizes raw TextGrid delivered callbacks and confirms 
     hashIdempotencyPayload: ledger.hash,
     info: () => {},
     warn: () => {},
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async (item_id, payload) => {
@@ -719,7 +724,8 @@ test("delivery webhook suppresses future outreach on hard-bounce destination fai
 
   const outboundEvent = createPodioItem(823, {
     "trigger-name": textField("queue-send:123"),
-    "message-id": textField("provider-failed-1"),
+    "message-id": textField("outbound:queue-123"),
+    "text-2": textField("provider-failed-1"),
     "ai-output": textField(
       JSON.stringify({
         queue_item_id: 123,
@@ -748,7 +754,7 @@ test("delivery webhook suppresses future outreach on hard-bounce destination fai
     hashIdempotencyPayload: ledger.hash,
     info: () => {},
     warn: () => {},
-    findMessageEventItemsByMessageId: async () => [outboundEvent],
+    findMessageEventItemsByProviderMessageId: async () => [outboundEvent],
     getItem: async (item_id) => (Number(item_id) === 123 ? queueItem : null),
     fetchAllItems: async () => [],
     updateItem: async () => {},
