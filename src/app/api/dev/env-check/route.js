@@ -2,6 +2,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const supabase_env_keys = Object.keys(process.env)
+    .filter((key) => key.includes("SUPABASE"))
+    .sort();
+
   return Response.json({
     ok: true,
     env: {
@@ -12,8 +16,12 @@ export async function GET() {
       TEXTGRID_ACCOUNT_SID: !!process.env.TEXTGRID_ACCOUNT_SID,
       TEXTGRID_AUTH_TOKEN: !!process.env.TEXTGRID_AUTH_TOKEN,
       CRON_SECRET: !!process.env.CRON_SECRET,
-      VERCEL_ENV: process.env.VERCEL_ENV || null,
-      NODE_ENV: process.env.NODE_ENV || null,
+      VERCEL_GIT_COMMIT_SHA: !!process.env.VERCEL_GIT_COMMIT_SHA,
+      VERCEL_URL: !!process.env.VERCEL_URL,
+      VERCEL_TARGET_ENV: !!process.env.VERCEL_TARGET_ENV,
+      VERCEL_ENV: !!process.env.VERCEL_ENV,
+      NODE_ENV: !!process.env.NODE_ENV,
+      SUPABASE_ENV_KEYS: supabase_env_keys,
     },
   });
 }
