@@ -1091,6 +1091,20 @@ export async function buildSendQueueItem({
       character_count: message_text ? countCharacters(message_text) : 0,
       metadata: {
         source: "build_send_queue_item",
+        phone_item_id,
+        master_owner_id,
+        prospect_id,
+        property_id,
+        market_id,
+        sms_agent_id: assigned_agent_id || null,
+        textgrid_number_id: textgrid_number_item_id || null,
+        template_id:
+          template_reference.selected_template_id ??
+          template_reference.selected_template_item_id ??
+          template_id ??
+          null,
+        normalized_target,
+        property_address: property_address || null,
         selected_template_source: selected_template_source ?? null,
         selected_template_item_id: template_reference.selected_template_item_id ?? null,
         selected_template_id: template_reference.selected_template_id ?? null,

@@ -22,6 +22,10 @@ import {
   resolveMutationDryRun,
   resolveScopedId,
 } from "@/lib/config/rollout-controls.js";
+import {
+  hasSupabaseFeederSupport,
+  inspectSupabaseQueueBuffer,
+} from "@/lib/domain/master-owners/supabase-feeder-support.js";
 
 const logger = child({
   module: "api.internal.outbound.feed_master_owners",
@@ -240,6 +244,18 @@ async function defaultInspectQueueBuffer({
     250
   );
   const bounded_snapshot_limit = Math.min(effective_snapshot_limit, 500);
+
+  if (hasSupabaseFeederSupport()) {
+    return inspectSupabaseQueueBuffer({
+      now,
+      critical_low_threshold: normalized_critical_low,
+      replenish_target: normalized_replenish_target,
+      healthy_target: normalized_healthy_target,
+      ideal_target: normalized_ideal_target,
+      snapshot_limit: bounded_snapshot_limit,
+    });
+  }
+
   const [queued_response, sending_response, failed_response] = await Promise.all([
     filterAppItems(
       APP_IDS.send_queue,

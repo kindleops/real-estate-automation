@@ -35,6 +35,23 @@ function statusForResult(result) {
   return result?.ok === false ? 400 : 200;
 }
 
+function buildFeederSummary(result = {}) {
+  const results = Array.isArray(result?.results) ? result.results : [];
+
+  return {
+    loaded_count:
+      Number(result?.raw_items_pulled ?? result?.raw_scanned_count ?? result?.scanned_count) ||
+      0,
+    eligible_count: Number(result?.eligible_owner_count) || 0,
+    inserted_count: Number(result?.queued_count) || 0,
+    duplicate_count:
+      (Number(result?.duplicate_skip_count) || 0) +
+      (Number(result?.queue_create_duplicate_cancel_count) || 0),
+    skipped_count: Number(result?.skipped_count) || 0,
+    error_count: results.filter((entry) => entry?.ok === false && !entry?.skipped).length,
+  };
+}
+
 export async function GET(request) {
   try {
     const auth = requireCronAuth(request, logger);
@@ -82,7 +99,10 @@ export async function GET(request) {
       {
         ok: result?.ok !== false,
         route: "internal/outbound/feed-master-owners",
-        result,
+        result: {
+          ...result,
+          ...buildFeederSummary(result),
+        },
       },
       { status: statusForResult(result) }
     );
@@ -165,7 +185,10 @@ export async function POST(request) {
       {
         ok: result?.ok !== false,
         route: "internal/outbound/feed-master-owners",
-        result,
+        result: {
+          ...result,
+          ...buildFeederSummary(result),
+        },
       },
       { status: statusForResult(result) }
     );
