@@ -8,6 +8,7 @@ import { hasSupabaseConfig } from "@/lib/supabase/client.js";
 import {
   claimSendQueueRow,
   loadRunnableSendQueueRows,
+  normalizeQueueRowId,
 } from "@/lib/supabase/sms-engine.js";
 
 const DEFAULT_BATCH_SIZE = 50;
@@ -82,7 +83,10 @@ function toTimestamp(value) {
 }
 
 function getQueueRowId(row = null) {
-  return asPositiveInteger(row?.id ?? row?.queue_item_id ?? row?.item_id, null);
+  return normalizeQueueRowId(
+    row?.queue_row_id ?? row?.id ?? row?.queue_item_id ?? row?.item_id,
+    null
+  );
 }
 
 function getQueueStatus(row = null) {
@@ -266,6 +270,7 @@ function classifyRunResult(result = {}) {
 function buildSkippedSummary(queue_item_id, reason) {
   return {
     queue_item_id,
+    queue_row_id: queue_item_id,
     reason,
   };
 }
@@ -402,13 +407,13 @@ export async function runSendQueue(
             skipped_reasons.push(
               buildSkippedSummary(queue_item_id, claim_result?.reason || "queue_item_claim_conflict")
             );
-            results.push({
-              ok: true,
-              skipped: true,
-              reason: claim_result?.reason || "queue_item_claim_conflict",
-              queue_item_id,
-              queue_row_id: queue_item_id,
-            });
+          results.push({
+            ok: true,
+            skipped: true,
+            reason: claim_result?.reason || "queue_item_claim_conflict",
+            queue_item_id,
+            queue_row_id: queue_item_id,
+          });
             continue;
           }
 
@@ -479,8 +484,14 @@ export async function runSendQueue(
 
           results.push({
             ...result,
-            queue_item_id,
-            queue_row_id: queue_item_id,
+            queue_item_id:
+              result?.queue_row_id ??
+              result?.queue_item_id ??
+              queue_item_id,
+            queue_row_id:
+              result?.queue_row_id ??
+              result?.queue_item_id ??
+              queue_item_id,
           });
         } catch (error) {
           partial = true;

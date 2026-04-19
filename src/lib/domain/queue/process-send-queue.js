@@ -26,6 +26,7 @@ import {
   finalizeSendQueueSuccess,
   incrementTextgridNumberUsage,
   normalizeSendQueueRow,
+  normalizeQueueRowId,
   releaseSkippedQueueRow,
   reserveFromPhoneNumber,
   selectAvailableTextgridNumber,
@@ -180,14 +181,17 @@ function getNumberLike(record = null, key = "", fallback = null) {
 }
 
 function getQueueRowId(queue_row = null) {
-  return asPositiveInteger(
-    queue_row?.id ?? queue_row?.queue_item_id ?? queue_row?.item_id,
+  return normalizeQueueRowId(
+    queue_row?.queue_row_id ??
+      queue_row?.id ??
+      queue_row?.queue_item_id ??
+      queue_row?.item_id,
     null
   );
 }
 
 function isSupabaseQueueRow(queue_row = null) {
-  return Boolean(queue_row?.id) && !queue_row?.item_id;
+  return Boolean(getQueueRowId(queue_row)) && !Array.isArray(queue_row?.fields);
 }
 
 function getQueueRowValue(queue_row = null, keys = [], fallback = null) {
@@ -208,6 +212,36 @@ function getQueueRowValue(queue_row = null, keys = [], fallback = null) {
   }
 
   return fallback;
+}
+
+function buildSafeQueueRowShape(queue_row = null) {
+  return {
+    keys:
+      queue_row && typeof queue_row === "object" && !Array.isArray(queue_row)
+        ? Object.keys(queue_row).sort()
+        : [],
+    row: {
+      id: queue_row?.id ?? null,
+      queue_row_id: queue_row?.queue_row_id ?? null,
+      queue_item_id: queue_row?.queue_item_id ?? null,
+      item_id: queue_row?.item_id ?? null,
+      queue_key: queue_row?.queue_key ?? null,
+      queue_id: queue_row?.queue_id ?? null,
+      queue_status: queue_row?.queue_status ?? null,
+      lock_token_present: Boolean(clean(queue_row?.lock_token)),
+      has_message_body: Boolean(clean(queue_row?.message_body)),
+      has_message_text: Boolean(clean(queue_row?.message_text)),
+      has_to_phone_number: Boolean(clean(queue_row?.to_phone_number)),
+      has_from_phone_number: Boolean(clean(queue_row?.from_phone_number)),
+    },
+  };
+}
+
+function logMissingQueueRowId(queue_row = null, context = "queue_row_id_required") {
+  console.log("QUEUE ROW ID MISSING", {
+    context,
+    ...buildSafeQueueRowShape(queue_row),
+  });
 }
 
 function getQueueRowRelationId(queue_row = null, keys = [], fallback = null) {
@@ -308,7 +342,7 @@ async function updateQueueRow(queue_row_id, payload, deps = {}) {
 }
 
 export async function loadQueueRowById(queue_row_id, deps = {}) {
-  const resolved_id = asPositiveInteger(queue_row_id, null);
+  const resolved_id = normalizeQueueRowId(queue_row_id, null);
   if (!resolved_id) return null;
 
   if (typeof deps.loadQueueRowById === "function") {
@@ -671,7 +705,7 @@ export async function finalizeSuccessfulQueueSend(
   } = {},
   deps = {}
 ) {
-  const resolved_queue_row_id = asPositiveInteger(
+  const resolved_queue_row_id = normalizeQueueRowId(
     queue_item_id || getQueueRowId(queue_row),
     null
   );
@@ -847,6 +881,7 @@ async function processLegacyQueueItem(resolved_queue_row, deps = {}) {
   const send_textgrid_sms = deps.sendTextgridSMS || sendTextgridSMS;
 
   if (!queue_row_id) {
+    logMissingQueueRowId(resolved_queue_row, "processLegacyQueueItem");
     return {
       ok: false,
       sent: false,
@@ -1007,6 +1042,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
   let lock_token = clean(deps.claimedLockToken || queue_row?.lock_token) || null;
 
   if (!queue_row_id) {
+    logMissingQueueRowId(queue_row, "processSupabaseQueueItem");
     return {
       ok: false,
       sent: false,
@@ -1250,10 +1286,36 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
 }
 
 export async function processSendQueueItem(queue_row, deps = {}) {
-  const resolved_queue_row =
+  const looks_like_queue_row =
+    queue_row &&
+    typeof queue_row === "object" &&
+    !Array.isArray(queue_row) &&
+    Object.keys(queue_row).some(
+      (key) =>
+        [
+          "fields",
+          "queue_status",
+          "message_body",
+          "message_text",
+          "to_phone_number",
+          "from_phone_number",
+          "scheduled_for",
+          "scheduled_for_utc",
+          "scheduled_for_local",
+          "metadata",
+          "retry_count",
+          "max_retries",
+          "queue_key",
+          "queue_id",
+        ].includes(key)
+    );
+  const queue_row_id =
     queue_row && typeof queue_row === "object" && !Array.isArray(queue_row)
-      ? queue_row
-      : await loadQueueRowById(queue_row, deps);
+      ? getQueueRowId(queue_row)
+      : normalizeQueueRowId(queue_row, null);
+  const resolved_queue_row = looks_like_queue_row
+    ? queue_row
+    : await loadQueueRowById(queue_row_id, deps);
 
   if (!resolved_queue_row) {
     return {
@@ -1274,13 +1336,20 @@ export async function processSendQueue(input = {}, deps = {}) {
   const queue_row =
     input?.queue_row ||
     input?.row ||
-    (input && typeof input === "object" && input.id ? input : null);
+    (input &&
+    typeof input === "object" &&
+    (input.id || input.queue_row_id || input.queue_item_id || input.item_id)
+      ? input
+      : null);
 
   if (queue_row) {
     return processSendQueueItem(queue_row, deps);
   }
 
-  const queue_item_id = asPositiveInteger(input?.queue_item_id || input?.id, null);
+  const queue_item_id = normalizeQueueRowId(
+    input?.queue_row_id || input?.id || input?.queue_item_id || input,
+    null
+  );
   if (!queue_item_id) {
     return {
       ok: false,

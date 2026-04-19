@@ -39,6 +39,24 @@ function asNullableNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+export function normalizeQueueRowId(value, fallback = null) {
+  if (value === null || value === undefined) return fallback;
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
+  }
+
+  const normalized = clean(value);
+  if (!normalized) return fallback;
+
+  if (/^\d+$/.test(normalized)) {
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
+  }
+
+  return normalized;
+}
+
 function ensureObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -75,10 +93,20 @@ function getSupabase(deps = {}) {
 
 export function normalizeSendQueueRow(row) {
   const safe_row = ensureObject(row);
+  const row_id = normalizeQueueRowId(
+    safe_row.id ??
+      safe_row.queue_row_id ??
+      safe_row.queue_item_id ??
+      safe_row.item_id,
+    null
+  );
   const body = clean(safe_row.message_body || safe_row.message_text || "");
 
   return {
-    id: safe_row.id,
+    id: row_id,
+    queue_row_id: row_id,
+    queue_item_id: row_id,
+    item_id: row_id,
     queue_key: safe_row.queue_key || safe_row.queue_id,
     queue_id: safe_row.queue_id || safe_row.queue_key,
     queue_status: String(safe_row.queue_status || "").toLowerCase(),
@@ -263,8 +291,15 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
 }
 
 export async function claimSendQueueRow(row, deps = {}) {
-  const supabase = getSupabase(deps);
   const normalized = normalizeSendQueueRow(row);
+  if (!normalized.id) {
+    return {
+      ok: false,
+      claimed: false,
+      reason: "missing_queue_row_id",
+      row: normalized,
+    };
+  }
   const claimed_at = deps.now || nowIso();
   const lock_token = crypto.randomUUID();
   const payload = {
@@ -278,6 +313,8 @@ export async function claimSendQueueRow(row, deps = {}) {
   if (typeof deps.claimSendQueueRow === "function") {
     return deps.claimSendQueueRow(normalized, payload);
   }
+
+  const supabase = getSupabase(deps);
 
   const query = supabase
     .from(SEND_QUEUE_TABLE)
@@ -310,16 +347,22 @@ export async function claimSendQueueRow(row, deps = {}) {
 }
 
 export async function updateSendQueueRowWithLock(row_id, lock_token, payload, deps = {}) {
-  const supabase = getSupabase(deps);
+  const normalized_row_id = normalizeQueueRowId(row_id, null);
+
+  if (!normalized_row_id) {
+    throw new Error("missing_queue_row_id");
+  }
 
   if (typeof deps.updateSendQueueRowWithLock === "function") {
-    return deps.updateSendQueueRowWithLock(row_id, lock_token, payload);
+    return deps.updateSendQueueRowWithLock(normalized_row_id, lock_token, payload);
   }
+
+  const supabase = getSupabase(deps);
 
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
     .update(payload)
-    .eq("id", row_id)
+    .eq("id", normalized_row_id)
     .eq("lock_token", lock_token)
     .select()
     .maybeSingle();
@@ -485,7 +528,6 @@ export function evaluateContactWindow(row, deps = {}) {
 }
 
 export async function selectAvailableTextgridNumber(row, deps = {}) {
-  const supabase = getSupabase(deps);
   const normalized = normalizeSendQueueRow(row);
 
   if (clean(normalized.from_phone_number)) {
@@ -504,6 +546,8 @@ export async function selectAvailableTextgridNumber(row, deps = {}) {
   if (typeof deps.selectAvailableTextgridNumber === "function") {
     return deps.selectAvailableTextgridNumber(normalized);
   }
+
+  const supabase = getSupabase(deps);
 
   const { data, error } = await supabase
     .from(TEXTGRID_NUMBERS_TABLE)
@@ -577,7 +621,6 @@ export async function reserveFromPhoneNumber(row, lock_token, selection, deps = 
 }
 
 export async function incrementTextgridNumberUsage(selection, deps = {}) {
-  const supabase = getSupabase(deps);
   const selected = selection?.selected || null;
 
   if (!selected?.id) return null;
@@ -585,6 +628,8 @@ export async function incrementTextgridNumberUsage(selection, deps = {}) {
   if (typeof deps.incrementTextgridNumberUsage === "function") {
     return deps.incrementTextgridNumberUsage(selected);
   }
+
+  const supabase = getSupabase(deps);
 
   const next_sent_today = asNumber(selected.messages_sent_today, 0) + 1;
   const payload = {
@@ -1107,6 +1152,7 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     return {
       ok: true,
       item_id: data?.id || null,
+      queue_row_id: data?.id || null,
       queue_item_id: data?.id || null,
       queue_id: data?.queue_id || insert_payload.queue_id,
       queue_key: data?.queue_key || insert_payload.queue_key,
@@ -1127,6 +1173,7 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
       ok: false,
       reason: "duplicate_blocked",
       item_id: existing?.id || null,
+      queue_row_id: existing?.id || null,
       queue_item_id: existing?.id || null,
       queue_id: existing?.queue_id || insert_payload.queue_id,
       queue_key: existing?.queue_key || insert_payload.queue_key,

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { runSendQueue } from "@/lib/domain/queue/run-send-queue.js";
+import { processSendQueueItem } from "@/lib/domain/queue/process-send-queue.js";
 import {
   GET as getDevSendTest,
   POST as postDevSendTest,
@@ -75,6 +76,24 @@ function makeNumbersSupabase(rows = []) {
       return query;
     },
   };
+}
+
+function buildSupabaseQueueRow(overrides = {}) {
+  return normalizeSendQueueRow({
+    id: "sq-test-uuid-1",
+    queue_key: "queue-sq-test-uuid-1",
+    queue_id: "queue-sq-test-uuid-1",
+    queue_status: "sending",
+    scheduled_for: "2026-04-18T12:00:00.000Z",
+    retry_count: 0,
+    max_retries: 3,
+    lock_token: "lock-sq-test-uuid-1",
+    is_locked: true,
+    message_body: "Hello from Supabase",
+    to_phone_number: "+16127433952",
+    from_phone_number: "+16128060495",
+    ...overrides,
+  });
 }
 
 test("runSendQueue uses the Supabase candidate path, claims rows, and passes the claim token into processing", async () => {
@@ -205,6 +224,21 @@ test("normalizeSendQueueRow ignores scaffold-only to_number and from_number alia
 
   assert.equal(normalized.to_phone_number, null);
   assert.equal(normalized.from_phone_number, null);
+});
+
+test("normalizeSendQueueRow mirrors the Supabase row id into legacy-compatible aliases", () => {
+  const normalized = normalizeSendQueueRow({
+    id: "sq-row-501",
+    queue_key: "queue-sq-row-501",
+    queue_status: "queued",
+    message_body: "Hello there",
+    to_phone_number: "+16127433952",
+  });
+
+  assert.equal(normalized.id, "sq-row-501");
+  assert.equal(normalized.queue_row_id, "sq-row-501");
+  assert.equal(normalized.queue_item_id, "sq-row-501");
+  assert.equal(normalized.item_id, "sq-row-501");
 });
 
 test("shouldRunSendQueueRow does not use status as the queue status alias", () => {
@@ -428,6 +462,128 @@ test("writeWebhookLog forwards a structured raw payload for TextGrid webhooks", 
   assert.equal(captured.event_type, "delivery");
   assert.equal(captured.direction, "outbound");
   assert.equal(captured.provider_message_sid, "SM-123");
+});
+
+test("runSendQueue uses Supabase string ids in candidate summaries and result payloads", async () => {
+  const processed = [];
+
+  const row = buildSupabaseQueueRow({
+    id: "sq-run-uuid-1",
+    queue_key: "queue-sq-run-uuid-1",
+    queue_id: "queue-sq-run-uuid-1",
+    queue_status: "queued",
+    lock_token: null,
+    is_locked: false,
+  });
+
+  const result = await runSendQueue(
+    {
+      limit: 10,
+      now: "2026-04-18T15:00:00.000Z",
+    },
+    {
+      supabase: makeSelectSupabase([row]),
+      claimSendQueueRow: async (candidate) => ({
+        ok: true,
+        claimed: true,
+        row: {
+          ...candidate,
+          queue_status: "sending",
+          lock_token: "lock-sq-run-uuid-1",
+          is_locked: true,
+        },
+        lock_token: "lock-sq-run-uuid-1",
+      }),
+      processSendQueueItem: async (candidate) => {
+        processed.push(candidate);
+        return {
+          ok: true,
+          sent: true,
+          queue_row_id: candidate.queue_row_id,
+          queue_item_id: candidate.queue_item_id,
+          provider_message_id: "SM-sq-run-uuid-1",
+        };
+      },
+      withRunLock: async ({ fn }) => fn(),
+      info: () => {},
+      warn: () => {},
+    }
+  );
+
+  assert.deepEqual(result.first_10_candidate_item_ids, ["sq-run-uuid-1"]);
+  assert.equal(processed[0].id, "sq-run-uuid-1");
+  assert.equal(processed[0].queue_row_id, "sq-run-uuid-1");
+  assert.equal(result.results[0].queue_row_id, "sq-run-uuid-1");
+  assert.equal(result.results[0].queue_item_id, "sq-run-uuid-1");
+});
+
+test("processSendQueueItem accepts a UUID string and does not fail with missing_queue_row_id", async () => {
+  const loaded_ids = [];
+  const row = buildSupabaseQueueRow({
+    id: "sq-process-uuid-1",
+    queue_key: "queue-sq-process-uuid-1",
+    queue_id: "queue-sq-process-uuid-1",
+    lock_token: "lock-sq-process-uuid-1",
+  });
+
+  const result = await processSendQueueItem("sq-process-uuid-1", {
+    loadQueueRowById: async (id) => {
+      loaded_ids.push(id);
+      return row;
+    },
+    updateSendQueueRowWithLock: async (row_id, lock_token, payload) => ({
+      ...row,
+      ...payload,
+      id: row_id,
+      queue_row_id: row_id,
+      queue_item_id: row_id,
+      item_id: row_id,
+      lock_token,
+    }),
+    sendTextgridSMS: async () => ({
+      sid: "SM-sq-process-uuid-1",
+      raw: { status: "queued" },
+    }),
+    writeOutboundSuccessMessageEvent: async () => ({ item_id: "evt-1" }),
+  });
+
+  assert.deepEqual(loaded_ids, ["sq-process-uuid-1"]);
+  assert.equal(result.sent, true);
+  assert.equal(result.queue_row_id, "sq-process-uuid-1");
+  assert.notEqual(result.reason, "missing_queue_row_id");
+});
+
+test("processSendQueueItem accepts a normalized Supabase row object directly", async () => {
+  const row = buildSupabaseQueueRow({
+    id: "sq-process-uuid-2",
+    queue_key: "queue-sq-process-uuid-2",
+    queue_id: "queue-sq-process-uuid-2",
+    lock_token: "lock-sq-process-uuid-2",
+  });
+
+  const result = await processSendQueueItem(row, {
+    loadQueueRowById: async () => {
+      throw new Error("should_not_load_queue_row_by_id");
+    },
+    updateSendQueueRowWithLock: async (row_id, lock_token, payload) => ({
+      ...row,
+      ...payload,
+      id: row_id,
+      queue_row_id: row_id,
+      queue_item_id: row_id,
+      item_id: row_id,
+      lock_token,
+    }),
+    sendTextgridSMS: async () => ({
+      sid: "SM-sq-process-uuid-2",
+      raw: { status: "queued" },
+    }),
+    writeOutboundSuccessMessageEvent: async () => ({ item_id: "evt-2" }),
+  });
+
+  assert.equal(result.sent, true);
+  assert.equal(result.queue_row_id, "sq-process-uuid-2");
+  assert.equal(result.queue_item_id, "sq-process-uuid-2");
 });
 
 test("runDevSendTest inserts a canonical queued row and optionally runs the queue immediately", async () => {
