@@ -1,6 +1,5 @@
 // ─── textgrid.js ──────────────────────────────────────────────────────────
 import crypto from "node:crypto";
-import axios from "axios";
 
 import ENV from "@/lib/config/env.js";
 import { recordSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
@@ -16,9 +15,6 @@ const TEXTGRID_ACCOUNT_SID_PLACEHOLDER = "{ACCOUNT_SID}";
 const TEXTGRID_BASE_URL = `${TEXTGRID_API_ORIGIN}${TEXTGRID_API_VERSION_PATH}`;
 
 const REQUEST_TIMEOUT_MS = 15_000;
-const MAX_RETRIES = 4;
-const RETRY_BASE_DELAY_MS = 300;
-const RETRY_MAX_DELAY_MS = 10_000;
 // TextGrid send requests must use the fixed, Twilio-compatible REST path:
 //   POST /2010-04-01/Accounts/{AccountSid}/Messages.json
 const TEXTGRID_MESSAGES_RESOURCE = "/Messages.json";
@@ -35,16 +31,25 @@ const TEXTGRID_PROVIDER_CAPABILITIES = Object.freeze({
 // ══════════════════════════════════════════════════════════════════════════
 
 export class TextGridError extends Error {
-  constructor(message, { status, data } = {}) {
+  constructor(message, { status, data, raw_text, endpoint, to, from, body } = {}) {
     super(message);
     this.name = "TextGridError";
     this.status = status ?? null;
     this.data = data ?? null;
+    this.raw_text = raw_text ?? null;
+    this.endpoint = endpoint ?? null;
+    this.to = to ?? null;
+    this.from = from ?? null;
+    this.body = body ?? null;
   }
 }
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function lower(value) {
+  return clean(value).toLowerCase();
 }
 
 function safeEqual(left, right) {
@@ -218,13 +223,6 @@ export function verifyTextgridWebhookSignature({
   };
 }
 
-function toTextGridError(err) {
-  const status = err?.response?.status ?? null;
-  const data = err?.response?.data ?? null;
-  const message = data?.message ?? err?.message ?? "Unknown TextGrid error";
-  return new TextGridError(message, { status, data });
-}
-
 // ══════════════════════════════════════════════════════════════════════════
 // NORMALIZATION
 // ══════════════════════════════════════════════════════════════════════════
@@ -243,12 +241,8 @@ export function normalizeInboundTextgridPhone(value) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// RETRY ENGINE — Exponential Backoff + Full Jitter
+// RETRYABLE STATUS CLASSIFICATION
 // ══════════════════════════════════════════════════════════════════════════
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 const RETRYABLE_STATUSES = new Set([408, 409, 420, 425, 429, 500, 502, 503, 504]);
 
@@ -256,31 +250,12 @@ function isRetryable(status) {
   return RETRYABLE_STATUSES.has(status);
 }
 
-function calcBackoff(attempt) {
-  const exponential = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-  const capped = Math.min(RETRY_MAX_DELAY_MS, exponential);
-  return Math.floor(Math.random() * capped);
-}
-
-async function requestWithRetry(config, attempt = 0) {
-  try {
-    return await axios({ timeout: REQUEST_TIMEOUT_MS, ...config });
-  } catch (err) {
-    const status = err?.response?.status ?? 0;
-    if (attempt < MAX_RETRIES && isRetryable(status)) {
-      await sleep(calcBackoff(attempt));
-      return requestWithRetry(config, attempt + 1);
-    }
-    throw err;
-  }
-}
-
 // ══════════════════════════════════════════════════════════════════════════
 // FAILURE BUCKET CLASSIFICATION
 // ══════════════════════════════════════════════════════════════════════════
 
 export function mapTextgridFailureBucket(result) {
-  if (!result || result.ok) return null;
+  if (!result || result.ok || result.success) return null;
 
   const status = result.error_status ?? 0;
   const msg = String(result.error_message ?? "").toLowerCase();
@@ -316,6 +291,11 @@ export async function sendTextgridSMS({
   const normalized_from = normalizePhone(from);
   const credentials = getTextgridSendCredentials();
 
+  console.log("TEXTGRID ENV:", {
+    sid: process.env.TEXTGRID_ACCOUNT_SID,
+    token_exists: !!process.env.TEXTGRID_AUTH_TOKEN,
+  });
+
   if (!normalized_to) {
     throw new TextGridError(`sendTextgridSMS: invalid 'to' number — "${to}"`);
   }
@@ -329,122 +309,164 @@ export async function sendTextgridSMS({
     throw new TextGridError("sendTextgridSMS: message body is empty");
   }
 
-  if (!credentials.configured) {
-    const missing_message =
-      `[TextGrid] Missing required env vars: ${credentials.missing.join(", ")}`;
-
-    const missing_endpoint = getTextgridSendEndpoint();
-
-    warn("textgrid.send_failed", {
-      to: normalized_to,
-      from: normalized_from,
-      status: null,
-      message: missing_message,
-      error_data: null,
-      endpoint: missing_endpoint,
-    });
-
-    await recordSystemAlert({
-      subsystem: "textgrid",
-      code: "send_failed",
-      severity: "high",
-      retryable: true,
-      summary: missing_message,
-      dedupe_key: "textgrid_send_missing_credentials",
-      affected_ids: [normalized_to, normalized_from],
-      metadata: {
-        missing: credentials.missing,
-      },
-    });
-
-    return {
-      ok: false,
-      provider: "textgrid",
-      message_id: null,
-      status: "failed",
-      error_message: missing_message,
-      error_status: null,
-      error_data: null,
-      to: normalized_to,
-      from: normalized_from,
-      body: trimmed_body,
-      endpoint: missing_endpoint,
-    };
-  }
-
-  const send_endpoint = getTextgridSendEndpoint(credentials.account_sid);
-  // TextGrid rejects the legacy extras we used to send here; only the core
-  // body/from/to JSON object is accepted on the Messages.json endpoint.
-  const payload = buildTextgridSendPayload({
-    body: trimmed_body,
-    from: normalized_from,
-    to: normalized_to,
-  });
-
   try {
-    const res = await requestWithRetry({
-      method: "post",
-      url: send_endpoint,
-      data: JSON.stringify(payload),
-      headers: buildTextgridSendHeaders(credentials),
+    if (!credentials.configured) {
+      throw new TextGridError(
+        `[TextGrid] Missing required env vars: ${credentials.missing.join(", ")}`,
+        {
+          endpoint: getTextgridSendEndpoint(),
+          to: normalized_to,
+          from: normalized_from,
+          body: trimmed_body,
+        }
+      );
+    }
+
+    const send_endpoint = getTextgridSendEndpoint(credentials.account_sid);
+    const payload = buildTextgridSendPayload({
+      body: trimmed_body,
+      from: normalized_from,
+      to: normalized_to,
     });
 
-    const data = res.data ?? {};
+    const response = await fetch(send_endpoint, {
+      method: "POST",
+      headers: buildTextgridSendHeaders(credentials),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }).catch((error) => {
+      throw new TextGridError(
+        clean(error?.message) || "TextGrid network request failed",
+        {
+          endpoint: send_endpoint,
+          to: normalized_to,
+          from: normalized_from,
+          body: trimmed_body,
+        }
+      );
+    });
+
+    const text = await response.text();
+
+    console.log("TEXTGRID STATUS:", response.status);
+    console.log("TEXTGRID RESPONSE:", text);
+
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new TextGridError(`Invalid JSON response: ${text}`, {
+        status: response.status,
+        raw_text: text,
+        endpoint: send_endpoint,
+        to: normalized_to,
+        from: normalized_from,
+        body: trimmed_body,
+      });
+    }
+
+    if (!response.ok) {
+      throw new TextGridError(`TextGrid HTTP failure: ${text}`, {
+        status: response.status,
+        data,
+        raw_text: text,
+        endpoint: send_endpoint,
+        to: normalized_to,
+        from: normalized_from,
+        body: trimmed_body,
+      });
+    }
+
+    const sid = clean(data?.sid);
+    if (!sid) {
+      throw new TextGridError(`Missing SID (NOT SENT): ${text}`, {
+        status: response.status,
+        data,
+        raw_text: text,
+        endpoint: send_endpoint,
+        to: normalized_to,
+        from: normalized_from,
+        body: trimmed_body,
+      });
+    }
+
+    const provider_status = lower(data?.status);
+    if (["failed", "undelivered"].includes(provider_status)) {
+      throw new TextGridError(`Carrier rejected message: ${text}`, {
+        status: response.status,
+        data,
+        raw_text: text,
+        endpoint: send_endpoint,
+        to: normalized_to,
+        from: normalized_from,
+        body: trimmed_body,
+      });
+    }
 
     return {
+      success: true,
       ok: true,
       provider: "textgrid",
-      message_id: data.sid ?? data.id ?? data.message_id ?? data.message_sid ?? null,
-      status: data.status ?? "sent",
+      sid,
+      message_id: sid,
+      provider_message_id: sid,
+      status: clean(data?.status) || "sent",
       raw: data,
       to: normalized_to,
       from: normalized_from,
       body: trimmed_body,
       endpoint: send_endpoint,
     };
-  } catch (err) {
-    const tge = toTextGridError(err);
+  } catch (error) {
+    const tge =
+      error instanceof TextGridError
+        ? error
+        : new TextGridError(clean(error?.message) || "Unknown TextGrid error", {
+            endpoint: getTextgridSendEndpoint(credentials.account_sid || null),
+            to: normalized_to,
+            from: normalized_from,
+            body: trimmed_body,
+          });
 
     warn("textgrid.send_failed", {
       to_input: to,
       from_input: from,
-      to: normalized_to,
-      from: normalized_from,
+      to: tge.to || normalized_to,
+      from: tge.from || normalized_from,
       status: tge.status,
       message: tge.message,
       error_data: tge.data,
-      endpoint: send_endpoint,
+      raw_text: tge.raw_text,
+      endpoint: tge.endpoint || getTextgridSendEndpoint(credentials.account_sid || null),
       resource: TEXTGRID_MESSAGES_RESOURCE,
       client_reference_id,
     });
 
-    await recordSystemAlert({
-      subsystem: "textgrid",
-      code: "send_failed",
-      severity: tge.status && tge.status >= 500 ? "high" : "warning",
-      retryable: Boolean(tge.status ? isRetryable(tge.status) : true),
-      summary: `TextGrid send failed: ${tge.message}`,
-      dedupe_key: `textgrid_send_${clean(tge.status) || "unknown"}`,
-      affected_ids: [normalized_to, normalized_from],
-      metadata: {
-        status: tge.status,
-        data: tge.data,
-        endpoint: send_endpoint,
-      },
-    });
+    try {
+      await recordSystemAlert({
+        subsystem: "textgrid",
+        code: "send_failed",
+        severity: tge.status && tge.status >= 500 ? "high" : "warning",
+        retryable: Boolean(tge.status ? isRetryable(tge.status) : true),
+        summary: `TextGrid send failed: ${tge.message}`,
+        dedupe_key: `textgrid_send_${clean(tge.status) || "unknown"}`,
+        affected_ids: [tge.to || normalized_to, tge.from || normalized_from],
+        metadata: {
+          status: tge.status,
+          data: tge.data,
+          raw_text: tge.raw_text,
+          endpoint: tge.endpoint || getTextgridSendEndpoint(credentials.account_sid || null),
+        },
+      });
+    } catch (alert_error) {
+      warn("textgrid.send_failed_alert_record_failed", {
+        message: clean(alert_error?.message) || "unknown",
+        original_message: tge.message,
+        original_status: tge.status,
+        endpoint: tge.endpoint || getTextgridSendEndpoint(credentials.account_sid || null),
+      });
+    }
 
-    return {
-      ok: false,
-      provider: "textgrid",
-      message_id: null,
-      status: "failed",
-      error_message: tge.message,
-      error_status: tge.status,
-      error_data: tge.data,
-      to: normalized_to,
-      from: normalized_from,
-      body: trimmed_body,
-      endpoint: send_endpoint,
-    };
+    throw tge;
   }
 }

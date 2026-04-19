@@ -1,5 +1,10 @@
 import { handleTextgridDelivery } from "@/lib/flows/handle-textgrid-delivery.js";
 import { child } from "@/lib/logging/logger.js";
+import { hasSupabaseConfig } from "@/lib/supabase/client.js";
+import {
+  syncDeliveryEvent,
+  writeWebhookLog,
+} from "@/lib/supabase/sms-engine.js";
 import {
   buildTextgridWebhookBypassResult,
   buildTextgridWebhookLogMeta,
@@ -15,6 +20,10 @@ const defaultLogger = child({
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function nowIso() {
+  return new Date().toISOString();
 }
 
 export async function parseTextgridDeliveryRequestBody(request) {
@@ -63,6 +72,8 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
     logger = defaultLogger,
     handleTextgridDeliveryImpl = handleTextgridDelivery,
     verifyTextgridWebhookSignatureImpl = verifyTextgridWebhookRequest,
+    writeWebhookLogImpl = writeWebhookLog,
+    syncDeliveryEventImpl = syncDeliveryEvent,
   } = deps;
 
   let log_payload = null;
@@ -228,6 +239,37 @@ export async function handleTextgridDeliveryRequest(request, deps = {}) {
       })
     );
     accepted_logged = true;
+
+    if (
+      hasSupabaseConfig() ||
+      typeof deps.writeWebhookLogImpl === "function" ||
+      typeof deps.syncDeliveryEventImpl === "function"
+    ) {
+      try {
+        await writeWebhookLogImpl({
+          event_type: payload.header_event || "delivery",
+          direction: "outbound",
+          provider_message_sid: payload.message_id || null,
+          payload,
+          headers: Object.fromEntries(request.headers.entries()),
+          received_at: nowIso(),
+          source: "textgrid",
+        });
+        await syncDeliveryEventImpl(payload, {
+          now: nowIso(),
+        });
+      } catch (supabase_error) {
+        logger.error("textgrid_delivery.supabase_logging_failed", {
+          ...buildTextgridWebhookLogMeta({
+            payload,
+            webhook_verification,
+            downstream_handler_invoked,
+            podio_persistence_attempted,
+          }),
+          message: supabase_error?.message || "Unknown Supabase delivery logging error",
+        });
+      }
+    }
 
     downstream_handler_invoked = true;
     podio_persistence_attempted = true;

@@ -140,3 +140,34 @@ test("finalizeSuccessfulQueueSend reports partial failure if bookkeeping breaks 
   ]);
   assert.match(result.bookkeeping_errors[0], /^queue_sent_update_failed:/);
 });
+
+test("finalizeSuccessfulQueueSend refuses to mark a queue row sent when provider SID is missing", async () => {
+  await assert.rejects(
+    () =>
+      finalizeSuccessfulQueueSend(
+        {
+          queue_item_id: 123,
+          phone_item_id: 401,
+          brain_id: 701,
+          send_result: {
+            status: "queued",
+          },
+        },
+        {
+          updateItem: async () => {
+            throw new Error("should_not_run");
+          },
+          logOutboundMessageEvent: async () => {
+            throw new Error("should_not_run");
+          },
+          updateBrainAfterSend: async () => {
+            throw new Error("should_not_run");
+          },
+          updateMasterOwnerAfterSend: async () => {
+            throw new Error("should_not_run");
+          },
+        }
+      ),
+    /SEND FAILED - NO SID/
+  );
+});

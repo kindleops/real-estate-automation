@@ -1,28 +1,18 @@
-import {
-  capQueueBatch,
-  getRolloutControls,
-  resolveMutationDryRun,
-  resolveScopedId,
-} from "@/lib/config/rollout-controls.js";
-import {
-  buildPodioCooldownSkipResult,
-  isPodioRateLimitError,
-  serializePodioError,
-} from "@/lib/providers/podio.js";
+function clean(value) {
+  return String(value ?? "").trim();
+}
 
 function asBoolean(value, fallback = false) {
   if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (["true", "1", "yes"].includes(normalized)) return true;
-    if (["false", "0", "no"].includes(normalized)) return false;
-  }
+  const normalized = clean(value).toLowerCase();
+  if (["true", "1", "yes"].includes(normalized)) return true;
+  if (["false", "0", "no"].includes(normalized)) return false;
   return fallback;
 }
 
 function asNumber(value, fallback = null) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 export function statusForResult(result) {
@@ -30,6 +20,8 @@ export function statusForResult(result) {
 }
 
 export async function handleQueueRunRequest(request, method, deps = {}) {
+  console.log("QUEUE EXECUTION STARTED");
+
   const require_cron_auth =
     deps.requireCronAuth ||
     (await import("@/lib/security/cron-auth.js")).requireCronAuth;
@@ -37,7 +29,7 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
     deps.runSendQueue ||
     (await import("@/lib/domain/queue/run-send-queue.js")).runSendQueue;
   const build_podio_cooldown_skip_result =
-    deps.buildPodioCooldownSkipResult || buildPodioCooldownSkipResult;
+    deps.buildPodioCooldownSkipResult || null;
   const route_logger = deps.logger;
   const json_response =
     deps.jsonResponse ||
@@ -52,65 +44,45 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
     const auth = require_cron_auth(request, route_logger);
     if (!auth.authorized) return auth.response;
 
-    const { searchParams } = new URL(request.url);
     const body =
       method === "POST"
         ? await request.json().catch(() => ({}))
-        : null;
+        : {};
+    const search_params = new URL(request.url).searchParams;
 
-    const rollout = getRolloutControls();
-    const master_owner_scope = resolveScopedId({
-      requested_id: asNumber(
-        method === "POST" ? body?.master_owner_id : searchParams.get("master_owner_id"),
-        null
-      ),
-      safe_id: rollout.single_master_owner_id,
-      resource: "master_owner",
-    });
-    if (!master_owner_scope.ok) {
-      return json_response(
-        {
-          ok: false,
-          error: master_owner_scope.reason,
-        },
-        { status: 400 }
-      );
-    }
-
-    const limit = capQueueBatch(
-      asNumber(method === "POST" ? body?.limit : searchParams.get("limit"), 50),
-      50
+    const limit = Math.max(
+      1,
+      Math.min(
+        50,
+        asNumber(method === "POST" ? body?.limit : search_params.get("limit"), 50)
+      )
     );
-    const dry_run_resolution = resolveMutationDryRun({
-      requested_dry_run: asBoolean(
-        method === "POST" ? body?.dry_run : searchParams.get("dry_run"),
-        false
-      ),
-    });
+    const dry_run = asBoolean(
+      method === "POST" ? body?.dry_run : search_params.get("dry_run"),
+      false
+    );
 
     route_logger?.info?.("queue_run.requested", {
       method,
       limit,
-      dry_run: dry_run_resolution.effective_dry_run,
-      master_owner_id: master_owner_scope.effective_id,
+      dry_run,
       authenticated: auth.auth.authenticated,
       is_vercel_cron: auth.auth.is_vercel_cron,
     });
 
     route_logger?.info?.("queue_run.before_run_send_queue", {
       limit,
-      dry_run: dry_run_resolution.effective_dry_run,
-      dry_run_reason: dry_run_resolution.reason,
-      rollout_mode: dry_run_resolution.mode,
-      forced_dry_run: dry_run_resolution.forced,
-      master_owner_id: master_owner_scope.effective_id,
-      scope_reason: master_owner_scope.reason,
+      dry_run,
+      dry_run_reason: dry_run ? "requested" : "disabled",
+      rollout_mode: process.env.ROLLOUT_MODE || null,
+      forced_dry_run: false,
+      master_owner_id: null,
+      scope_reason: "supabase_queue_runner",
     });
 
     const result = await run_send_queue({
       limit,
-      dry_run: dry_run_resolution.effective_dry_run,
-      master_owner_id: master_owner_scope.effective_id,
+      dry_run,
     });
 
     if (result?.skipped) {
@@ -160,35 +132,42 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       { status: statusForResult(result) }
     );
   } catch (error) {
-    const diagnostics = serializePodioError(error);
+    const diagnostics = {
+      name: error?.name || "Error",
+      message: error?.message || "queue_run_failed",
+      status: Number(error?.status || 0) || null,
+      path: clean(error?.path) || null,
+      method: clean(error?.method) || null,
+      operation: clean(error?.operation) || null,
+      retry_after_seconds:
+        error?.retry_after_seconds === undefined ||
+        error?.retry_after_seconds === null
+          ? null
+          : Number(error.retry_after_seconds),
+      rate_limit_remaining:
+        error?.rate_limit_remaining === undefined ||
+        error?.rate_limit_remaining === null
+          ? null
+          : Number(error.rate_limit_remaining),
+      stack: error?.stack || null,
+    };
 
     route_logger?.error?.("queue_run.failed", {
       method,
       error: diagnostics,
     });
 
-    if (isPodioRateLimitError(error)) {
+    if (
+      build_podio_cooldown_skip_result &&
+      diagnostics.name === "PodioError" &&
+      diagnostics.status === 420
+    ) {
       const result = await build_podio_cooldown_skip_result({
-        dry_run: false,
-        total_rows_loaded: 0,
-        queued_rows_loaded: 0,
-        due_rows: 0,
-        future_rows: 0,
-        outside_window_rows: 0,
-        attempted_count: 0,
-        claimed_count: 0,
-        started_count: 0,
+        results: [],
         processed_count: 0,
         sent_count: 0,
         failed_count: 0,
-        blocked_count: 0,
         skipped_count: 0,
-        duplicate_locked_count: 0,
-        first_failure_queue_item_id: null,
-        first_failure_reason: null,
-        batch_duration_ms: 0,
-        results: [],
-        run_started_at: new Date().toISOString(),
       });
 
       return json_response(
@@ -211,3 +190,5 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
     );
   }
 }
+
+export default handleQueueRunRequest;
