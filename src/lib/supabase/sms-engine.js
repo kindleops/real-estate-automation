@@ -5,6 +5,9 @@ import {
   normalizePhone,
 } from "@/lib/providers/textgrid.js";
 import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/client.js";
+import { captureRouteException, addSentryBreadcrumb } from "@/lib/monitoring/sentry.js";
+import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
+import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 
 const SEND_QUEUE_TABLE = "send_queue";
 const MESSAGE_EVENTS_TABLE = "message_events";
@@ -750,6 +753,31 @@ function buildFailureMessageEvent(row, error, options = {}) {
 
 export async function writeOutboundSuccessMessageEvent(row, send_result, options = {}) {
   const payload = buildSuccessMessageEvent(row, send_result, options);
+  const normalized = normalizeSendQueueRow(row);
+
+  // Analytics fires regardless of whether the DB write is real or injected —
+  // the SMS is already confirmed sent at this call site.
+  captureSystemEvent("sms_send_succeeded", {
+    queue_row_id: normalized.id,
+    queue_key: normalized.queue_key,
+    provider_message_id: normalized.provider_message_id || send_result?.sid || null,
+    master_owner_id: normalized.master_owner_id || null,
+    template_id: normalized.template_id || null,
+    touch_number: normalized.touch_number ?? null,
+    character_count: normalized.character_count ?? 0,
+    campaign_id: normalized.metadata?.campaign_id ?? null,
+  });
+
+  captureSystemEvent("message_event_created", {
+    queue_row_id: normalized.id,
+    queue_key: normalized.queue_key,
+    provider_message_id: normalized.provider_message_id || send_result?.sid || null,
+    master_owner_id: normalized.master_owner_id || null,
+    template_id: normalized.template_id || null,
+    campaign_id: normalized.metadata?.campaign_id ?? null,
+    direction: "outbound",
+    event_type: "outbound_sms",
+  });
 
   if (typeof options.writeOutboundSuccessMessageEvent === "function") {
     return options.writeOutboundSuccessMessageEvent(payload);
@@ -757,21 +785,98 @@ export async function writeOutboundSuccessMessageEvent(row, send_result, options
 
   const supabase = getSupabase(options);
 
-  const { data, error } = await supabase
-    .from(MESSAGE_EVENTS_TABLE)
-    .upsert(payload, {
-      onConflict: "message_event_key",
-      ignoreDuplicates: false,
-    })
-    .select()
-    .maybeSingle();
+  let data, error;
+  try {
+    ({ data, error } = await supabase
+      .from(MESSAGE_EVENTS_TABLE)
+      .upsert(payload, {
+        onConflict: "message_event_key",
+        ignoreDuplicates: false,
+      })
+      .select()
+      .maybeSingle());
+  } catch (db_error) {
+    captureRouteException(db_error, {
+      route: "sms-engine/writeOutboundSuccessMessageEvent",
+      subsystem: "sms_engine",
+      context: {
+        queue_row_id: normalized.id,
+        queue_key: normalized.queue_key,
+        master_owner_id: normalized.master_owner_id,
+      },
+    });
+    throw db_error;
+  }
 
-  if (error) throw error;
+  if (error) {
+    captureRouteException(error, {
+      route: "sms-engine/writeOutboundSuccessMessageEvent",
+      subsystem: "sms_engine",
+      context: {
+        queue_row_id: normalized.id,
+        queue_key: normalized.queue_key,
+        master_owner_id: normalized.master_owner_id,
+      },
+    });
+    throw error;
+  }
+
+  addSentryBreadcrumb("sms_send", "sms_send_succeeded", {
+    queue_row_id: normalized.id,
+    queue_key: normalized.queue_key,
+    provider_message_id: normalized.provider_message_id,
+    master_owner_id: normalized.master_owner_id,
+  });
+
   return data || payload;
 }
 
 export async function writeOutboundFailureMessageEvent(row, error, options = {}) {
   const payload = buildFailureMessageEvent(row, error, options);
+
+  // Capture the original SMS send error to Sentry. Fires regardless of whether
+  // the DB write is real or injected via options — telemetry is a side-effect
+  // that applies in all cases.
+  const normalized_for_sentry = normalizeSendQueueRow(row);
+  captureRouteException(error, {
+    route: "sms-engine/writeOutboundFailureMessageEvent",
+    subsystem: "sms_engine",
+    context: {
+      queue_row_id: normalized_for_sentry.id,
+      queue_key: normalized_for_sentry.queue_key,
+      master_owner_id: normalized_for_sentry.master_owner_id,
+    },
+  });
+  addSentryBreadcrumb("sms_send", "sms_send_failed", {
+    queue_row_id: normalized_for_sentry.id,
+    queue_key: normalized_for_sentry.queue_key,
+    master_owner_id: normalized_for_sentry.master_owner_id,
+    error_message: error?.message || String(error),
+  });
+
+  captureSystemEvent("sms_send_failed", {
+    queue_row_id: normalized_for_sentry.id,
+    queue_key: normalized_for_sentry.queue_key,
+    master_owner_id: normalized_for_sentry.master_owner_id || null,
+    template_id: normalized_for_sentry.template_id || null,
+    touch_number: normalized_for_sentry.touch_number ?? null,
+    campaign_id: normalized_for_sentry.metadata?.campaign_id ?? null,
+    error_message: error?.message || String(error),
+  });
+
+  sendCriticalAlert({
+    title: "SMS Send Failed",
+    description: `Failed to send SMS for queue row ${normalized_for_sentry.id ?? "unknown"}`,
+    color: 0xe74c3c,
+    fields: [
+      { name: "Queue Row ID", value: String(normalized_for_sentry.id ?? "?"), inline: true },
+      { name: "Master Owner ID", value: String(normalized_for_sentry.master_owner_id ?? "?"), inline: true },
+      { name: "Touch", value: String(normalized_for_sentry.touch_number ?? "?"), inline: true },
+      { name: "Error", value: (error?.message || String(error)).slice(0, 256), inline: false },
+    ],
+    timestamp: new Date().toISOString(),
+    footer: { text: "sms_engine/writeOutboundFailureMessageEvent" },
+  });
 
   if (typeof options.writeOutboundFailureMessageEvent === "function") {
     return options.writeOutboundFailureMessageEvent(payload);
@@ -779,14 +884,25 @@ export async function writeOutboundFailureMessageEvent(row, error, options = {})
 
   const supabase = getSupabase(options);
 
-  const { data, error: insert_error } = await supabase
+  const { data: insert_data, error: insert_error } = await supabase
     .from(MESSAGE_EVENTS_TABLE)
     .insert(payload)
     .select()
     .maybeSingle();
 
-  if (insert_error) throw insert_error;
-  return data || payload;
+  if (insert_error) {
+    captureRouteException(insert_error, {
+      route: "sms-engine/writeOutboundFailureMessageEvent/db_write",
+      subsystem: "sms_engine",
+      context: {
+        queue_row_id: normalized_for_sentry.id,
+        queue_key: normalized_for_sentry.queue_key,
+        master_owner_id: normalized_for_sentry.master_owner_id,
+      },
+    });
+    throw insert_error;
+  }
+  return insert_data || payload;
 }
 
 export async function finalizeSendQueueSuccess(row, lock_token, send_result, options = {}) {
@@ -980,6 +1096,13 @@ export async function logInboundMessageEvent(payload, options = {}) {
     },
   };
 
+  // Analytics fires regardless of DI injection path — the inbound message
+  // payload is already validated at this point.
+  captureSystemEvent("inbound_sms_logged", {
+    provider_message_sid: message_sid || null,
+    character_count: event.character_count,
+  });
+
   if (typeof options.logInboundMessageEvent === "function") {
     return options.logInboundMessageEvent(event);
   }
@@ -996,6 +1119,7 @@ export async function logInboundMessageEvent(payload, options = {}) {
     .maybeSingle();
 
   if (error) throw error;
+
   return data || event;
 }
 
@@ -1034,6 +1158,14 @@ export async function syncDeliveryEvent(payload, options = {}) {
   }
 
   if (typeof options.syncDeliveryEvent === "function") {
+    // Analytics fires before DI early return — delivery_status is already computed.
+    captureSystemEvent("sms_delivery_updated", {
+      provider_message_sid: provider_message_sid || null,
+      delivery_status,
+      provider_delivery_status: provider_status || null,
+      error_status: clean(payload?.error_status) || null,
+      error_message: clean(payload?.error_message) || null,
+    });
     return options.syncDeliveryEvent(provider_message_sid, message_events_payload);
   }
 
@@ -1067,6 +1199,15 @@ export async function syncDeliveryEvent(payload, options = {}) {
     .select();
 
   if (send_queue_error) throw send_queue_error;
+
+  captureSystemEvent("sms_delivery_updated", {
+    provider_message_sid: provider_message_sid || null,
+    delivery_status,
+    provider_delivery_status: provider_status || null,
+    error_status: clean(payload?.error_status) || null,
+    error_message: clean(payload?.error_message) || null,
+    message_events_updated: Array.isArray(message_events_data) ? message_events_data.length : 0,
+  });
 
   return {
     provider_message_sid,

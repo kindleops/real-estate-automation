@@ -16,6 +16,9 @@ import {
   verifyTextgridWebhookRequest,
 } from "@/lib/webhooks/textgrid-verify-webhook.js";
 import { normalizeTextgridInboundPayload } from "@/lib/webhooks/textgrid-inbound-normalize.js";
+import { captureRouteException, addSentryBreadcrumb } from "@/lib/monitoring/sentry.js";
+import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
+import { sendHotLeadAlert } from "@/lib/alerts/discord.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -573,6 +576,11 @@ export async function POST(request) {
       }
       accepted_logged = true;
 
+      addSentryBreadcrumb("textgrid_inbound", "inbound_message_accepted", {
+        provider_message_id: safe_message_id,
+        to: safe_to,
+      });
+
       if (hasSupabaseConfig()) {
         try {
           await runtimeDeps.writeWebhookLogImpl({
@@ -639,6 +647,16 @@ export async function POST(request) {
           })
         );
       }
+
+      captureRouteException(error, {
+        route: "webhooks/textgrid/inbound",
+        subsystem: "textgrid_inbound",
+        context: {
+          provider_message_id: safe_message_id,
+          to: safe_to,
+          stage: "pre_accept",
+        },
+      });
 
       console.error("textgrid_inbound.failed", serializeForConsole(error_meta));
       try {
@@ -764,6 +782,15 @@ export async function POST(request) {
             })
           );
         }
+        captureRouteException(error, {
+          route: "webhooks/textgrid/inbound",
+          subsystem: "textgrid_inbound",
+          context: {
+            provider_message_id: safe_message_id,
+            to: safe_to,
+            stage: "buyer_handler",
+          },
+        });
         buyer_result = {
           ok: false,
           matched: false,
@@ -851,6 +878,35 @@ export async function POST(request) {
     );
 
     const result = await runtimeDeps.handleTextgridInboundImpl(payload, { inbound_debug_stage });
+
+    captureSystemEvent("inbound_sms_classified", {
+      provider_message_id: payload?.message_id || null,
+      ok: result?.ok !== false,
+      buyer_matched: Boolean(buyer_result?.matched),
+      buyer_handler_failed,
+      retryable: Boolean(result?.retryable),
+      reason: result?.reason || null,
+    });
+
+    if (
+      result?.ok &&
+      !result?.inbound_is_negative &&
+      (result?.offer?.created || result?.offer_progress?.updated || result?.contract?.created)
+    ) {
+      sendHotLeadAlert({
+        title: "Hot Seller Reply",
+        description: "Inbound SMS triggered a deal-stage advancement",
+        color: 0x27ae60,
+        fields: [
+          { name: "Offer Created", value: String(Boolean(result.offer?.created)), inline: true },
+          { name: "Offer Progressed", value: String(Boolean(result.offer_progress?.updated)), inline: true },
+          { name: "Contract Created", value: String(Boolean(result.contract?.created)), inline: true },
+          { name: "Route Stage", value: String(result.route?.stage || "?"), inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: "webhooks/textgrid/inbound" },
+      });
+    }
 
     safeRouteLog(
       "info",
@@ -941,6 +997,17 @@ export async function POST(request) {
         })
       );
     }
+
+    captureRouteException(error, {
+      route: "webhooks/textgrid/inbound",
+      subsystem: "textgrid_inbound",
+      context: {
+        provider_message_id: safe_message_id,
+        to: safe_to,
+        downstream_handler_invoked,
+        accepted_logged,
+      },
+    });
 
     if (!accepted_logged) {
       console.error("textgrid_inbound.failed_pre_accept", serializeForConsole(failure_meta));

@@ -33,6 +33,7 @@ import {
   writeOutboundFailureMessageEvent,
   writeOutboundSuccessMessageEvent,
 } from "@/lib/supabase/sms-engine.js";
+import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 
 const QUEUE_TABLE = "send_queue";
 
@@ -1134,6 +1135,16 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
     console.log("SENDING SMS", {
       to: message_fields.to,
       from: message_fields.from,
+    });
+
+    captureSystemEvent("sms_send_started", {
+      queue_row_id: queue_row_id,
+      queue_key: queue_row.queue_key || null,
+      master_owner_id: queue_row.master_owner_id || null,
+      template_id: queue_row.template_id || null,
+      touch_number: queue_row.touch_number ?? null,
+      character_count: queue_row.character_count ?? message_fields.body.length,
+      campaign_id: queue_row.metadata?.campaign_id ?? null,
     });
 
     const send_result = await send_textgrid_sms({

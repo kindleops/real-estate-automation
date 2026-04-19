@@ -26,6 +26,7 @@ import {
   hasSupabaseFeederSupport,
   inspectSupabaseQueueBuffer,
 } from "@/lib/domain/master-owners/supabase-feeder-support.js";
+import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 
 const logger = child({
   module: "api.internal.outbound.feed_master_owners",
@@ -866,6 +867,18 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
           source_view_name: view_scope.source_view_name,
           lock,
         },
+      });
+
+      sendCriticalAlert({
+        title: "Feeder Lock Active",
+        description: "Master-owner feeder skipped — an active lease is already in progress",
+        color: 0xf39c12,
+        fields: [
+          { name: "Scope", value: String(lock_scope), inline: true },
+          { name: "Reason", value: "master_owner_feeder_lock_active", inline: true },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: "feeder/onLocked" },
       });
 
       return {

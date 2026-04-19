@@ -11,6 +11,8 @@ import {
   normalizeFeederRequest,
   runFeederWithRollout,
 } from "@/lib/domain/master-owners/feed-master-owners-request.js";
+import { captureRouteException } from "@/lib/monitoring/sentry.js";
+import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -85,6 +87,28 @@ export async function GET(request) {
 
     const result = await runFeederWithRollout(options, { logger });
 
+    if (result?.skipped) {
+      captureSystemEvent("feeder_run_skipped", {
+        method: "GET",
+        reason: result.reason || null,
+        dry_run: result.dry_run ?? false,
+        retry_after_seconds: result.retry_after_seconds ?? null,
+      });
+    } else {
+      const summary = buildFeederSummary(result);
+      captureSystemEvent("feeder_run_completed", {
+        method: "GET",
+        ok: result?.ok !== false,
+        dry_run: result?.dry_run ?? false,
+        loaded_count: summary.loaded_count,
+        eligible_count: summary.eligible_count,
+        inserted_count: summary.inserted_count,
+        duplicate_count: summary.duplicate_count,
+        skipped_count: summary.skipped_count,
+        error_count: summary.error_count,
+      });
+    }
+
     logger.info("master_owner_feeder.route_completed", {
       method: "GET",
       ok: result?.ok !== false,
@@ -135,6 +159,12 @@ export async function GET(request) {
         { status: 200 }
       );
     }
+
+    captureRouteException(error, {
+      route: "internal/outbound/feed-master-owners",
+      subsystem: "feeder",
+      context: { method: "GET" },
+    });
 
     return NextResponse.json(
       {
@@ -171,6 +201,28 @@ export async function POST(request) {
 
     const result = await runFeederWithRollout(options, { logger });
 
+    if (result?.skipped) {
+      captureSystemEvent("feeder_run_skipped", {
+        method: "POST",
+        reason: result.reason || null,
+        dry_run: result.dry_run ?? false,
+        retry_after_seconds: result.retry_after_seconds ?? null,
+      });
+    } else {
+      const summary = buildFeederSummary(result);
+      captureSystemEvent("feeder_run_completed", {
+        method: "POST",
+        ok: result?.ok !== false,
+        dry_run: result?.dry_run ?? false,
+        loaded_count: summary.loaded_count,
+        eligible_count: summary.eligible_count,
+        inserted_count: summary.inserted_count,
+        duplicate_count: summary.duplicate_count,
+        skipped_count: summary.skipped_count,
+        error_count: summary.error_count,
+      });
+    }
+
     logger.info("master_owner_feeder.route_completed", {
       method: "POST",
       ok: result?.ok !== false,
@@ -221,6 +273,12 @@ export async function POST(request) {
         { status: 200 }
       );
     }
+
+    captureRouteException(error, {
+      route: "internal/outbound/feed-master-owners",
+      subsystem: "feeder",
+      context: { method: "POST" },
+    });
 
     return NextResponse.json(
       {

@@ -19,6 +19,9 @@ import {
   extractOptOutDetails,
 } from "@/lib/domain/events/seller-message-event.js";
 import { toPodioDateField } from "@/lib/utils/dates.js";
+import { captureRouteException } from "@/lib/monitoring/sentry.js";
+import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
+import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -336,6 +339,37 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
         })
         .eq("id", row.id);
 
+      captureRouteException(err, {
+        route: "internal/events/sync-podio",
+        subsystem: "podio_sync",
+        context: {
+          message_event_key: row.message_event_key,
+          podio_sync_attempts: attempts,
+          event_type: row.event_type,
+        },
+      });
+
+      captureSystemEvent("message_event_sync_to_podio_failed", {
+        message_event_key: row.message_event_key,
+        event_type: row.event_type,
+        podio_sync_attempts: attempts,
+        error_message: String(err?.message ?? err),
+      });
+
+      sendCriticalAlert({
+        title: "Podio Sync Failure",
+        description: "Failed to sync message event to Podio",
+        color: 0xe74c3c,
+        fields: [
+          { name: "Message Event Key", value: String(row.message_event_key || "?"), inline: true },
+          { name: "Event Type", value: String(row.event_type || "?"), inline: true },
+          { name: "Attempts", value: String(attempts), inline: true },
+          { name: "Error", value: String(err?.message ?? err).slice(0, 256), inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: "internal/events/sync-podio" },
+      });
+
       console.error(
         `PODIO MESSAGE EVENT SYNC FAILED: key=${row.message_event_key} attempt=${attempts} error=${err?.message ?? err}`
       );
@@ -347,6 +381,13 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
   console.log(
     `PODIO MESSAGE EVENT SYNC COMPLETE: synced=${synced} failed=${failed} skipped=${skipped_count} total=${events.length}`
   );
+
+  captureSystemEvent("message_event_sync_to_podio_completed", {
+    synced,
+    failed,
+    skipped: skipped_count,
+    total: events.length,
+  });
 
   return {
     synced,

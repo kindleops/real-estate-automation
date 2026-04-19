@@ -9,6 +9,7 @@ import {
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
 import { syncSupabaseMessageEventsToPodio } from "@/lib/domain/events/sync-supabase-message-events-to-podio.js";
+import { captureRouteException } from "@/lib/monitoring/sentry.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,6 +78,11 @@ async function handle(request) {
     }
 
     logger.error("podio_sync.error", { error: serializePodioError(err) });
+
+    captureRouteException(err, {
+      route: "internal/events/sync-podio",
+      subsystem: "podio_sync",
+    });
 
     return NextResponse.json(
       { ok: false, error: err.message },
