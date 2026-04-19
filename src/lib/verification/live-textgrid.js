@@ -60,18 +60,43 @@ export async function runLiveTextgridSendVerification({
     };
   }
 
-  const send_result = await sendTextgridSMS({
-    to,
-    from,
-    body: message_body,
-    client_reference_id,
-    message_type: "sms",
-  });
-
-  if (!send_result.ok) {
+  let send_result;
+  try {
+    send_result = await sendTextgridSMS({
+      to,
+      from,
+      body: message_body,
+      client_reference_id,
+      message_type: "sms",
+    });
+  } catch (error) {
     return {
       ok: false,
-      reason: send_result.error_message || "textgrid_send_failed",
+      reason: clean(error?.message) || "textgrid_send_failed",
+      run_id,
+      client_reference_id,
+      send_result: {
+        success: false,
+        ok: false,
+        sid: null,
+        message_id: null,
+        error_message: clean(error?.message) || "textgrid_send_failed",
+        error_status: error?.status ?? null,
+        error_data: error?.data ?? null,
+        endpoint: error?.endpoint ?? null,
+      },
+    };
+  }
+
+  const provider_sid =
+    clean(send_result?.sid) ||
+    clean(send_result?.message_id) ||
+    null;
+
+  if (!provider_sid) {
+    return {
+      ok: false,
+      reason: "SEND FAILED - NO SID",
       run_id,
       client_reference_id,
       send_result,
@@ -84,8 +109,8 @@ export async function runLiveTextgridSendVerification({
 
   try {
     event = await createMessageEvent({
-      "message-id": send_result.message_id,
-      "text-2": send_result.message_id,
+      "message-id": provider_sid,
+      "text-2": provider_sid,
       "timestamp": { start: nowIso() },
       "trigger-name": trigger_name,
       "direction": "Outbound",
@@ -100,7 +125,7 @@ export async function runLiveTextgridSendVerification({
         event_kind: "verification_textgrid_send",
         verification_run_id: run_id,
         client_reference_id,
-        provider_message_id: send_result.message_id,
+        provider_message_id: provider_sid,
       }),
     });
   } catch (error) {
@@ -111,7 +136,7 @@ export async function runLiveTextgridSendVerification({
     ok: true,
     run_id,
     client_reference_id,
-    provider_message_id: send_result.message_id,
+    provider_message_id: provider_sid,
     event_item_id: event?.item_id || null,
     status: clean(send_result.status) || "sent",
     to: send_result.to,

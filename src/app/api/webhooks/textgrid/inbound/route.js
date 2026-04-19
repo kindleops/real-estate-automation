@@ -2,6 +2,11 @@ import { NextResponse } from "next/server.js";
 
 import { maybeHandleBuyerTextgridInbound } from "@/lib/domain/buyers/handle-buyer-response-webhook.js";
 import { child } from "@/lib/logging/logger.js";
+import { hasSupabaseConfig } from "@/lib/supabase/client.js";
+import {
+  logInboundMessageEvent as logSupabaseInboundMessageEvent,
+  writeWebhookLog,
+} from "@/lib/supabase/sms-engine.js";
 import { handleTextgridInbound } from "@/lib/flows/handle-textgrid-inbound.js";
 import {
   buildTextgridWebhookBypassResult,
@@ -25,6 +30,8 @@ const defaultDeps = {
   handleTextgridInboundImpl: handleTextgridInbound,
   verifyTextgridWebhookRequestImpl: verifyTextgridWebhookRequest,
   normalizeTextgridInboundPayloadImpl: normalizeTextgridInboundPayload,
+  writeWebhookLogImpl: writeWebhookLog,
+  logSupabaseInboundMessageEventImpl: logSupabaseInboundMessageEvent,
 };
 
 let runtimeDeps = { ...defaultDeps };
@@ -565,6 +572,37 @@ export async function POST(request) {
         );
       }
       accepted_logged = true;
+
+      if (hasSupabaseConfig()) {
+        try {
+          await runtimeDeps.writeWebhookLogImpl({
+            event_type: payload.header_event || "inbound",
+            direction: "inbound",
+            provider_message_sid: payload.message_id || null,
+            payload,
+            headers: Object.fromEntries(request.headers.entries()),
+            received_at: new Date().toISOString(),
+            source: "textgrid",
+          });
+          await runtimeDeps.logSupabaseInboundMessageEventImpl(payload, {
+            now: new Date().toISOString(),
+          });
+        } catch (supabase_error) {
+          safeRouteLog(
+            "error",
+            "textgrid_inbound.supabase_logging_failed",
+            buildTextgridWebhookLogMeta({
+              payload,
+              webhook_verification,
+              downstream_handler_invoked,
+              podio_persistence_attempted,
+              extra: {
+                message: supabase_error?.message || "Unknown Supabase inbound logging error",
+              },
+            })
+          );
+        }
+      }
 
       if (inbound_debug_stage === "after_accepted") {
         return NextResponse.json({ ok: true, stage: "after_accepted" });

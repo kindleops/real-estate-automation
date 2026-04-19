@@ -17,6 +17,8 @@ import {
   shouldAllowRawCategoryCompatibilityValue,
 } from "@/lib/podio/schema.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
+import { hasSupabaseConfig } from "@/lib/supabase/client.js";
+import { insertSupabaseSendQueueRow } from "@/lib/supabase/sms-engine.js";
 import { resolveTemplateFieldReference } from "@/lib/domain/templates/template-reference.js";
 import { deriveQueueCurrentStage } from "@/lib/domain/communications-engine/state-machine.js";
 import { warn } from "@/lib/logging/logger.js";
@@ -202,6 +204,13 @@ function normalizePriority(value) {
   if (["_ urgent", "urgent", "high"].includes(raw)) return "_ Urgent";
   if (["_ low", "low"].includes(raw)) return "_ Low";
   return "_ Normal";
+}
+
+function mapPriorityToNumber(value) {
+  const normalized = normalizePriority(value).toLowerCase();
+  if (normalized === "_ urgent") return 10;
+  if (normalized === "_ low") return 1;
+  return 5;
 }
 
 function normalizeMessageType(value) {
@@ -1030,6 +1039,135 @@ export async function buildSendQueueItem({
       delete fields[key];
     }
   });
+
+  const use_supabase_queue_write =
+    hasSupabaseConfig() &&
+    create_item === createItem &&
+    update_item === updateItem;
+
+  if (use_supabase_queue_write) {
+    const resolved_queue_key =
+      clean(queue_id) || `queue-${phone_item_id}-${Date.now()}`;
+    const supabase_result = await insertSupabaseSendQueueRow({
+      queue_key: resolved_queue_key,
+      queue_id: resolved_queue_key,
+      queue_status: normalizeQueueStatus(queue_status).toLowerCase(),
+      scheduled_for: scheduled_utc_value?.start || scheduled_local_value?.start || nowIso(),
+      scheduled_for_utc: scheduled_utc_value?.start || scheduled_local_value?.start || nowIso(),
+      scheduled_for_local:
+        scheduled_local_value?.start || scheduled_utc_value?.start || nowIso(),
+      timezone: resolved_timezone || "America/Chicago",
+      contact_window: contact_window_field.omitted ? null : resolved_contact_window,
+      send_priority: mapPriorityToNumber(send_priority),
+      retry_count: 0,
+      max_retries: Number(max_retries) || 3,
+      message_body: message_text || "",
+      message_text: message_text || "",
+      to_phone_number: normalized_target,
+      from_phone_number: null,
+      property_address: property_address || null,
+      property_type: resolved_property_type || null,
+      owner_type: resolved_owner_type || null,
+      master_owner_id,
+      prospect_id,
+      property_id,
+      market_id,
+      sms_agent_id: assigned_agent_id || null,
+      textgrid_number_id: textgrid_number_item_id || null,
+      template_id:
+        template_reference.selected_template_id ??
+        template_reference.selected_template_item_id ??
+        template_id ??
+        null,
+      touch_number: next_touch_number,
+      dnc_check,
+      current_stage: resolved_current_stage || null,
+      message_type: normalized_message_type,
+      use_case_template: resolved_use_case_template || null,
+      personalization_tags_used: personalization_tags_used.length
+        ? personalization_tags_used
+        : null,
+      character_count: message_text ? countCharacters(message_text) : 0,
+      metadata: {
+        source: "build_send_queue_item",
+        selected_template_source: selected_template_source ?? null,
+        selected_template_item_id: template_reference.selected_template_item_id ?? null,
+        selected_template_id: template_reference.selected_template_id ?? null,
+        warnings: missing_relation_warnings,
+      },
+    });
+
+    return {
+      ok: supabase_result?.ok !== false,
+      queue_item_id: supabase_result?.queue_item_id || supabase_result?.item_id || null,
+      queue_id: supabase_result?.queue_id || resolved_queue_key,
+      queue_sequence: next_touch_number,
+      phone_item_id,
+      textgrid_number_item_id,
+      template_id,
+      selected_template_id: template_reference.selected_template_id ?? null,
+      selected_template_item_id: template_reference.selected_template_item_id ?? null,
+      selected_template_source: selected_template_source ?? null,
+      selected_template_title: template_reference.selected_template_title ?? null,
+      selected_template_use_case: template_reference.selected_template_use_case ?? null,
+      selected_template_variant_group:
+        template_reference.selected_template_variant_group ?? null,
+      selected_template_language: template_reference.selected_template_language ?? null,
+      selected_template_tone: template_reference.selected_template_tone ?? null,
+      selected_template_selection_diagnostics:
+        template_reference.selected_template_selection_diagnostics ?? null,
+      selected_template_resolution_source:
+        template_reference.selected_template_resolution_source ?? null,
+      selected_template_fallback_reason:
+        template_reference.selected_template_fallback_reason ?? null,
+      template_relation_id: null,
+      attempted_template_relation_id: template_reference.attached_template_id ?? null,
+      template_app_field_written: false,
+      template_attachment_strategy: "supabase_template_id",
+      template_attachment_reason: null,
+      template_target_app_ids: template_reference.target_app_ids || [],
+      template_relation_candidates: template_candidates.map(
+        (candidate) => candidate.attached_template_id
+      ),
+      template_attached: Boolean(
+        template_reference.selected_template_id ||
+          template_reference.selected_template_item_id ||
+          template_id
+      ),
+      message_text: message_text || null,
+      deferred_message_resolution: Boolean(defer_message_resolution && !message_text),
+      normalized_target,
+      touch_number: next_touch_number,
+      queue_status: normalizeQueueStatus(queue_status),
+      contact_window_written: !contact_window_field.omitted,
+      contact_window_omit_reason: contact_window_field.omitted
+        ? contact_window_field.reason
+        : null,
+      property_address_written: Boolean(property_id && property_address),
+      property_type_written: !property_type_field.omitted,
+      owner_type_written: !owner_type_field.omitted,
+      current_stage_written: !current_stage_field.omitted,
+      current_stage_value: resolved_current_stage,
+      use_case_template_written: !use_case_template_field.omitted,
+      message_type_value: normalized_message_type,
+      use_case_template_value: resolved_use_case_template,
+      strict_cold_outbound: Boolean(strict_cold_outbound),
+      warnings: [
+        ...missing_relation_warnings,
+        ...(defer_message_resolution && !message_text
+          ? ["Message text will be resolved during queue processing."]
+          : []),
+        ...(contact_window_field.omitted && contact_window_field.reason !== "empty"
+          ? [
+              `contact-window field omitted: no matching category option for "${resolved_contact_window}" in Send Queue schema.`,
+            ]
+          : []),
+      ],
+      raw: supabase_result?.raw || null,
+      storage: "supabase",
+      reason: supabase_result?.reason || null,
+    };
+  }
 
   let created = null;
   let template_attach_warning = null;

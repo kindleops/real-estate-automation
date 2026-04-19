@@ -12,6 +12,7 @@ const logger = child({
 });
 
 export async function GET(request) {
+  console.log("QUEUE ROUTE HIT");
   return handleQueueRunRequest(request, "GET", {
     logger,
     jsonResponse: NextResponse.json,
@@ -19,8 +20,5 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  return handleQueueRunRequest(request, "POST", {
-    logger,
-    jsonResponse: NextResponse.json,
-  });
+  return GET(request);
 }

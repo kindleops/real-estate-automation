@@ -7,7 +7,7 @@ import { handleTextgridDeliveryWebhook } from "@/lib/flows/handle-textgrid-deliv
 import { handleDocusignWebhook } from "@/lib/domain/contracts/handle-docusign-webhook.js";
 import { handleTitleResponseWebhook } from "@/lib/domain/title/handle-title-response-webhook.js";
 import { handleClosingResponseWebhook } from "@/lib/domain/closings/handle-closing-response-webhook.js";
-import { processSendQueueItem } from "@/lib/domain/queue/process-send-queue.js";
+import { processSendQueue } from "@/lib/domain/queue/process-send-queue.js";
 import { queueOutboundMessage } from "@/lib/flows/queue-outbound-message.js";
 
 export const runtime = "nodejs";
@@ -26,7 +26,9 @@ async function replayQueueSend(payload = {}) {
     };
   }
 
-  return processSendQueueItem(queue_item_id);
+  return processSendQueue({
+    queue_item_id,
+  });
 }
 
 const FLOW_HANDLERS = {

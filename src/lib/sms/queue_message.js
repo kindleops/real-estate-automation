@@ -8,6 +8,8 @@ import APP_IDS from "@/lib/config/app-ids.js";
 import { createItem, getFirstMatchingItem } from "@/lib/providers/podio.js";
 import { countSegments } from "@/lib/sms/personalize_template.js";
 import { info, warn } from "@/lib/logging/logger.js";
+import { hasSupabaseConfig } from "@/lib/supabase/client.js";
+import { insertSupabaseSendQueueRow } from "@/lib/supabase/sms-engine.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // QUEUE FIELD EXTERNAL IDS
@@ -106,6 +108,21 @@ function omitEmpty(value) {
   if (value === null || value === undefined) return undefined;
   if (typeof value === "string" && value.trim() === "") return undefined;
   return value;
+}
+
+function mapSendPriorityToNumber(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (["_ urgent", "urgent", "high", "10"].includes(raw)) return 10;
+  if (["_ low", "low", "1"].includes(raw)) return 1;
+  return 5;
+}
+
+function shouldUseSupabaseQueueWrite() {
+  return (
+    hasSupabaseConfig() &&
+    runtimeDeps.createItem === defaultDeps.createItem &&
+    runtimeDeps.getFirstMatchingItem === defaultDeps.getFirstMatchingItem
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -303,6 +320,74 @@ export async function queueMessage(params = {}) {
     use_case: fields[QUEUE_FIELDS.use_case] || null,
     field_count: Object.keys(fields).length,
   });
+
+  if (shouldUseSupabaseQueueWrite()) {
+    const now = new Date().toISOString();
+    const queue_result = await insertSupabaseSendQueueRow({
+      queue_key: queue_id,
+      queue_id,
+      queue_status: "queued",
+      scheduled_for: params?.schedule?.scheduled_utc || params?.schedule?.scheduled_local || now,
+      scheduled_for_utc:
+        params?.schedule?.scheduled_utc || params?.schedule?.scheduled_local || now,
+      scheduled_for_local:
+        params?.schedule?.scheduled_local || params?.schedule?.scheduled_utc || now,
+      timezone: params?.schedule?.timezone || params?.context?.timezone || "America/Chicago",
+      contact_window: params?.context?.contact_window || null,
+      send_priority: mapSendPriorityToNumber(params?.context?.send_priority),
+      retry_count: 0,
+      max_retries: params?.context?.max_retries ?? 3,
+      message_body: params?.rendered_text || "",
+      message_text: params?.rendered_text || "",
+      to_phone_number: params?.context?.phone_e164 || null,
+      from_phone_number: params?.context?.from_phone_number || null,
+      property_address: params?.context?.property_address || null,
+      property_type: params?.context?.property_type || null,
+      owner_type: params?.context?.owner_type || null,
+      master_owner_id: params?.links?.master_owner_id || null,
+      prospect_id: params?.links?.prospect_id || null,
+      property_id: params?.links?.property_id || null,
+      market_id: params?.links?.market_id || null,
+      sms_agent_id: params?.links?.agent_id || null,
+      textgrid_number_id: params?.links?.textgrid_number_id || null,
+      template_id:
+        params?.resolution?.template_id ||
+        params?.resolution?.attachable_template_ref?.item_id ||
+        null,
+      touch_number: params?.context?.touch_number ?? null,
+      dnc_check: params?.context?.dnc_check || null,
+      current_stage: params?.resolution?.stage_code || null,
+      message_type: fields[QUEUE_FIELDS.message_type] || null,
+      use_case_template: params?.resolution?.use_case || null,
+      personalization_tags_used: params?.context?.placeholders_used || null,
+      character_count: String(params?.rendered_text || "").length,
+      metadata: {
+        source: "queue_message",
+        schedule: params?.schedule || null,
+        resolution_source: params?.resolution?.source || null,
+        queue_fields: fields,
+      },
+    });
+
+    info("queue_message.created", {
+      queue_id,
+      item_id: queue_result?.item_id || null,
+      storage: "supabase",
+      reason: queue_result?.reason || null,
+    });
+
+    return {
+      ok: queue_result?.ok !== false,
+      item_id: queue_result?.item_id || null,
+      queue_item_id: queue_result?.queue_item_id || null,
+      queue_id: queue_result?.queue_id || queue_id,
+      queue_key: queue_result?.queue_key || queue_id,
+      reason: queue_result?.reason || null,
+      storage: "supabase",
+      fields,
+      raw: queue_result?.raw || null,
+    };
+  }
 
   // Dedupe check: look for an existing row with the same queue ID
   try {
