@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { requireDevRouteAccess } from "@/lib/security/dev-route-guard.js";
 import { insertSupabaseSendQueueRow } from "@/lib/supabase/sms-engine.js";
 
 export const runtime = "nodejs";
@@ -110,6 +111,12 @@ export async function runDevSendTest({
 }
 
 export async function handleDevSendTestRequest(request, deps = {}) {
+  const denied = requireDevRouteAccess(request);
+
+  if (denied) {
+    return denied;
+  }
+
   return Response.json(
     await runDevSendTest({
       request_url: request.url,
