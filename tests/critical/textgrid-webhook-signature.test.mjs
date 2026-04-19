@@ -1342,18 +1342,29 @@ test("textgrid inbound route: failure before accepted emits failed_pre_accept", 
         provider: "textgrid",
         raw: {},
         message_id: "SM-inbound-fail-before-accept",
-        from: "+15550001234",
         to: "+15559876543",
         status: "received",
         header_signature: "observe-mode-invalid-signature",
         header_signature_name: "x-textgrid-signature",
         header_event: "inbound",
+        message_body: null,
+        body_source: null,
+        raw_body_keys: ["SmsMessageSid", "From", "To", "Body", "SmsStatus"],
       };
 
-      Object.defineProperty(payload, "message", {
+      // `payload.from` is accessed:
+      //   1. try { safe_from = payload?.from } catch {}       → returns "+15550001234"
+      //   2. buildTextgridWebhookLogMeta({ payload })          → returns "+15550001234"
+      //   3. if (!payload.from) inside inner try               → throws
+      // This ensures the throw lands inside the inner try (after
+      // safe_signature_verification_mode is set) so the inner catch fires.
+      let from_access_count = 0;
+      Object.defineProperty(payload, "from", {
         enumerable: true,
         configurable: true,
         get() {
+          from_access_count++;
+          if (from_access_count <= 2) return "+15550001234";
           throw new Error("inbound_pre_accept_failure");
         },
       });

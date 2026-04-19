@@ -272,26 +272,44 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     .limit(limit);
 
   if (load_error) {
-    console.error("PODIO MESSAGE EVENT SYNC FAILED (load)", load_error.message);
+    console.error("PODIO MESSAGE EVENT SYNC FAILED (load)", load_error.message, {
+      hint: "If error mentions a missing column, run the pending Supabase migration.",
+    });
     throw load_error;
   }
+
+  const loaded_count = (rows || []).length;
 
   const events = (rows || []).filter((row) =>
     SYNCABLE_EVENT_TYPES.has(row.event_type)
   );
 
-  const skipped_count = (rows || []).length - events.length;
+  const skipped_rows = (rows || []).filter(
+    (row) => !SYNCABLE_EVENT_TYPES.has(row.event_type)
+  );
+  const skipped_count = skipped_rows.length;
+
+  const first_10_skipped_reasons = skipped_rows.slice(0, 10).map((row) => ({
+    key: row.message_event_key || null,
+    event_type: row.event_type || null,
+  }));
+
+  const first_10_event_keys = events.slice(0, 10).map((row) => row.message_event_key || null);
 
   console.log(
-    `PODIO MESSAGE EVENT SYNC LOADED: ${events.length} events to sync` +
-      (skipped_count ? `, ${skipped_count} skipped (noisy/unsupported type)` : "")
+    `PODIO MESSAGE EVENT SYNC LOADED: loaded=${loaded_count} to_sync=${events.length}` +
+      (skipped_count ? ` skipped=${skipped_count} (unsupported event_type)` : "")
   );
+  if (first_10_event_keys.length) {
+    console.log("PODIO MESSAGE EVENT SYNC KEYS:", JSON.stringify(first_10_event_keys));
+  }
+  if (first_10_skipped_reasons.length) {
+    console.log("PODIO MESSAGE EVENT SYNC SKIPPED:", JSON.stringify(first_10_skipped_reasons));
+  }
 
-  // Mark noisy rows as skipped so they don't re-appear in future batches.
+  // Mark unsupported rows as skipped so they don't re-appear in future batches.
   if (skipped_count > 0) {
-    const skipped_ids = (rows || [])
-      .filter((row) => !SYNCABLE_EVENT_TYPES.has(row.event_type))
-      .map((row) => row.id);
+    const skipped_ids = skipped_rows.map((row) => row.id);
 
     if (skipped_ids.length > 0) {
       await supabase
@@ -306,10 +324,12 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
   // ------------------------------------------------------------------
   let synced = 0;
   let failed = 0;
+  const failed_errors = [];
 
   for (const row of events) {
+    let fields = null;
     try {
-      const fields = buildPodioPayloadForSupabaseEvent(row);
+      fields = buildPodioPayloadForSupabaseEvent(row);
       const item = await createEvent(fields);
       const podio_item_id = String(item?.item_id ?? item?.itemId ?? "");
 
@@ -339,6 +359,20 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
         })
         .eq("id", row.id);
 
+      const error_detail = {
+        key:              row.message_event_key || null,
+        event_type:       row.event_type || null,
+        attempts,
+        error:            String(err?.message ?? err),
+        direction_sent:   fields?.["direction"] ?? null,
+        category_sent:    fields?.["category"] ?? null,
+        body_empty:       !fields?.["message"],
+      };
+
+      if (failed_errors.length < 10) {
+        failed_errors.push(error_detail);
+      }
+
       captureRouteException(err, {
         route: "internal/events/sync-podio",
         subsystem: "podio_sync",
@@ -346,6 +380,8 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
           message_event_key: row.message_event_key,
           podio_sync_attempts: attempts,
           event_type: row.event_type,
+          direction_sent: error_detail.direction_sent,
+          category_sent: error_detail.category_sent,
         },
       });
 
@@ -371,7 +407,12 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
       });
 
       console.error(
-        `PODIO MESSAGE EVENT SYNC FAILED: key=${row.message_event_key} attempt=${attempts} error=${err?.message ?? err}`
+        `PODIO MESSAGE EVENT SYNC FAILED: key=${row.message_event_key}` +
+        ` attempt=${attempts}` +
+        ` direction=${error_detail.direction_sent}` +
+        ` category=${error_detail.category_sent}` +
+        ` body_empty=${error_detail.body_empty}` +
+        ` error=${err?.message ?? err}`
       );
       failed++;
       // Continue — one failure must never abort the rest of the batch.
@@ -379,10 +420,11 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
   }
 
   console.log(
-    `PODIO MESSAGE EVENT SYNC COMPLETE: synced=${synced} failed=${failed} skipped=${skipped_count} total=${events.length}`
+    `PODIO MESSAGE EVENT SYNC COMPLETE: loaded=${loaded_count} synced=${synced} failed=${failed} skipped=${skipped_count} total=${events.length}`
   );
 
   captureSystemEvent("message_event_sync_to_podio_completed", {
+    loaded_count,
     synced,
     failed,
     skipped: skipped_count,
@@ -390,10 +432,20 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
   });
 
   return {
+    // Named counts (preferred)
+    loaded_count,
+    synced_count: synced,
+    failed_count: failed,
+    skipped_count,
+    total: events.length,
+    // Backward-compatible aliases
     synced,
     failed,
     skipped: skipped_count,
-    total: events.length,
+    // Diagnostic arrays (first 10 of each)
+    first_10_event_keys,
+    first_10_failed_errors: failed_errors,
+    first_10_skipped_reasons,
   };
 }
 

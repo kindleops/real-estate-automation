@@ -62,7 +62,14 @@ async function handle(request) {
     const result = await syncSupabaseMessageEventsToPodio({ limit });
 
     logger.info("podio_sync.completed", {
-      ...result,
+      loaded_count:             result.loaded_count,
+      synced_count:             result.synced_count,
+      failed_count:             result.failed_count,
+      skipped_count:            result.skipped_count,
+      total:                    result.total,
+      first_10_event_keys:      result.first_10_event_keys,
+      first_10_failed_errors:   result.first_10_failed_errors,
+      first_10_skipped_reasons: result.first_10_skipped_reasons,
       method: request.method,
     });
 

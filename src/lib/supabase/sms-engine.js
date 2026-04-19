@@ -1076,22 +1076,71 @@ export async function logInboundMessageEvent(payload, options = {}) {
   );
   const from_phone_number = normalizePhone(payload?.from || payload?.from_phone_number);
   const to_phone_number = normalizePhone(payload?.to || payload?.to_phone_number);
-  const message_body = clean(payload?.body || payload?.message_body);
+
+  // Extract body from all possible field names. The normalizer outputs .message
+  // and .message_body; raw/un-normalized payloads may use Body, MessageBody, etc.
+  const body_candidates = [
+    ["message",      payload?.message],
+    ["message_body", payload?.message_body],
+    ["body",         payload?.body],
+    ["Body",         payload?.Body],
+    ["MessageBody",  payload?.MessageBody],
+    ["Message",      payload?.Message],
+    ["Text",         payload?.Text],
+    ["text",         payload?.text],
+    ["payload.Body", payload?.payload?.Body],
+    ["payload.body", payload?.payload?.body],
+    ["data.Body",    payload?.data?.Body],
+    ["data.body",    payload?.data?.body],
+  ];
+
+  let message_body = null;
+  let body_source = payload?.body_source || null;
+
+  if (body_source && payload?.message) {
+    message_body = clean(payload.message);
+  } else {
+    for (const [key, val] of body_candidates) {
+      const s = clean(val);
+      if (s) {
+        message_body = s;
+        body_source = key;
+        break;
+      }
+    }
+  }
+
+  const body_missing = !message_body;
+  const raw_body_keys = payload?.raw_body_keys || Object.keys(payload || {});
+
+  if (body_missing) {
+    console.warn("INBOUND BODY MISSING", JSON.stringify({
+      message_sid,
+      from_phone_number,
+      available_payload_keys: raw_body_keys,
+    }));
+  }
 
   const event = {
     message_event_key: `inbound_${message_sid || crypto.randomUUID()}`,
     provider_message_sid: message_sid || null,
     direction: "inbound",
     event_type: "inbound_sms",
-    message_body,
+    message_body: message_body || null,
     to_phone_number,
     from_phone_number,
     received_at: pickFirst(payload?.received_at, now),
     event_timestamp: pickFirst(payload?.received_at, now),
     created_at: now,
-    character_count: message_body.length,
+    character_count: message_body ? message_body.length : 0,
     metadata: {
       source: "textgrid_inbound_webhook",
+      raw_body_keys,
+      body_source,
+      ...(body_missing ? {
+        body_missing: true,
+        available_payload_keys: raw_body_keys,
+      } : {}),
       payload,
     },
   };

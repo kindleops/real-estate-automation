@@ -156,7 +156,9 @@ export async function POST(request) {
 
   try {
     const raw_body = await request.clone().text().catch(() => "");
+    console.log("TEXTGRID INBOUND WEBHOOK HIT", serializeForConsole({ method: "POST", url: request.url }));
     const content_type = clean(request.headers.get("content-type"));
+    console.log("INBOUND CONTENT TYPE", serializeForConsole({ content_type }));
     const body = await parseRequestBody(request);
 
     // form_params is the decoded key/value object when the body is form-encoded.
@@ -164,8 +166,11 @@ export async function POST(request) {
     const is_form_encoded = content_type.toLowerCase().includes("application/x-www-form-urlencoded");
     const form_params = is_form_encoded && body && !body.raw_text ? body : null;
     parsed_body_keys = Object.keys(body || {});
+    console.log("INBOUND PAYLOAD KEYS", serializeForConsole({ parsed_body_keys }));
 
     const payload = runtimeDeps.normalizeTextgridInboundPayloadImpl(body, request.headers);
+    console.log("INBOUND BODY SOURCE", serializeForConsole({ body_source: payload?.body_source || null }));
+    console.log("INBOUND MESSAGE BODY NORMALIZED", serializeForConsole({ message_body: payload?.message_body ?? null }));
     const signature_verification_mode = getTextgridWebhookSignatureMode();
     const verification =
       signature_verification_mode === "off"
@@ -422,7 +427,25 @@ export async function POST(request) {
         return NextResponse.json({ ok: true, stage: "after_signature_branch_selected" });
       }
 
-      if (!payload.from || !payload.message) {
+      if (hasSupabaseConfig()) {
+        try {
+          await runtimeDeps.writeWebhookLogImpl({
+            event_type: payload.header_event || "inbound",
+            direction: "inbound",
+            provider_message_sid: payload.message_id || null,
+            payload,
+            headers: Object.fromEntries(request.headers.entries()),
+            received_at: new Date().toISOString(),
+            source: "textgrid",
+          });
+        } catch (webhook_log_error) {
+          safeRouteLog("error", "textgrid_inbound.webhook_log_failed", {
+            message: webhook_log_error?.message || "webhook_log_write_failed",
+          });
+        }
+      }
+
+      if (!payload.from) {
         const invalid_payload_meta = {
           ...branch_meta,
           response_error: "invalid_textgrid_inbound_payload",
@@ -583,18 +606,14 @@ export async function POST(request) {
 
       if (hasSupabaseConfig()) {
         try {
-          await runtimeDeps.writeWebhookLogImpl({
-            event_type: payload.header_event || "inbound",
-            direction: "inbound",
-            provider_message_sid: payload.message_id || null,
-            payload,
-            headers: Object.fromEntries(request.headers.entries()),
-            received_at: new Date().toISOString(),
-            source: "textgrid",
-          });
           await runtimeDeps.logSupabaseInboundMessageEventImpl(payload, {
             now: new Date().toISOString(),
           });
+          console.log("INBOUND MESSAGE EVENT WRITTEN", serializeForConsole({
+            provider_message_sid: payload.message_id || null,
+            body_source: payload.body_source || null,
+            message_body: payload.message_body ?? null,
+          }));
         } catch (supabase_error) {
           safeRouteLog(
             "error",

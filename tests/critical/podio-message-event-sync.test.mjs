@@ -433,3 +433,176 @@ test("writeOutboundSuccessMessageEvent: payload does not contain podio_sync_stat
   assert.equal(captured_payload.direction, "outbound");
   assert.equal(captured_payload.event_type, "outbound_send");
 });
+
+// ─── 7. loaded_count and first_10_event_keys in result ─────────────────────
+
+test("syncSupabaseMessageEventsToPodio: result includes loaded_count and first_10_event_keys", async () => {
+  const rows = [
+    makeOutboundRow({ id: 1, message_event_key: "outbound_key-A" }),
+    makeOutboundRow({ id: 2, message_event_key: "outbound_key-B" }),
+    makeInboundRow( { id: 3, message_event_key: "inbound_key-C" }),
+  ];
+
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          in: () => ({
+            order: () => ({
+              limit: () => ({ data: rows, error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: () => ({ eq: () => ({ data: null, error: null }) }),
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async () => ({ item_id: 77001 }),
+  });
+
+  assert.equal(result.loaded_count, 3, "loaded_count must equal total rows from Supabase");
+  assert.equal(result.synced_count, 3);
+  assert.equal(result.failed_count, 0);
+  assert.equal(result.skipped_count, 0);
+  assert.deepEqual(
+    result.first_10_event_keys,
+    ["outbound_key-A", "outbound_key-B", "inbound_key-C"]
+  );
+  // Backward-compat aliases
+  assert.equal(result.synced, 3);
+  assert.equal(result.failed, 0);
+  assert.equal(result.skipped, 0);
+});
+
+// ─── 8. first_10_failed_errors includes direction+category on Podio error ──
+
+test("syncSupabaseMessageEventsToPodio: first_10_failed_errors includes direction and category", async () => {
+  const row = makeOutboundRow({ id: 1, message_event_key: "outbound_key-fail" });
+
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          in: () => ({
+            order: () => ({
+              limit: () => ({ data: [row], error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: () => ({ eq: () => ({ data: null, error: null }) }),
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async () => {
+      throw new Error("invalid category value");
+    },
+  });
+
+  assert.equal(result.failed_count, 1);
+  assert.equal(result.first_10_failed_errors.length, 1);
+
+  const err = result.first_10_failed_errors[0];
+  assert.equal(err.key, "outbound_key-fail");
+  assert.equal(err.event_type, "outbound_send");
+  assert.equal(err.direction_sent, "Outbound", "direction_sent must be logged on failure");
+  assert.equal(err.category_sent, "Seller Outbound SMS", "category_sent must be logged on failure");
+  assert.ok(err.error.includes("invalid category value"));
+  assert.equal(err.attempts, 1);
+});
+
+// ─── 9. first_10_skipped_reasons contains unsupported event types ───────────
+
+test("syncSupabaseMessageEventsToPodio: first_10_skipped_reasons contains unsupported event types", async () => {
+  const rows = [
+    makeOutboundRow({ id: 1, message_event_key: "outbound_key-ok", event_type: "outbound_send" }),
+    makeOutboundRow({ id: 2, message_event_key: "delivery_key-skip", event_type: "delivery_update" }),
+    makeOutboundRow({ id: 3, message_event_key: "unknown_key-skip", event_type: "unknown_type" }),
+  ];
+
+  const updates = [];
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          in: () => ({
+            order: () => ({
+              limit: () => ({ data: rows, error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: (payload) => {
+        updates.push(payload);
+        return { in: () => ({ data: null, error: null }), eq: () => ({ data: null, error: null }) };
+      },
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async () => ({ item_id: 1 }),
+  });
+
+  assert.equal(result.loaded_count, 3);
+  assert.equal(result.skipped_count, 2);
+  assert.equal(result.first_10_skipped_reasons.length, 2);
+
+  const event_types = result.first_10_skipped_reasons.map((r) => r.event_type);
+  assert.ok(event_types.includes("delivery_update"));
+  assert.ok(event_types.includes("unknown_type"));
+
+  // skipped rows must be marked skipped in Supabase
+  const skipped_update = updates.find((u) => u.podio_sync_status === "skipped");
+  assert.ok(skipped_update, "must mark unsupported-type rows as skipped");
+});
+
+// ─── 10. null message_body produces empty string — event still syncs ────────
+
+test("buildPodioPayloadForSupabaseEvent: null message_body produces empty string not failure", () => {
+  const row = makeOutboundRow({ message_body: null, character_count: null });
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+
+  assert.equal(fields["message"], "", "null body must become empty string");
+  assert.equal(fields["character-count"], 0, "character_count must default to 0 for null body");
+  // Core category fields must still be present
+  assert.equal(fields["direction"], "Outbound");
+  assert.equal(fields["category"], "Seller Outbound SMS");
+});
+
+test("syncSupabaseMessageEventsToPodio: event with null body is synced not skipped", async () => {
+  const row = makeInboundRow({ message_body: null, character_count: null });
+  const synced_fields = [];
+
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          in: () => ({
+            order: () => ({
+              limit: () => ({ data: [row], error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: () => ({ eq: () => ({ data: null, error: null }) }),
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async (fields) => {
+      synced_fields.push(fields);
+      return { item_id: 55001 };
+    },
+  });
+
+  assert.equal(result.synced_count, 1, "null-body event must be synced");
+  assert.equal(result.failed_count, 0);
+  assert.equal(synced_fields[0]["message"], "", "Podio must receive empty string for null body");
+});
