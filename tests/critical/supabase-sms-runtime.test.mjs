@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { runSendQueue } from "@/lib/domain/queue/run-send-queue.js";
-import { runDevSendTest } from "@/app/api/dev/send-test/route.js";
+import {
+  GET as getDevSendTest,
+  POST as postDevSendTest,
+  handleDevSendTestRequest,
+  runDevSendTest,
+} from "@/app/api/dev/send-test/route.js";
 import {
   finalizeSendQueueSuccess,
   loadRunnableSendQueueRows,
@@ -427,35 +432,93 @@ test("writeWebhookLog forwards a structured raw payload for TextGrid webhooks", 
 
 test("runDevSendTest inserts a canonical queued row and optionally runs the queue immediately", async () => {
   let inserted_payload = null;
-  let run_called = false;
+  let fetched = null;
+  const original_cron_secret = process.env.CRON_SECRET;
+  process.env.CRON_SECRET = "cron-secret";
 
-  const result = await runDevSendTest({
-    request_url: "http://localhost/api/dev/send-test?run_now=true",
-    insertSupabaseSendQueueRowImpl: async (payload) => {
-      inserted_payload = payload;
-      return {
+  try {
+    const result = await runDevSendTest({
+      request_url:
+        "http://localhost/api/dev/send-test?run_now=true&to=%2B16127430000&from=%2B16128060000",
+      insertSupabaseSendQueueRowImpl: async (payload) => {
+        inserted_payload = payload;
+        return {
+          ok: true,
+          item_id: 501,
+          queue_id: payload.queue_id,
+          queue_key: payload.queue_key,
+          raw: payload,
+        };
+      },
+      fetchImpl: async (url, options) => {
+        fetched = { url, options };
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              ok: true,
+              route: "internal/queue/run",
+              result: {
+                ok: true,
+                sent_count: 1,
+              },
+            }),
+        };
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.ok(inserted_payload);
+    assert.equal(inserted_payload.queue_status, "queued");
+    assert.equal(inserted_payload.send_priority, 10);
+    assert.equal(inserted_payload.to_phone_number, "+16127430000");
+    assert.equal(inserted_payload.from_phone_number, "+16128060000");
+    assert.equal(inserted_payload.message_body, "Test message from Supabase send_queue");
+    assert.equal(inserted_payload.message_text, "Test message from Supabase send_queue");
+    assert.equal(inserted_payload.metadata.source, "dev_send_test");
+
+    assert.ok(fetched);
+    assert.equal(fetched.url, "http://localhost/api/internal/queue/run");
+    assert.equal(fetched.options.method, "GET");
+    assert.equal(fetched.options.headers.Authorization, "Bearer cron-secret");
+    assert.equal(fetched.options.headers["x-vercel-cron-secret"], "cron-secret");
+    assert.equal(result.queue_run.ok, true);
+    assert.equal(result.queue_run.result.sent_count, 1);
+  } finally {
+    if (original_cron_secret === undefined) {
+      delete process.env.CRON_SECRET;
+    } else {
+      process.env.CRON_SECRET = original_cron_secret;
+    }
+  }
+});
+
+test("dev send-test route exports GET and POST handlers and request helper returns JSON response", async () => {
+  assert.equal(typeof getDevSendTest, "function");
+  assert.equal(typeof postDevSendTest, "function");
+
+  const response = await handleDevSendTestRequest(
+    {
+      url: "http://localhost/api/dev/send-test?run_now=false",
+    },
+    {
+      insertSupabaseSendQueueRowImpl: async (payload) => ({
         ok: true,
-        item_id: 501,
+        item_id: 777,
         queue_id: payload.queue_id,
         queue_key: payload.queue_key,
         raw: payload,
-      };
-    },
-    runSendQueueImpl: async () => {
-      run_called = true;
-      return {
-        ok: true,
-        sent_count: 1,
-      };
-    },
-  });
+      }),
+      fetchImpl: async () => {
+        throw new Error("should_not_fetch_when_run_now_false");
+      },
+    }
+  );
 
-  assert.equal(result.ok, true);
-  assert.equal(run_called, true);
-  assert.ok(inserted_payload);
-  assert.equal(inserted_payload.queue_status, "queued");
-  assert.equal(inserted_payload.send_priority, 10);
-  assert.equal(inserted_payload.to_phone_number, "+16127433952");
-  assert.equal(inserted_payload.from_phone_number, "+16128060495");
-  assert.equal(inserted_payload.metadata.source, "dev_send_test");
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.inserted.item_id, 777);
+  assert.equal(body.queue_run, null);
 });
