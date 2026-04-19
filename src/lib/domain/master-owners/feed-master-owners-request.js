@@ -801,12 +801,46 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
         resolved_result?.rollout?.source_view_fallback_occurred ?? false,
       source_view_fallback_reason:
         resolved_result?.rollout?.source_view_fallback_reason ?? null,
+      // Limits
+      effective_limit,
+      effective_scan_limit,
+      // Counts (normalized aliases used by diagnostics)
+      loaded_count:
+        Number(resolved_result?.raw_items_pulled ?? resolved_result?.raw_scanned_count ?? resolved_result?.scanned_count) || 0,
       scanned_count: resolved_result?.scanned_count ?? 0,
+      eligible_count: resolved_result?.eligible_owner_count ?? 0,
       eligible_owner_count: resolved_result?.eligible_owner_count ?? 0,
+      inserted_count: resolved_result?.queued_count ?? 0,
       queued_count: resolved_result?.queued_count ?? 0,
+      duplicate_count:
+        (Number(resolved_result?.duplicate_skip_count) || 0) +
+        (Number(resolved_result?.queue_create_duplicate_cancel_count) || 0),
+      skipped_count: resolved_result?.skipped_count ?? 0,
+      // Skip/error detail
+      first_10_skip_reasons: (resolved_result?.skip_reason_counts ?? []).slice(0, 10),
+      first_10_errors: (Array.isArray(resolved_result?.results) ? resolved_result.results : [])
+        .filter((r) => r?.ok === false && !r?.skipped)
+        .slice(0, 10)
+        .map((r) => ({
+          reason: r?.reason || "unknown",
+          master_owner_id: r?.plan?.master_owner_id ?? r?.owner?.item_id ?? null,
+        })),
       skip_reason_counts: resolved_result?.skip_reason_counts ?? [],
+      // Template resolution
+      template_resolution_summary: resolved_result?.template_resolution_diagnostics ?? null,
       template_resolution_diagnostics:
         resolved_result?.template_resolution_diagnostics ?? null,
+      // Supabase insert summary
+      supabase_insert_summary: {
+        attempted: resolved_result?.queue_create_attempt_count ?? null,
+        succeeded: resolved_result?.queue_create_success_count ?? null,
+        duplicate_canceled: resolved_result?.queue_create_duplicate_cancel_count ?? null,
+      },
+      queue_create_attempt_count: resolved_result?.queue_create_attempt_count ?? null,
+      queue_create_success_count: resolved_result?.queue_create_success_count ?? null,
+      queue_create_duplicate_cancel_count:
+        resolved_result?.queue_create_duplicate_cancel_count ?? null,
+      // Queue inventory
       queued_inventory_count:
         resolved_result?.queue_inventory?.queued_inventory_count ?? null,
       available_inventory_count:

@@ -55,10 +55,12 @@ function buildFeederSummary(result = {}) {
 }
 
 export async function GET(request) {
+  let feeder_stage = "auth";
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
 
+    feeder_stage = "request_parse";
     const { searchParams } = new URL(request.url);
     const options = normalizeFeederRequest({
       limit: searchParams.get("limit"),
@@ -85,7 +87,9 @@ export async function GET(request) {
       is_vercel_cron: auth.auth.is_vercel_cron,
     });
 
+    feeder_stage = "execute";
     const result = await runFeederWithRollout(options, { logger });
+    feeder_stage = "log_result";
 
     if (result?.skipped) {
       captureSystemEvent("feeder_run_skipped", {
@@ -109,13 +113,34 @@ export async function GET(request) {
       });
     }
 
+    const get_summary = buildFeederSummary(result);
+    const get_effective_limit = result?.rollout?.effective_limit ?? options.limit ?? null;
+    const get_effective_scan_limit = result?.rollout?.effective_scan_limit ?? options.scan_limit ?? null;
+
     logger.info("master_owner_feeder.route_completed", {
       method: "GET",
       ok: result?.ok !== false,
       skipped: result?.skipped || false,
       reason: result?.reason || null,
-      queued_count: result?.queued_count ?? 0,
-      scanned_count: result?.scanned_count ?? 0,
+      effective_limit: get_effective_limit,
+      effective_scan_limit: get_effective_scan_limit,
+      loaded_count: get_summary.loaded_count,
+      eligible_count: get_summary.eligible_count,
+      inserted_count: get_summary.inserted_count,
+      duplicate_count: get_summary.duplicate_count,
+      skipped_count: get_summary.skipped_count,
+      error_count: get_summary.error_count,
+      first_10_skip_reasons: (result?.skip_reason_counts ?? []).slice(0, 10),
+      first_10_errors: (Array.isArray(result?.results) ? result.results : [])
+        .filter((r) => r?.ok === false && !r?.skipped)
+        .slice(0, 10)
+        .map((r) => ({ reason: r?.reason || "unknown", master_owner_id: r?.plan?.master_owner_id ?? r?.owner?.item_id ?? null })),
+      template_resolution_summary: result?.template_resolution_diagnostics ?? null,
+      supabase_insert_summary: {
+        attempted: result?.queue_create_attempt_count ?? null,
+        succeeded: result?.queue_create_success_count ?? null,
+        duplicate_canceled: result?.queue_create_duplicate_cancel_count ?? null,
+      },
       retry_after_seconds: result?.retry_after_seconds ?? null,
     });
 
@@ -123,9 +148,11 @@ export async function GET(request) {
       {
         ok: result?.ok !== false,
         route: "internal/outbound/feed-master-owners",
+        effective_limit: get_effective_limit,
+        effective_scan_limit: get_effective_scan_limit,
         result: {
           ...result,
-          ...buildFeederSummary(result),
+          ...get_summary,
         },
       },
       { status: statusForResult(result) }
@@ -135,6 +162,7 @@ export async function GET(request) {
 
     logger.error("master_owner_feeder.failed", {
       method: "GET",
+      feeder_stage,
       error: diagnostics,
     });
 
@@ -178,12 +206,27 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  let feeder_stage = "auth";
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
 
+    feeder_stage = "request_parse";
     const body = await request.json().catch(() => ({}));
-    const options = normalizeFeederRequest(body);
+
+    // Query params override body values to allow precise manual testing:
+    //   POST /feed-master-owners?limit=1&scan_limit=10&dry_run=false
+    const { searchParams } = new URL(request.url);
+    const merged_input = { ...body };
+    for (const key of [
+      "limit", "scan_limit", "dry_run", "test_mode",
+      "seller_id", "master_owner_id", "source_view_id", "source_view_name",
+    ]) {
+      const val = searchParams.get(key);
+      if (val !== null) merged_input[key] = val;
+    }
+
+    const options = normalizeFeederRequest(merged_input);
 
     logger.info("master_owner_feeder.requested", {
       method: "POST",
@@ -199,7 +242,9 @@ export async function POST(request) {
       is_vercel_cron: auth.auth.is_vercel_cron,
     });
 
+    feeder_stage = "execute";
     const result = await runFeederWithRollout(options, { logger });
+    feeder_stage = "log_result";
 
     if (result?.skipped) {
       captureSystemEvent("feeder_run_skipped", {
@@ -223,13 +268,34 @@ export async function POST(request) {
       });
     }
 
+    const post_summary = buildFeederSummary(result);
+    const post_effective_limit = result?.rollout?.effective_limit ?? options.limit ?? null;
+    const post_effective_scan_limit = result?.rollout?.effective_scan_limit ?? options.scan_limit ?? null;
+
     logger.info("master_owner_feeder.route_completed", {
       method: "POST",
       ok: result?.ok !== false,
       skipped: result?.skipped || false,
       reason: result?.reason || null,
-      queued_count: result?.queued_count ?? 0,
-      scanned_count: result?.scanned_count ?? 0,
+      effective_limit: post_effective_limit,
+      effective_scan_limit: post_effective_scan_limit,
+      loaded_count: post_summary.loaded_count,
+      eligible_count: post_summary.eligible_count,
+      inserted_count: post_summary.inserted_count,
+      duplicate_count: post_summary.duplicate_count,
+      skipped_count: post_summary.skipped_count,
+      error_count: post_summary.error_count,
+      first_10_skip_reasons: (result?.skip_reason_counts ?? []).slice(0, 10),
+      first_10_errors: (Array.isArray(result?.results) ? result.results : [])
+        .filter((r) => r?.ok === false && !r?.skipped)
+        .slice(0, 10)
+        .map((r) => ({ reason: r?.reason || "unknown", master_owner_id: r?.plan?.master_owner_id ?? r?.owner?.item_id ?? null })),
+      template_resolution_summary: result?.template_resolution_diagnostics ?? null,
+      supabase_insert_summary: {
+        attempted: result?.queue_create_attempt_count ?? null,
+        succeeded: result?.queue_create_success_count ?? null,
+        duplicate_canceled: result?.queue_create_duplicate_cancel_count ?? null,
+      },
       retry_after_seconds: result?.retry_after_seconds ?? null,
     });
 
@@ -237,9 +303,11 @@ export async function POST(request) {
       {
         ok: result?.ok !== false,
         route: "internal/outbound/feed-master-owners",
+        effective_limit: post_effective_limit,
+        effective_scan_limit: post_effective_scan_limit,
         result: {
           ...result,
-          ...buildFeederSummary(result),
+          ...post_summary,
         },
       },
       { status: statusForResult(result) }
@@ -249,6 +317,7 @@ export async function POST(request) {
 
     logger.error("master_owner_feeder.failed", {
       method: "POST",
+      feeder_stage,
       error: diagnostics,
     });
 

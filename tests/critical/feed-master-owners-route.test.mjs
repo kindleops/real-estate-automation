@@ -320,3 +320,196 @@ test("runFeederWithRollout skips live feeding when queued future inventory alrea
   assert.equal(result.reason, "feeder_queue_buffer_satisfied");
   assert.equal(result.queue_inventory.future_inventory_count, 125);
 });
+
+// ---------------------------------------------------------------------------
+// Query/body parsing — feeder diagnostics patch
+// ---------------------------------------------------------------------------
+
+test("normalizeFeederRequest parses string limit=1 and scan_limit=10 from query params", () => {
+  const normalized = normalizeFeederRequest({
+    limit: "1",
+    scan_limit: "10",
+  });
+
+  assert.equal(normalized.limit, 1, "limit should parse string '1' to number 1");
+  assert.equal(normalized.scan_limit, 10, "scan_limit should parse string '10' to number 10");
+  assert.equal(normalized.limit_was_provided, true);
+  assert.equal(normalized.scan_limit_was_provided, true);
+});
+
+test("normalizeFeederRequest query-param values override body defaults when merged before normalizing", () => {
+  // Simulate what POST handler does: body is baseline, query params override
+  const body = { limit: "500", scan_limit: "5000", dry_run: "false" };
+  const query_overrides = { limit: "1", scan_limit: "10" };
+  const merged = { ...body, ...query_overrides };
+
+  const normalized = normalizeFeederRequest(merged);
+
+  assert.equal(normalized.limit, 1, "query override limit=1 should win over body limit=500");
+  assert.equal(normalized.scan_limit, 10, "query override scan_limit=10 should win over body scan_limit=5000");
+  assert.equal(normalized.dry_run, false);
+});
+
+test("normalizeFeederRequest preserves dry_run=true from query string 'true'", () => {
+  const normalized = normalizeFeederRequest({ limit: "1", dry_run: "true" });
+  assert.equal(normalized.dry_run, true);
+});
+
+test("normalizeFeederRequest preserves dry_run=false from query string 'false'", () => {
+  const normalized = normalizeFeederRequest({ limit: "1", dry_run: "false" });
+  assert.equal(normalized.dry_run, false);
+});
+
+test("runFeederWithRollout passes explicit limit=1 from request to executeRunImpl", async () => {
+  const { execute_calls, deps } = makeDeps();
+
+  await runFeederWithRollout({ limit: 1, scan_limit: 10 }, deps);
+
+  assert.equal(execute_calls.length, 1);
+  assert.equal(execute_calls[0].limit, 1, "executeRun should receive limit=1");
+  assert.equal(execute_calls[0].scan_limit, 10, "executeRun should receive scan_limit=10");
+});
+
+// ---------------------------------------------------------------------------
+// Completion summary log — feeder diagnostics patch
+// ---------------------------------------------------------------------------
+
+test("runFeederWithRollout completion log includes loaded_count, inserted_count, duplicate_count", async () => {
+  const { entries, deps } = makeDeps({
+    executeRunResult: {
+      ok: true,
+      source: { view_id: null, view_name: "SMS / TIER #1 / ALL" },
+      scanned_count: 8,
+      raw_items_pulled: 12,
+      eligible_owner_count: 5,
+      queued_count: 3,
+      duplicate_skip_count: 2,
+      queue_create_duplicate_cancel_count: 1,
+      skipped_count: 2,
+      skip_reason_counts: [
+        { reason: "already_queued", count: 2 },
+      ],
+      template_resolution_diagnostics: null,
+      queue_create_attempt_count: 4,
+      queue_create_success_count: 3,
+      results: [],
+      queued_owner_ids: [],
+    },
+  });
+
+  await runFeederWithRollout({ limit: 1, scan_limit: 10 }, deps);
+
+  const completed = entries.find((e) => e.event === "master_owner_feeder.completed")?.meta;
+  assert.ok(completed, "master_owner_feeder.completed must be emitted");
+
+  assert.equal(completed.loaded_count, 12, "loaded_count should equal raw_items_pulled");
+  assert.equal(completed.eligible_count, 5);
+  assert.equal(completed.inserted_count, 3, "inserted_count should equal queued_count");
+  assert.equal(completed.duplicate_count, 3, "duplicate_count = duplicate_skip_count + queue_create_duplicate_cancel_count");
+  assert.equal(completed.skipped_count, 2);
+  assert.equal(completed.effective_limit, 1);
+  assert.equal(completed.effective_scan_limit, 10);
+});
+
+test("runFeederWithRollout completion log includes first_10_skip_reasons", async () => {
+  const skip_reason_counts = [
+    { reason: "already_queued", count: 4 },
+    { reason: "no_phone", count: 1 },
+  ];
+
+  const { entries, deps } = makeDeps({
+    executeRunResult: {
+      ok: true,
+      source: { view_id: null, view_name: "SMS / TIER #1 / ALL" },
+      scanned_count: 5,
+      raw_items_pulled: 5,
+      eligible_owner_count: 2,
+      queued_count: 0,
+      duplicate_skip_count: 4,
+      queue_create_duplicate_cancel_count: 0,
+      skipped_count: 5,
+      skip_reason_counts,
+      template_resolution_diagnostics: null,
+      queue_create_attempt_count: 0,
+      queue_create_success_count: 0,
+      results: [],
+      queued_owner_ids: [],
+    },
+  });
+
+  await runFeederWithRollout({}, deps);
+
+  const completed = entries.find((e) => e.event === "master_owner_feeder.completed")?.meta;
+  assert.ok(completed, "master_owner_feeder.completed must be emitted");
+  assert.deepEqual(
+    completed.first_10_skip_reasons,
+    skip_reason_counts,
+    "first_10_skip_reasons should include the skip reason counts"
+  );
+});
+
+test("runFeederWithRollout completion log includes supabase_insert_summary", async () => {
+  const { entries, deps } = makeDeps({
+    executeRunResult: {
+      ok: true,
+      source: { view_id: null, view_name: "SMS / TIER #1 / ALL" },
+      scanned_count: 3,
+      raw_items_pulled: 3,
+      eligible_owner_count: 3,
+      queued_count: 2,
+      duplicate_skip_count: 0,
+      queue_create_duplicate_cancel_count: 1,
+      skipped_count: 1,
+      skip_reason_counts: [],
+      template_resolution_diagnostics: null,
+      queue_create_attempt_count: 3,
+      queue_create_success_count: 2,
+      results: [],
+      queued_owner_ids: [],
+    },
+  });
+
+  await runFeederWithRollout({}, deps);
+
+  const completed = entries.find((e) => e.event === "master_owner_feeder.completed")?.meta;
+  assert.ok(completed, "master_owner_feeder.completed must be emitted");
+
+  assert.deepEqual(completed.supabase_insert_summary, {
+    attempted: 3,
+    succeeded: 2,
+    duplicate_canceled: 1,
+  });
+});
+
+test("runFeederWithRollout completion log includes first_10_errors for failed results", async () => {
+  const { entries, deps } = makeDeps({
+    executeRunResult: {
+      ok: true,
+      source: { view_id: null, view_name: "SMS / TIER #1 / ALL" },
+      scanned_count: 2,
+      raw_items_pulled: 2,
+      eligible_owner_count: 2,
+      queued_count: 1,
+      duplicate_skip_count: 0,
+      queue_create_duplicate_cancel_count: 0,
+      skipped_count: 0,
+      skip_reason_counts: [],
+      template_resolution_diagnostics: null,
+      queue_create_attempt_count: 2,
+      queue_create_success_count: 1,
+      results: [
+        { ok: true, skipped: false, plan: { master_owner_id: 100 } },
+        { ok: false, skipped: false, reason: "template_not_found", plan: { master_owner_id: 200 } },
+      ],
+      queued_owner_ids: [100],
+    },
+  });
+
+  await runFeederWithRollout({}, deps);
+
+  const completed = entries.find((e) => e.event === "master_owner_feeder.completed")?.meta;
+  assert.ok(completed, "master_owner_feeder.completed must be emitted");
+  assert.equal(completed.first_10_errors.length, 1);
+  assert.equal(completed.first_10_errors[0].reason, "template_not_found");
+  assert.equal(completed.first_10_errors[0].master_owner_id, 200);
+});
