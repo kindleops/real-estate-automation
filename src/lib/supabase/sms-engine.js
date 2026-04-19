@@ -97,8 +97,8 @@ export function normalizeSendQueueRow(row) {
     next_retry_at: safe_row.next_retry_at || null,
     message_body: body,
     message_text: safe_row.message_text || safe_row.message_body || "",
-    to_phone_number: safe_row.to_phone_number || safe_row.to_number || null,
-    from_phone_number: safe_row.from_phone_number || safe_row.from_number || null,
+    to_phone_number: safe_row.to_phone_number || null,
+    from_phone_number: safe_row.from_phone_number || null,
     provider_message_id: safe_row.provider_message_id || null,
     master_owner_id: safe_row.master_owner_id || null,
     prospect_id: safe_row.prospect_id || null,
@@ -136,9 +136,9 @@ export function shouldRunSendQueueRow(row, now = nowIso()) {
   const now_ts = toTimestamp(now) ?? Date.now();
   const scheduled_ts = toTimestamp(normalized.scheduled_for);
   const next_retry_ts = toTimestamp(normalized.next_retry_at);
-  const status = normalizeQueueStatusValue(normalized.queue_status);
+  const queue_status_value = normalizeQueueStatusValue(normalized.queue_status);
 
-  if (status !== "queued") {
+  if (queue_status_value !== "queued") {
     return {
       ok: false,
       reason: "queue_status_not_queued",
@@ -204,7 +204,7 @@ export function shouldRunSendQueueRow(row, now = nowIso()) {
 function getQueueSortValues(row) {
   const normalized = normalizeSendQueueRow(row);
   return {
-    priority: asNumber(normalized.send_priority, 5),
+    send_priority_value: asNumber(normalized.send_priority, 5),
     scheduled_ts: toTimestamp(normalized.scheduled_for) ?? Number.MIN_SAFE_INTEGER,
   };
 }
@@ -214,8 +214,8 @@ export function sortQueuedRows(rows = []) {
     const left_values = getQueueSortValues(left);
     const right_values = getQueueSortValues(right);
 
-    if (left_values.priority !== right_values.priority) {
-      return right_values.priority - left_values.priority;
+    if (left_values.send_priority_value !== right_values.send_priority_value) {
+      return right_values.send_priority_value - left_values.send_priority_value;
     }
 
     return left_values.scheduled_ts - right_values.scheduled_ts;
@@ -229,10 +229,11 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
     .select("*")
-    .in("queue_status", ["queued", "Queued"])
+    .eq("queue_status", "queued")
+    .or(`scheduled_for.is.null,scheduled_for.lte.${now}`)
+    .not("is_locked", "is", "true")
     .order("send_priority", { ascending: false, nullsFirst: false })
     .order("scheduled_for", { ascending: true, nullsFirst: true })
-    .order("scheduled_for_utc", { ascending: true, nullsFirst: true })
     .limit(Math.max(limit * 4, 100));
 
   if (error) throw error;

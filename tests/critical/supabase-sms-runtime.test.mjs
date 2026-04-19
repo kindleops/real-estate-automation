@@ -5,26 +5,40 @@ import { runSendQueue } from "@/lib/domain/queue/run-send-queue.js";
 import { runDevSendTest } from "@/app/api/dev/send-test/route.js";
 import {
   finalizeSendQueueSuccess,
+  loadRunnableSendQueueRows,
   normalizeSendQueueRow,
   selectAvailableTextgridNumber,
+  shouldRunSendQueueRow,
   writeOutboundSuccessMessageEvent,
   writeWebhookLog,
 } from "@/lib/supabase/sms-engine.js";
 
-function makeSelectSupabase(rows = []) {
+function makeSelectSupabase(rows = [], calls = null) {
   return {
     from() {
       const query = {
         select() {
+          calls?.push({ fn: "select", args: [] });
           return query;
         },
-        in() {
+        eq(...args) {
+          calls?.push({ fn: "eq", args });
           return query;
         },
-        order() {
+        or(...args) {
+          calls?.push({ fn: "or", args });
+          return query;
+        },
+        not(...args) {
+          calls?.push({ fn: "not", args });
+          return query;
+        },
+        order(...args) {
+          calls?.push({ fn: "order", args });
           return query;
         },
         limit() {
+          calls?.push({ fn: "limit", args: [] });
           return Promise.resolve({
             data: rows,
             error: null,
@@ -123,6 +137,166 @@ test("runSendQueue uses the Supabase candidate path, claims rows, and passes the
   assert.ok(candidates_loaded);
   assert.equal(candidates_loaded.meta.total_rows_loaded, 1);
   assert.equal(candidates_loaded.meta.runnable_count, 1);
+});
+
+test("loadRunnableSendQueueRows queries canonical queue filters and ordering only", async () => {
+  const calls = [];
+
+  const result = await loadRunnableSendQueueRows(10, {
+    now: "2026-04-18T15:00:00.000Z",
+    supabase: makeSelectSupabase(
+      [
+        {
+          id: 42,
+          queue_key: "queue-42",
+          queue_status: "queued",
+          scheduled_for: "2026-04-18T14:00:00.000Z",
+          send_priority: 9,
+          message_body: "Hello world",
+          to_phone_number: "+16127433952",
+        },
+      ],
+      calls
+    ),
+  });
+
+  assert.equal(result.rows.length, 1);
+  assert.deepEqual(
+    calls.filter((entry) => entry.fn === "eq"),
+    [{ fn: "eq", args: ["queue_status", "queued"] }]
+  );
+  assert.ok(
+    calls.some(
+      (entry) =>
+        entry.fn === "or" &&
+        String(entry.args[0] || "").includes("scheduled_for.is.null") &&
+        String(entry.args[0] || "").includes("scheduled_for.lte.2026-04-18T15:00:00.000Z")
+    )
+  );
+  assert.ok(
+    calls.some(
+      (entry) =>
+        entry.fn === "not" &&
+        entry.args[0] === "is_locked" &&
+        entry.args[1] === "is" &&
+        entry.args[2] === "true"
+    )
+  );
+  assert.deepEqual(
+    calls.filter((entry) => entry.fn === "order").map((entry) => entry.args[0]),
+    ["send_priority", "scheduled_for"]
+  );
+});
+
+test("normalizeSendQueueRow ignores scaffold-only to_number and from_number aliases", () => {
+  const normalized = normalizeSendQueueRow({
+    id: 501,
+    queue_key: "queue-501",
+    queue_status: "queued",
+    message_body: "Hello there",
+    to_number: "+16127433952",
+    from_number: "+16128060495",
+  });
+
+  assert.equal(normalized.to_phone_number, null);
+  assert.equal(normalized.from_phone_number, null);
+});
+
+test("shouldRunSendQueueRow does not use status as the queue status alias", () => {
+  const decision = shouldRunSendQueueRow(
+    {
+      id: 77,
+      queue_key: "queue-77",
+      status: "queued",
+      message_body: "Hello there",
+      to_phone_number: "+16127433952",
+    },
+    "2026-04-18T15:00:00.000Z"
+  );
+
+  assert.equal(decision.ok, false);
+  assert.equal(decision.reason, "queue_status_not_queued");
+});
+
+test("normalizeSendQueueRow does not use priority as the send priority alias", () => {
+  const normalized = normalizeSendQueueRow({
+    id: 88,
+    queue_key: "queue-88",
+    queue_status: "queued",
+    priority: 99,
+    message_body: "Hello there",
+    to_phone_number: "+16127433952",
+  });
+
+  assert.equal(normalized.send_priority, 5);
+});
+
+test("normalizeSendQueueRow prefers message_body over message_text", () => {
+  const normalized = normalizeSendQueueRow({
+    id: 89,
+    queue_key: "queue-89",
+    queue_status: "queued",
+    message_body: "Primary body",
+    message_text: "Compatibility body",
+    to_phone_number: "+16127433952",
+  });
+
+  assert.equal(normalized.message_body, "Primary body");
+  assert.equal(normalized.message_text, "Compatibility body");
+});
+
+test("normalizeSendQueueRow prefers scheduled_for over scheduled_for_utc", () => {
+  const normalized = normalizeSendQueueRow({
+    id: 90,
+    queue_key: "queue-90",
+    queue_status: "queued",
+    scheduled_for: "2026-04-18T13:00:00.000Z",
+    scheduled_for_utc: "2026-04-18T14:00:00.000Z",
+    message_body: "Hello there",
+    to_phone_number: "+16127433952",
+  });
+
+  assert.equal(normalized.scheduled_for, "2026-04-18T13:00:00.000Z");
+});
+
+test("shouldRunSendQueueRow requires to_phone_number and ignores to_number", () => {
+  const decision = shouldRunSendQueueRow(
+    {
+      id: 91,
+      queue_key: "queue-91",
+      queue_status: "queued",
+      message_body: "Hello there",
+      to_number: "+16127433952",
+    },
+    "2026-04-18T15:00:00.000Z"
+  );
+
+  assert.equal(decision.ok, false);
+  assert.equal(decision.reason, "missing_to_phone_number");
+});
+
+test("selectAvailableTextgridNumber uses the queue row from_phone_number when present", async () => {
+  const selection = await selectAvailableTextgridNumber(
+    {
+      id: 92,
+      queue_key: "queue-92",
+      queue_status: "queued",
+      message_body: "Hello",
+      to_phone_number: "+16127433952",
+      from_phone_number: "+16128060495",
+    },
+    {
+      supabase: {
+        from() {
+          throw new Error("should_not_query_textgrid_numbers");
+        },
+      },
+    }
+  );
+
+  assert.equal(selection.ok, true);
+  assert.equal(selection.reason, "queue_row_from_phone_number_present");
+  assert.equal(selection.from_phone_number, "+16128060495");
 });
 
 test("finalizeSendQueueSuccess refuses to mark a Supabase queue row sent without a provider SID", async () => {

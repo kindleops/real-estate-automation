@@ -242,7 +242,6 @@ function pickMessageFields(queue_row = {}) {
   return {
     to: clean(
       getQueueRowValue(queue_row, [
-        "to_number",
         "to_phone_number",
         "to",
         "phone",
@@ -251,7 +250,6 @@ function pickMessageFields(queue_row = {}) {
     ),
     from: clean(
       getQueueRowValue(queue_row, [
-        "from_number",
         "from_phone_number",
         "from",
         "selected_from_number",

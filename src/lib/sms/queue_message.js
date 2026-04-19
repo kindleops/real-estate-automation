@@ -335,6 +335,7 @@ export async function queueMessage(params = {}) {
       timezone: params?.schedule?.timezone || params?.context?.timezone || "America/Chicago",
       contact_window: params?.context?.contact_window || null,
       send_priority: mapSendPriorityToNumber(params?.context?.send_priority),
+      is_locked: false,
       retry_count: 0,
       max_retries: params?.context?.max_retries ?? 3,
       message_body: params?.rendered_text || "",

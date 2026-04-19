@@ -1059,6 +1059,7 @@ export async function buildSendQueueItem({
       timezone: resolved_timezone || "America/Chicago",
       contact_window: contact_window_field.omitted ? null : resolved_contact_window,
       send_priority: mapPriorityToNumber(send_priority),
+      is_locked: false,
       retry_count: 0,
       max_retries: Number(max_retries) || 3,
       message_body: message_text || "",
