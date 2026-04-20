@@ -80,7 +80,33 @@ function isAllowedGuild(interaction) {
 // Route handler
 // ---------------------------------------------------------------------------
 
+
+function last4(value) {
+  const text = String(value ?? "");
+  return text ? text.slice(-4) : null;
+}
+
+function getInteractionLabel(body) {
+  if (body?.type === 1) return "PING";
+  if (body?.type === 2) return `COMMAND:${body?.data?.name ?? "unknown"}`;
+  if (body?.type === 3) return `COMPONENT:${body?.data?.custom_id ?? "unknown"}`;
+  return `TYPE:${body?.type ?? "unknown"}`;
+}
+
 export async function POST(request) {
+  const signature = String(request.headers.get("x-signature-ed25519") ?? "");
+  const timestamp = String(request.headers.get("x-signature-timestamp") ?? "");
+
+  logger.info("discord.interaction.route_hit", {
+    method: request.method,
+    signature_present: Boolean(signature),
+    signature_length: signature.length,
+    timestamp_present: Boolean(timestamp),
+    timestamp_length: timestamp.length,
+    public_key_configured: Boolean(String(process.env.DISCORD_PUBLIC_KEY ?? "").trim()),
+    guild_guard_configured: Boolean(String(process.env.DISCORD_GUILD_ID ?? "").trim()),
+  });
+
   let verified = false;
   let body     = null;
 
@@ -88,8 +114,17 @@ export async function POST(request) {
     const result = await verifyAndParse(request);
     verified = result.verified;
     body     = result.body;
+
+    logger.info("discord.interaction.signature_check", {
+      verified,
+      raw_body_length: result.rawBody?.length ?? 0,
+      parsed_body_present: Boolean(body),
+    });
   } catch (err) {
-    logger.error("discord.interactions.parse_error", { error: err?.message });
+    logger.error("discord.interaction.error", {
+      phase: "parse_or_verify",
+      error: err?.message,
+    });
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
@@ -98,15 +133,30 @@ export async function POST(request) {
     return NextResponse.json({ error: "Invalid request signature" }, { status: 401 });
   }
 
+  logger.info("discord.interaction.parsed", {
+    type: body?.type ?? null,
+    label: getInteractionLabel(body),
+    command_name: body?.data?.name ?? null,
+    custom_id_present: Boolean(body?.data?.custom_id),
+    guild_id_last4: last4(body?.guild_id),
+    channel_id_last4: last4(body?.channel_id),
+    user_id_last4: last4(body?.member?.user?.id || body?.user?.id),
+  });
+
   // Discord PING — respond immediately.
   if (body?.type === 1) {
+    logger.info("discord.interaction.response_sent", {
+      label: "PING",
+      response_type: "PONG",
+    });
     return NextResponse.json(pong());
   }
 
   // Guild guard — reject requests from unexpected guilds.
   if (!isAllowedGuild(body)) {
     logger.warn("discord.interactions.wrong_guild", {
-      guild_id: body?.guild_id,
+      guild_id_last4: last4(body?.guild_id),
+      expected_guild_id_last4: last4(process.env.DISCORD_GUILD_ID),
     });
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -115,9 +165,21 @@ export async function POST(request) {
   if (body?.type === 2 || body?.type === 3) {
     try {
       const response = await routeDiscordInteraction(body);
+
+      logger.info("discord.interaction.response_sent", {
+        label: getInteractionLabel(body),
+        response_type: response?.type ?? null,
+        content_present: Boolean(response?.data?.content),
+        ephemeral: Boolean(response?.data?.flags),
+      });
+
       return NextResponse.json(response);
     } catch (err) {
-      logger.error("discord.interactions.router_error", { error: err?.message });
+      logger.error("discord.interaction.error", {
+        phase: "router",
+        label: getInteractionLabel(body),
+        error: err?.message,
+      });
       return NextResponse.json(errorResponse("Unexpected server error."));
     }
   }
