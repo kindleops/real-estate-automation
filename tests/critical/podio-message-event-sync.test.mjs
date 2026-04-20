@@ -102,13 +102,15 @@ function makeFakeSupabase({ rows = [], updateSpy = null } = {}) {
     const c = {
       select: () => c,
       in: () => c,
+      or: () => c,
       order: () => c,
       limit: () => ({ data: result_rows, error: null }),
       update: (payload) => {
         calls.updates.push(payload);
         if (updateSpy) updateSpy(payload);
         return {
-          eq: () => ({ data: null, error: null }),
+          eq:  () => ({ data: null, error: null }),
+          in:  () => ({ data: null, error: null }),
         };
       },
       eq: () => ({ data: null, error: null }),
@@ -255,7 +257,7 @@ test("syncSupabaseMessageEventsToPodio: single failure does not abort other rows
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: () => ({ data: rows, error: null }),
             }),
@@ -293,7 +295,7 @@ test("syncSupabaseMessageEventsToPodio: success stores podio_message_event_id", 
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: () => ({ data: [row], error: null }),
             }),
@@ -447,7 +449,7 @@ test("syncSupabaseMessageEventsToPodio: result includes loaded_count and first_1
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: () => ({ data: rows, error: null }),
             }),
@@ -486,7 +488,7 @@ test("syncSupabaseMessageEventsToPodio: first_10_failed_errors includes directio
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: () => ({ data: [row], error: null }),
             }),
@@ -530,7 +532,7 @@ test("syncSupabaseMessageEventsToPodio: first_10_skipped_reasons contains unsupp
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: () => ({ data: rows, error: null }),
             }),
@@ -583,7 +585,7 @@ test("syncSupabaseMessageEventsToPodio: event with null body is synced not skipp
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: () => ({ data: [row], error: null }),
             }),

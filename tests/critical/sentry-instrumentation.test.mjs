@@ -359,7 +359,7 @@ test("syncSupabaseMessageEventsToPodio: calls captureRouteException on per-row P
     from: () => ({
       select: () => ({
         in: () => ({
-          in: () => ({
+          or: () => ({
             order: () => ({
               limit: async () => ({ data: rows, error: null }),
             }),

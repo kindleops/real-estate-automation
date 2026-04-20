@@ -299,6 +299,108 @@ test("syncSupabaseMessageEventsToPodio: failure error detail includes row id and
   assert.ok(result.first_10_failed_errors[0].error.includes("Podio 500 error"));
 });
 
+// ─── New sync-worker row-selection tests ─────────────────────────────────
+
+test("syncSupabaseMessageEventsToPodio: loads failed row with attempts < max_attempts", async () => {
+  const row = makeOutboundRow({ podio_sync_status: "failed", podio_sync_attempts: 1 });
+  const { client } = makeSyncFakeSupabase({ rows: [row] });
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 88002 }),
+  });
+
+  assert.equal(result.synced_count, 1, "failed row with attempts < max must be retried");
+  assert.equal(result.failed_count, 0);
+});
+
+test("syncSupabaseMessageEventsToPodio: skips synced rows (status = synced excluded by filter)", async () => {
+  const row = makeOutboundRow({ podio_sync_status: "synced", podio_message_event_id: "77001" });
+  const { client } = makeSyncFakeSupabase({ rows: [row] });
+
+  let podio_calls = 0;
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => { podio_calls++; return { item_id: 0 }; },
+  });
+
+  assert.equal(podio_calls, 0, "Podio must NOT be called for already-synced rows");
+  assert.equal(result.synced_count, 0);
+  assert.equal(result.rows_after_attempt_filter, 0);
+});
+
+test("syncSupabaseMessageEventsToPodio: skips failed rows with attempts >= max_attempts", async () => {
+  const row = makeOutboundRow({ podio_sync_status: "failed", podio_sync_attempts: 3 });
+  const { client } = makeSyncFakeSupabase({ rows: [row] });
+
+  let podio_calls = 0;
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => { podio_calls++; return { item_id: 0 }; },
+  });
+
+  assert.equal(podio_calls, 0, "Podio must NOT be called for max-attempts-exhausted rows");
+  assert.equal(result.rows_after_attempt_filter, 0);
+});
+
+test("syncSupabaseMessageEventsToPodio: does not skip inbound_sms with null message_body", async () => {
+  const row = makeOutboundRow({
+    id: 5001,
+    event_type: "inbound_sms",
+    direction: "inbound",
+    message_body: null,
+    podio_sync_status: "pending",
+    podio_sync_attempts: 0,
+  });
+  const { client } = makeSyncFakeSupabase({ rows: [row] });
+
+  const synced_payloads = [];
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async (fields) => { synced_payloads.push(fields); return { item_id: 60001 }; },
+  });
+
+  assert.equal(result.synced_count, 1, "null-body inbound_sms must sync successfully");
+  assert.equal(synced_payloads[0]["message"], "", "Podio message field must be empty string for null body");
+});
+
+test("syncSupabaseMessageEventsToPodio: response includes query_filters_used with event types", async () => {
+  const { client } = makeSyncFakeSupabase({ rows: [] });
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 0 }),
+  });
+
+  assert.ok(result.query_filters_used, "query_filters_used must be present");
+  assert.ok(
+    Array.isArray(result.query_filters_used.event_type_in),
+    "query_filters_used.event_type_in must be array"
+  );
+  assert.ok(result.query_filters_used.event_type_in.includes("outbound_send"));
+  assert.ok(result.query_filters_used.event_type_in.includes("inbound_sms"));
+  assert.ok(typeof result.query_filters_used.podio_sync_attempts_lt === "number");
+});
+
+test("syncSupabaseMessageEventsToPodio: response includes row-filter diagnostic counts", async () => {
+  const rows = [
+    makeOutboundRow({ id: 1, podio_sync_status: "pending",  podio_sync_attempts: 0 }),
+    makeOutboundRow({ id: 2, podio_sync_status: "failed",   podio_sync_attempts: 1 }),
+  ];
+  const { client } = makeSyncFakeSupabase({ rows });
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 70001 }),
+  });
+
+  assert.equal(result.raw_rows_loaded_before_filter, 2);
+  assert.equal(result.rows_after_syncable_filter, 2);
+  assert.equal(result.rows_after_attempt_filter, 2);
+  assert.ok(Array.isArray(result.first_10_candidate_event_keys));
+  assert.equal(result.first_10_candidate_event_keys.length, 2);
+});
+
 // ─── 14. inbound-diagnostic route file exists ────────────────────────────
 
 test("inbound-diagnostic route: file exists at expected path", () => {
