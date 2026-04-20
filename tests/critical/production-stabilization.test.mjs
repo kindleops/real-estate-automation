@@ -515,3 +515,104 @@ test("sync-podio-diagnostic route: file exists at expected path", () => {
   assert.ok(existsSync(file), `expected route file to exist at ${file}`);
 });
 
+// ─── 16. sync-podio-diagnostic eligibility logic (inline replica) ─────────
+//
+// Replicates the JS-level eligibility filter from the diagnostic route so we
+// can unit-test the logic without invoking Next.js or a real Supabase client.
+
+const DIAGNOSTIC_SYNCABLE = new Set(["outbound_send", "outbound_send_failed", "inbound_sms"]);
+const DIAGNOSTIC_MAX_ATTEMPTS = 3;
+const DIAGNOSTIC_ELIGIBLE_STATUSES = new Set(["pending", "failed"]);
+
+function diagnosticEligibilityFilter(raw_rows) {
+  const after_syncable = raw_rows.filter((r) => DIAGNOSTIC_SYNCABLE.has(r.event_type));
+  const candidates = after_syncable.filter((r) => {
+    const status = r.podio_sync_status ?? "pending";
+    return (
+      DIAGNOSTIC_ELIGIBLE_STATUSES.has(status) &&
+      Number(r.podio_sync_attempts ?? 0) < DIAGNOSTIC_MAX_ATTEMPTS
+    );
+  });
+  return {
+    raw_rows_loaded_before_filter:  raw_rows.length,
+    rows_after_syncable_filter:     after_syncable.length,
+    rows_after_attempt_filter:      candidates.length,
+    eligible_count:                 candidates.length,
+    first_10_eligible_event_keys:   candidates.slice(0, 10).map((r) => r.message_event_key ?? null),
+    candidates,
+  };
+}
+
+test("sync-podio-diagnostic: eligibility filter excludes non-syncable event_types", () => {
+  const rows = [
+    makeOutboundRow({ id: 1, event_type: "outbound_send",   podio_sync_status: "pending" }),
+    makeOutboundRow({ id: 2, event_type: "inbound_sms",     podio_sync_status: "pending" }),
+    makeOutboundRow({ id: 3, event_type: "billing_event",   podio_sync_status: "pending" }),
+    makeOutboundRow({ id: 4, event_type: "system_internal", podio_sync_status: null }),
+  ];
+  const result = diagnosticEligibilityFilter(rows);
+  assert.equal(result.raw_rows_loaded_before_filter, 4);
+  assert.equal(result.rows_after_syncable_filter, 2,
+    "non-syncable event_types must be excluded after syncable filter");
+  assert.equal(result.eligible_count, 2);
+});
+
+test("sync-podio-diagnostic: eligibility filter excludes rows with max attempts reached", () => {
+  const rows = [
+    makeOutboundRow({ id: 1, event_type: "outbound_send", podio_sync_status: "failed", podio_sync_attempts: 3 }),
+    makeOutboundRow({ id: 2, event_type: "outbound_send", podio_sync_status: "failed", podio_sync_attempts: 2 }),
+    makeOutboundRow({ id: 3, event_type: "outbound_send", podio_sync_status: "failed", podio_sync_attempts: 0 }),
+  ];
+  const result = diagnosticEligibilityFilter(rows);
+  assert.equal(result.rows_after_syncable_filter, 3, "all three are syncable type");
+  assert.equal(result.eligible_count, 2,
+    "row with attempts=3 must be excluded (>= MAX_SYNC_ATTEMPTS)");
+});
+
+test("sync-podio-diagnostic: eligibility filter treats null podio_sync_status as pending", () => {
+  const rows = [
+    makeOutboundRow({ id: 1, event_type: "inbound_sms", podio_sync_status: null, podio_sync_attempts: 0 }),
+    makeOutboundRow({ id: 2, event_type: "inbound_sms", podio_sync_status: "synced", podio_sync_attempts: 0 }),
+  ];
+  const result = diagnosticEligibilityFilter(rows);
+  assert.equal(result.eligible_count, 1,
+    "null status must be treated as pending and included; synced must be excluded");
+});
+
+test("sync-podio-diagnostic: eligibility filter excludes synced/skipped rows", () => {
+  const rows = [
+    makeOutboundRow({ id: 1, event_type: "outbound_send", podio_sync_status: "synced",  podio_sync_attempts: 0 }),
+    makeOutboundRow({ id: 2, event_type: "outbound_send", podio_sync_status: "skipped", podio_sync_attempts: 0 }),
+    makeOutboundRow({ id: 3, event_type: "outbound_send", podio_sync_status: "pending", podio_sync_attempts: 0 }),
+  ];
+  const result = diagnosticEligibilityFilter(rows);
+  assert.equal(result.eligible_count, 1,
+    "only the pending row must be eligible");
+});
+
+test("sync-podio-diagnostic: first_10_eligible_event_keys contains message_event_key values", () => {
+  const rows = [
+    makeOutboundRow({ id: 1, message_event_key: "key-a", event_type: "outbound_send", podio_sync_status: "pending" }),
+    makeOutboundRow({ id: 2, message_event_key: "key-b", event_type: "inbound_sms",   podio_sync_status: "failed", podio_sync_attempts: 1 }),
+  ];
+  const result = diagnosticEligibilityFilter(rows);
+  assert.deepEqual(result.first_10_eligible_event_keys, ["key-a", "key-b"]);
+});
+
+test("sync-podio-diagnostic: summaries raw vs syncable vs attempt-filtered differ when expected", () => {
+  const rows = [
+    // syncable + eligible
+    makeOutboundRow({ id: 1, event_type: "outbound_send", podio_sync_status: "pending",  podio_sync_attempts: 0 }),
+    makeOutboundRow({ id: 2, event_type: "inbound_sms",   podio_sync_status: "failed",   podio_sync_attempts: 2 }),
+    // syncable + ineligible (max attempts)
+    makeOutboundRow({ id: 3, event_type: "outbound_send", podio_sync_status: "failed",   podio_sync_attempts: 3 }),
+    // non-syncable
+    makeOutboundRow({ id: 4, event_type: "unknown_event", podio_sync_status: "pending",  podio_sync_attempts: 0 }),
+  ];
+  const result = diagnosticEligibilityFilter(rows);
+  assert.equal(result.raw_rows_loaded_before_filter, 4, "all 4 rows loaded");
+  assert.equal(result.rows_after_syncable_filter,    3, "3 rows survive syncable filter");
+  assert.equal(result.rows_after_attempt_filter,     2, "2 rows survive attempt filter");
+  assert.equal(result.eligible_count,                2, "eligible_count === rows_after_attempt_filter");
+});
+

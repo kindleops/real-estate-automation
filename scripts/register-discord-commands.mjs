@@ -1,0 +1,285 @@
+/**
+ * register-discord-commands.mjs
+ *
+ * Registers (upserts) all guild slash commands for the real-estate-automation
+ * Discord bot via PUT /applications/{id}/guilds/{guild_id}/commands.
+ *
+ * PUT replaces the full guild command set atomically — safe to run any time
+ * commands are added or changed.  Deleted entries from the array will be
+ * removed from Discord automatically.
+ *
+ * Usage:
+ *   DISCORD_APPLICATION_ID=... DISCORD_GUILD_ID=... DISCORD_BOT_TOKEN=... \
+ *     node scripts/register-discord-commands.mjs
+ *
+ * Or via npm:
+ *   npm run discord:register
+ *
+ * Note: DISCORD_BOT_TOKEN is read from env and never logged.
+ */
+
+// ---------------------------------------------------------------------------
+// Environment
+// ---------------------------------------------------------------------------
+
+const APPLICATION_ID = String(process.env.DISCORD_APPLICATION_ID ?? "").trim();
+const GUILD_ID       = String(process.env.DISCORD_GUILD_ID       ?? "").trim();
+const BOT_TOKEN      = String(process.env.DISCORD_BOT_TOKEN      ?? "").trim();
+
+if (!APPLICATION_ID) {
+  console.error("Error: DISCORD_APPLICATION_ID is not set.");
+  process.exit(1);
+}
+if (!GUILD_ID) {
+  console.error("Error: DISCORD_GUILD_ID is not set.");
+  process.exit(1);
+}
+if (!BOT_TOKEN) {
+  console.error("Error: DISCORD_BOT_TOKEN is not set.");
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Option type constants (Discord ApplicationCommandOptionType)
+// ---------------------------------------------------------------------------
+
+const OPT = {
+  SUB_COMMAND: 1,
+  STRING:      3,
+  INTEGER:     4,
+  BOOLEAN:     5,
+};
+
+// ---------------------------------------------------------------------------
+// Command definitions
+// ---------------------------------------------------------------------------
+
+const COMMANDS = [
+  // ── /queue ─────────────────────────────────────────────────────────────
+  {
+    name:        "queue",
+    description: "Send queue operations",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "status",
+        description: "Show send queue row counts grouped by status",
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "run",
+        description: "Process the send queue (Tech Ops or Owner)",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Maximum messages to process (1–50)",
+            required:    false,
+            min_value:   1,
+            max_value:   50,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /sync ──────────────────────────────────────────────────────────────
+  {
+    name:        "sync",
+    description: "Data synchronisation operations",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "podio",
+        description: "Sync un-synced message events to Podio (Tech Ops or Owner)",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Maximum rows to sync in this batch (1–100)",
+            required:    false,
+            min_value:   1,
+            max_value:   100,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /diagnostic ────────────────────────────────────────────────────────
+  {
+    name:        "diagnostic",
+    description: "System diagnostics (Tech Ops or Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "inbound",
+        description: "Run the inbound SMS diagnostic query",
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "podio-sync",
+        description: "Run the Podio sync eligibility diagnostic",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Rows to inspect (1–100)",
+            required:    false,
+            min_value:   1,
+            max_value:   100,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /lock ──────────────────────────────────────────────────────────────
+  {
+    name:        "lock",
+    description: "Run-lock management (Tech Ops or Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "release",
+        description: "Force-release a stale feeder or run lock",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "scope",
+            description: "Lock scope to release (e.g. feeder)",
+            required:    true,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /feeder ────────────────────────────────────────────────────────────
+  {
+    name:        "feeder",
+    description: "Outbound feeder operations (Tech Ops or Owner; >25 needs Owner approval)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "run",
+        description: "Run the master-owner outbound feeder",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Max owners to enqueue (default 10; >25 requires Owner approval)",
+            required:    false,
+            min_value:   1,
+            max_value:   200,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "scan_limit",
+            description: "Max Podio owners to scan (default 500)",
+            required:    false,
+            min_value:   1,
+          },
+          {
+            type:        OPT.BOOLEAN,
+            name:        "dry_run",
+            description: "If true, simulate without enqueueing (default false)",
+            required:    false,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /campaign ──────────────────────────────────────────────────────────
+  {
+    name:        "campaign",
+    description: "Campaign management (SMS Ops or Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "pause",
+        description: "Pause a campaign (SMS Ops or Owner)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "campaign_id",
+            description: "ID of the campaign to pause",
+            required:    true,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "resume",
+        description: "Resume a paused campaign (requires Owner approval)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "campaign_id",
+            description: "ID of the campaign to resume",
+            required:    true,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /lead ──────────────────────────────────────────────────────────────
+  {
+    name:        "lead",
+    description: "Lead information (Acquisitions or Owner, read-only)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "summarize",
+        description: "Summarise message event history for a lead",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "phone_or_owner_id",
+            description: "Phone number (E.164) or numeric master_owner_id",
+            required:    true,
+          },
+        ],
+      },
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/guilds/${GUILD_ID}/commands`;
+
+console.log(`Registering ${COMMANDS.length} commands for guild ${GUILD_ID} …`);
+
+let response;
+try {
+  response = await fetch(url, {
+    method:  "PUT",
+    headers: {
+      "Authorization": `Bot ${BOT_TOKEN}`,
+      "Content-Type":  "application/json",
+    },
+    body: JSON.stringify(COMMANDS),
+  });
+} catch (err) {
+  console.error("Network error calling Discord API:", err.message);
+  process.exit(1);
+}
+
+if (!response.ok) {
+  const body = await response.text().catch(() => "(unreadable body)");
+  console.error(`Discord API returned HTTP ${response.status}: ${body}`);
+  process.exit(1);
+}
+
+const registered = await response.json();
+
+console.log("\nRegistered commands:");
+for (const cmd of registered) {
+  console.log(`  /${cmd.name}  (id: ${cmd.id})`);
+}
+console.log(`\n✅ Done — ${registered.length} command(s) registered.`);

@@ -8,7 +8,8 @@
     "test:critical": "NODE_ENV=test PODIO_CLIENT_ID=test PODIO_CLIENT_SECRET=test PODIO_USERNAME=test PODIO_PASSWORD=test INTERNAL_API_SECRET=test BUYER_WEBHOOK_SECRET=test OPS_DASHBOARD_SECRET=test APP_BASE_URL=http://localhost:3000 node --import ./tests/register-aliases.mjs --test --test-concurrency=1 tests/critical/*.test.mjs",
     "test": "npm run lint && npm run test:critical",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "discord:register": "node scripts/register-discord-commands.mjs"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.49.0",
