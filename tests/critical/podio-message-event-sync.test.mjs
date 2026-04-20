@@ -564,13 +564,22 @@ test("syncSupabaseMessageEventsToPodio: first_10_skipped_reasons contains unsupp
   assert.ok(skipped_update, "must mark unsupported-type rows as skipped");
 });
 
-// ─── 10. null message_body produces empty string — event still syncs ────────
+// ─── 10. null message_body uses placeholder — event still syncs ─────────────
 
-test("buildPodioPayloadForSupabaseEvent: null message_body produces empty string not failure", () => {
+test("buildPodioPayloadForSupabaseEvent: null message_body uses placeholder not empty string", () => {
   const row = makeOutboundRow({ message_body: null, character_count: null });
   const fields = buildPodioPayloadForSupabaseEvent(row);
 
-  assert.equal(fields["message"], "", "null body must become empty string");
+  // Podio requires ≥1 character; use placeholder rather than failing the record.
+  assert.ok(
+    fields["message"] && fields["message"].length > 0,
+    "null body must produce a non-empty message field"
+  );
+  assert.ok(
+    fields["message"].includes("unavailable") || fields["message"].length > 0,
+    "placeholder must be present"
+  );
+  // character_count still reflects actual SMS length (0), not placeholder length.
   assert.equal(fields["character-count"], 0, "character_count must default to 0 for null body");
   // Core category fields must still be present
   assert.equal(fields["direction"], "Outbound");
@@ -606,5 +615,8 @@ test("syncSupabaseMessageEventsToPodio: event with null body is synced not skipp
 
   assert.equal(result.synced_count, 1, "null-body event must be synced");
   assert.equal(result.failed_count, 0);
-  assert.equal(synced_fields[0]["message"], "", "Podio must receive empty string for null body");
+  assert.ok(
+    synced_fields[0]["message"] && synced_fields[0]["message"].length > 0,
+    "Podio must receive non-empty message for null body (placeholder)"
+  );
 });

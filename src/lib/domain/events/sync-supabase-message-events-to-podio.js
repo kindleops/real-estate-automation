@@ -101,6 +101,30 @@ function toPodioEventType(event_type) {
   }
 }
 
+/**
+ * Safe normalization for the Podio `delivery-status` category field.
+ *
+ * Only maps to values that are confirmed safe in the Podio Message Events schema.
+ * Returns undefined for values that may not exist (pending, queued, sending,
+ * unknown, etc.) so the field is omitted rather than causing a category-value
+ * validation error on the Podio API.  Call sites must check for undefined and
+ * skip this field when the result is undefined.
+ *
+ * Known-safe Podio delivery-status options:  Sent, Delivered, Failed, Received.
+ * Intentionally excluded:  Queued, Sending, Undelivered, Unknown — Podio
+ * schema support is not confirmed; omitting is safer than risking a 400.
+ */
+function toPodioProviderDeliveryStatus(value) {
+  const raw = clean(value).toLowerCase();
+  if (!raw) return undefined;
+  if (raw === "sent")                                                 return "Sent";
+  if (["delivered", "delivery_confirmed", "confirmed"].includes(raw)) return "Delivered";
+  if (["failed", "error", "delivery_failed", "undelivered"].includes(raw)) return "Failed";
+  if (raw === "received")                                             return "Received";
+  // pending, queued, accepted, sending, unknown → omit (not confirmed safe)
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Payload builder — exported for unit testing
 // ---------------------------------------------------------------------------
@@ -116,12 +140,21 @@ function toPodioEventType(event_type) {
  * @param {object} row  A row from the Supabase message_events table.
  * @returns {object}    Podio fields keyed by field slug.
  */
+/** Placeholder sent when message_body is null/empty so Podio's min-length validator passes. */
+const MESSAGE_BODY_PLACEHOLDER = "[Message body unavailable]";
+
 export function buildPodioPayloadForSupabaseEvent(row) {
   const timestamp =
     row.sent_at || row.received_at || row.event_timestamp || row.created_at || null;
 
   const delivery_status = clean(row.delivery_status) || null;
-  const message_body = clean(row.message_body) || "";
+
+  // Preserve the raw body length for character_count (reflects actual SMS chars).
+  const raw_message_body = clean(row.message_body);
+  const message_body_empty = !raw_message_body;
+  // Use placeholder so Podio's "must be ≥1 character" validation never rejects
+  // the record solely because an inbound message had no body saved.
+  const message_body = raw_message_body || MESSAGE_BODY_PLACEHOLDER;
 
   const fields = {
     // Core identifiers
@@ -138,8 +171,9 @@ export function buildPodioPayloadForSupabaseEvent(row) {
     [SELLER_MESSAGE_EVENT_FIELDS.event_type]:  toPodioEventType(row.event_type),
 
     // Message content
+    // character_count reflects actual SMS character count, not the placeholder.
     [SELLER_MESSAGE_EVENT_FIELDS.message]:          message_body,
-    [SELLER_MESSAGE_EVENT_FIELDS.character_count]:  row.character_count ?? message_body.length,
+    [SELLER_MESSAGE_EVENT_FIELDS.character_count]:  row.character_count ?? raw_message_body.length,
 
     // Delivery / status
     ...(delivery_status
@@ -151,10 +185,13 @@ export function buildPodioPayloadForSupabaseEvent(row) {
     ...(clean(row.raw_carrier_status)
       ? { [SELLER_MESSAGE_EVENT_FIELDS.raw_carrier_status]: clean(row.raw_carrier_status) }
       : {}),
-    ...(clean(row.provider_delivery_status)
+    // provider_delivery_status → delivery-status Podio category field.
+    // Must be normalized to a confirmed-valid Podio option; raw values like
+    // "pending" are NOT valid category options and will cause a Podio 400 error.
+    ...(toPodioProviderDeliveryStatus(row.provider_delivery_status) !== undefined
       ? {
           [SELLER_MESSAGE_EVENT_FIELDS.provider_delivery_status]:
-            clean(row.provider_delivery_status),
+            toPodioProviderDeliveryStatus(row.provider_delivery_status),
         }
       : {}),
 
@@ -262,7 +299,14 @@ export function buildPodioPayloadForSupabaseEvent(row) {
 export async function syncSupabaseMessageEventsToPodio(options = {}) {
   const supabase = options.supabase || defaultSupabase;
   const createEvent = options.createMessageEvent || runtimeDeps.createMessageEvent;
-  const limit = options.limit ?? SYNC_BATCH_SIZE;
+  // Treat 0 / negative / null / undefined as "use default".
+  // Max is capped at 100 per-call to prevent runaway batch sizes.
+  const MAX_BATCH_LIMIT = 100;
+  const effective_limit =
+    (options.limit != null && Number(options.limit) > 0)
+      ? Math.min(Number(options.limit), MAX_BATCH_LIMIT)
+      : SYNC_BATCH_SIZE;
+  const limit = effective_limit;
 
   const started_at = Date.now();
   console.log("PODIO MESSAGE EVENT SYNC STARTED");
@@ -504,12 +548,13 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     first_10_candidate_event_keys,
     first_10_failed_errors: failed_errors,
     first_10_skipped_reasons,
-    // Query-filter diagnostics (new)
+    // Query-filter diagnostics
     query_filters_used,
     raw_rows_loaded_before_filter,
     rows_after_syncable_filter,
     rows_after_attempt_filter,
     // Metadata
+    effective_limit,
     duration_ms,
     syncable_event_types: [...SYNCABLE_EVENT_TYPES],
     max_sync_attempts: MAX_SYNC_ATTEMPTS,
