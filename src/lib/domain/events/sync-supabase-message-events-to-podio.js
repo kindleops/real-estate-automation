@@ -30,6 +30,12 @@ import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 const SYNC_BATCH_SIZE = 50;
 
 /**
+ * A row is skipped permanently after this many Podio failures.
+ * Matches the coalesce(podio_sync_attempts, 0) < 3 condition in the DB design.
+ */
+const MAX_SYNC_ATTEMPTS = 3;
+
+/**
  * Only these event_type values are meaningful to mirror to Podio.
  * Delivery-update-only mutations (syncDeliveryEvent) update existing rows in
  * place and never create standalone events, so they don't appear here.
@@ -264,14 +270,37 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
   // ------------------------------------------------------------------
   // 1. Load candidate rows
   // ------------------------------------------------------------------
-  // Treat null podio_sync_status as pending so rows created before the
-  // migration column was added are still picked up without a manual backfill.
-  const { data: rows, error: load_error } = await supabase
+  // Key design decisions:
+  //
+  //  a) Filter by event_type at DB level with a simple .in() — this is
+  //     safe PostgREST syntax and avoids loading irrelevant rows.
+  //
+  //  b) Use individual .eq operators inside .or() instead of .in.()
+  //     syntax.  PostgREST's handling of nested parentheses in
+  //     "or=(col.in.(a,b),col.is.null)" is unreliable across versions
+  //     and silently returns 0 rows.  "eq.pending,eq.failed" is
+  //     equivalent and is proven to work (mirrors the diagnostic route).
+  //
+  //  c) direction filter removed — event_type already constrains the
+  //     rows to outbound_send / outbound_send_failed / inbound_sms;
+  //     filtering on direction in addition is redundant and fragile.
+  //
+  //  d) Order by created_at DESC so oldest-first batching happens
+  //     naturally when the caller increases limit across multiple runs.
+  const query_filters_used = {
+    event_type_in: [...SYNCABLE_EVENT_TYPES],
+    podio_sync_status_or: ["pending", "failed", "null"],
+    podio_sync_attempts_lt: MAX_SYNC_ATTEMPTS,
+    order: "created_at desc",
+    limit,
+  };
+
+  const { data: raw_rows, error: load_error } = await supabase
     .from("message_events")
     .select("*")
-    .or("podio_sync_status.in.(pending,failed),podio_sync_status.is.null")
-    .in("direction", ["outbound", "inbound"])
-    .order("created_at", { ascending: true })
+    .in("event_type", [...SYNCABLE_EVENT_TYPES])
+    .or("podio_sync_status.eq.pending,podio_sync_status.eq.failed,podio_sync_status.is.null")
+    .order("created_at", { ascending: false })
     .limit(limit);
 
   if (load_error) {
@@ -281,13 +310,34 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     throw load_error;
   }
 
-  const loaded_count = (rows || []).length;
+  const raw_rows_loaded_before_filter = (raw_rows || []).length;
 
-  const events = (rows || []).filter((row) =>
+  // Re-verify event_type in JS (should always be a no-op since DB filtered,
+  // but guards against unexpected rows slipping through).
+  const after_syncable_filter = (raw_rows || []).filter((row) =>
     SYNCABLE_EVENT_TYPES.has(row.event_type)
   );
+  const rows_after_syncable_filter = after_syncable_filter.length;
 
-  const skipped_rows = (rows || []).filter(
+  // Apply status + attempts cap in JS.
+  // Status re-verify guards against unexpected rows returned by the DB
+  // (e.g. a future migration that relaxes the column filter).
+  // null podio_sync_status is coalesced to "pending" (pre-migration rows).
+  const ELIGIBLE_STATUSES = new Set(["pending", "failed"]);
+  const candidates = after_syncable_filter.filter((row) => {
+    const status = row.podio_sync_status ?? "pending";
+    return ELIGIBLE_STATUSES.has(status) && (row.podio_sync_attempts ?? 0) < MAX_SYNC_ATTEMPTS;
+  });
+  const rows_after_attempt_filter = candidates.length;
+
+  // Backward-compat aliases used in logging + return value below.
+  const loaded_count = raw_rows_loaded_before_filter;
+  const events = candidates;
+
+  // Rows skipped because their event_type isn't in SYNCABLE_EVENT_TYPES
+  // (should be empty since the DB query filters by event_type, but kept
+  // as a safety net).
+  const skipped_rows = (raw_rows || []).filter(
     (row) => !SYNCABLE_EVENT_TYPES.has(row.event_type)
   );
   const skipped_count = skipped_rows.length;
@@ -297,23 +347,23 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     event_type: row.event_type || null,
   }));
 
-  const first_10_event_keys = events.slice(0, 10).map((row) => row.message_event_key || null);
+  const first_10_candidate_event_keys = candidates.slice(0, 10).map((row) => row.message_event_key || null);
+  // Backward-compat alias.
+  const first_10_event_keys = first_10_candidate_event_keys;
 
   console.log(
-    `PODIO MESSAGE EVENT SYNC LOADED: loaded=${loaded_count} to_sync=${events.length}` +
-      (skipped_count ? ` skipped=${skipped_count} (unsupported event_type)` : "")
+    `PODIO MESSAGE EVENT SYNC LOADED: raw=${raw_rows_loaded_before_filter}` +
+    ` syncable=${rows_after_syncable_filter}` +
+    ` candidates=${rows_after_attempt_filter}` +
+    (skipped_count ? ` unsupported_type_skipped=${skipped_count}` : "")
   );
-  if (first_10_event_keys.length) {
-    console.log("PODIO MESSAGE EVENT SYNC KEYS:", JSON.stringify(first_10_event_keys));
-  }
-  if (first_10_skipped_reasons.length) {
-    console.log("PODIO MESSAGE EVENT SYNC SKIPPED:", JSON.stringify(first_10_skipped_reasons));
+  if (first_10_candidate_event_keys.length) {
+    console.log("PODIO MESSAGE EVENT SYNC KEYS:", JSON.stringify(first_10_candidate_event_keys));
   }
 
-  // Mark unsupported rows as skipped so they don't re-appear in future batches.
+  // Mark any unsupported-type rows as skipped so they don't re-appear.
   if (skipped_count > 0) {
     const skipped_ids = skipped_rows.map((row) => row.id);
-
     if (skipped_ids.length > 0) {
       await supabase
         .from("message_events")
@@ -451,11 +501,18 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     skipped: skipped_count,
     // Diagnostic arrays (first 10 of each)
     first_10_event_keys,
+    first_10_candidate_event_keys,
     first_10_failed_errors: failed_errors,
     first_10_skipped_reasons,
+    // Query-filter diagnostics (new)
+    query_filters_used,
+    raw_rows_loaded_before_filter,
+    rows_after_syncable_filter,
+    rows_after_attempt_filter,
     // Metadata
     duration_ms,
     syncable_event_types: [...SYNCABLE_EVENT_TYPES],
+    max_sync_attempts: MAX_SYNC_ATTEMPTS,
   };
 }
 

@@ -61,6 +61,7 @@ function makeChainSupabase({ rows = null, data = null, error = null } = {}) {
     update() { return chain; },
     eq() { return chain; },
     in() { return chain; },
+    or() { return chain; },
     order() { return chain; },
     limit() { return Promise.resolve({ data: rows || [], error }); },
     maybeSingle() { return Promise.resolve({ data, error }); },
