@@ -57,6 +57,14 @@ import {
   resolveSchedulingContactWindow,
 } from "@/lib/domain/queue/queue-schedule.js";
 import { findAllSendQueueItemsByQueueId } from "@/lib/podio/apps/send-queue.js";
+import {
+  cancelSupabaseQueueRows,
+  findSupabaseQueueRowsByQueueKey,
+  hasSupabaseFeederSupport,
+  loadBestSupabaseSmsTemplate,
+  loadSupabaseQueueRowsForMasterOwner,
+  loadSupabaseQueueRowsForMasterOwners,
+} from "@/lib/domain/master-owners/supabase-feeder-support.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import {
   fetchAllItems,
@@ -1838,6 +1846,26 @@ function collectRelatedItemIdsByApp(root, target_app_id, depth = 0, seen = new S
 }
 
 function getHistoryTimestampFromQueueItem(queue_item) {
+  if (!queue_item) return null;
+
+  if (
+    queue_item?.scheduled_for !== undefined ||
+    queue_item?.scheduled_for_utc !== undefined ||
+    queue_item?.scheduled_for_local !== undefined ||
+    queue_item?.sent_at !== undefined ||
+    queue_item?.delivered_at !== undefined
+  ) {
+    return (
+      queue_item?.sent_at ||
+      queue_item?.delivered_at ||
+      queue_item?.scheduled_for ||
+      queue_item?.scheduled_for_utc ||
+      queue_item?.scheduled_for_local ||
+      queue_item?.created_at ||
+      null
+    );
+  }
+
   return (
     getDateValue(queue_item, "sent-at", null) ||
     getDateValue(queue_item, "delivered-at", null) ||
@@ -1861,27 +1889,38 @@ async function preloadOwnerHistories(master_owner_ids, { runtime = null, log = l
   if (!unresolved_owner_ids.length) return;
 
   const page_size = runtime.test_mode ? 25 : MAX_HISTORY_ITEMS;
+  const use_supabase_queue_history = hasSupabaseFeederSupport();
 
   const [queue_items, outbound_events] = await Promise.all([
-    timedStage(
-      log,
-      "master_owner_feeder.batch_queue_duplicate_fetch",
-      {
-        owner_count: unresolved_owner_ids.length,
-        page_size,
-      },
-      () =>
-        fetchAllItems(
-          APP_IDS.send_queue,
+    use_supabase_queue_history
+      ? timedStage(
+          log,
+          "master_owner_feeder.batch_supabase_queue_duplicate_fetch",
           {
-            "master-owner": unresolved_owner_ids,
-            "queue-status": ["Queued", "Sending", "Sent"],
-          },
-          {
+            owner_count: unresolved_owner_ids.length,
             page_size,
-          }
+          },
+          () => loadSupabaseQueueRowsForMasterOwners(unresolved_owner_ids)
         )
-    ),
+      : timedStage(
+          log,
+          "master_owner_feeder.batch_queue_duplicate_fetch",
+          {
+            owner_count: unresolved_owner_ids.length,
+            page_size,
+          },
+          () =>
+            fetchAllItems(
+              APP_IDS.send_queue,
+              {
+                "master-owner": unresolved_owner_ids,
+                "queue-status": ["Queued", "Sending", "Sent"],
+              },
+              {
+                page_size,
+              }
+            )
+        ),
     timedStage(
       log,
       "master_owner_feeder.batch_message_event_duplicate_fetch",
@@ -1908,7 +1947,9 @@ async function preloadOwnerHistories(master_owner_ids, { runtime = null, log = l
   );
 
   for (const queue_item of queue_items) {
-    const owner_id = getFirstAppReferenceId(queue_item, "master-owner", null);
+    const owner_id =
+      queue_item?.master_owner_id ??
+      getFirstAppReferenceId(queue_item, "master-owner", null);
     if (!owner_id) continue;
 
     const key = String(owner_id);
@@ -1960,6 +2001,7 @@ async function loadOwnerHistory(
   }
 
   const page_size = runtime?.test_mode ? 25 : MAX_HISTORY_ITEMS;
+  const use_supabase_queue_history = hasSupabaseFeederSupport();
 
   const should_load_queue_items = !cached_history?.queue_items_loaded;
   const should_load_outbound_events = !cached_history?.outbound_events_loaded;
@@ -1968,25 +2010,35 @@ async function loadOwnerHistory(
 
   const [queue_items, outbound_events, inbound_events] = await Promise.all([
     should_load_queue_items
-      ? timedStage(
-          log,
-          "master_owner_feeder.queue_duplicate_fetch",
-          {
-            master_owner_id,
-            page_size,
-          },
-          () =>
-            fetchAllItems(
-              APP_IDS.send_queue,
-              {
-                "master-owner": master_owner_id,
-                "queue-status": ["Queued", "Sending", "Sent"],
-              },
-              {
-                page_size,
-              }
-            )
-        )
+      ? use_supabase_queue_history
+        ? timedStage(
+            log,
+            "master_owner_feeder.supabase_queue_duplicate_fetch",
+            {
+              master_owner_id,
+              page_size,
+            },
+            () => loadSupabaseQueueRowsForMasterOwner(master_owner_id)
+          )
+        : timedStage(
+            log,
+            "master_owner_feeder.queue_duplicate_fetch",
+            {
+              master_owner_id,
+              page_size,
+            },
+            () =>
+              fetchAllItems(
+                APP_IDS.send_queue,
+                {
+                  "master-owner": master_owner_id,
+                  "queue-status": ["Queued", "Sending", "Sent"],
+                },
+                {
+                  page_size,
+                }
+              )
+          )
       : Promise.resolve(cached_history?.queue_items || []),
     should_load_outbound_events
       ? timedStage(
@@ -2051,7 +2103,7 @@ async function loadOwnerHistory(
 
 function deriveOwnerTouchCount(history) {
   const max_queue_touch = history.queue_items.reduce((max, item) => {
-    const touch_number = Number(getNumberValue(item, "touch-number", 0) || 0);
+    const touch_number = Number(getQueueItemTouch(item) || 0);
     return Math.max(max, touch_number);
   }, 0);
 
@@ -2076,24 +2128,39 @@ function buildMasterOwnerQueueId(master_owner_id, phone_item_id, touch_number) {
 }
 
 function getQueueItemQueueId(queue_item) {
-  return clean(getTextValue(queue_item, "queue-id-2", "")) || null;
+  return clean(queue_item?.queue_id || queue_item?.queue_key) ||
+    clean(getTextValue(queue_item, "queue-id-2", "")) ||
+    null;
 }
 
 function getQueueItemStatus(queue_item) {
-  return lower(getCategoryValue(queue_item, "queue-status", null));
+  return lower(queue_item?.queue_status) || lower(getCategoryValue(queue_item, "queue-status", null));
 }
 
 function getQueueItemTouch(queue_item) {
-  const touch_number = Number(getNumberValue(queue_item, "touch-number", 0) || 0);
+  const raw_touch_number =
+    queue_item?.touch_number ??
+    queue_item?.queue_sequence ??
+    getNumberValue(queue_item, "touch-number", 0) ??
+    0;
+  const touch_number = Number(raw_touch_number || 0);
   return touch_number > 0 ? touch_number : null;
 }
 
 function getQueueItemPhoneItemId(queue_item) {
-  return getFirstAppReferenceId(queue_item, "phone-number", null);
+  return (
+    Number(queue_item?.phone_item_id || 0) ||
+    getFirstAppReferenceId(queue_item, "phone-number", null) ||
+    null
+  );
 }
 
 function getQueueItemPropertyItemId(queue_item) {
-  return getFirstAppReferenceId(queue_item, "properties", null);
+  return (
+    Number(queue_item?.property_item_id || 0) ||
+    getFirstAppReferenceId(queue_item, "properties", null) ||
+    null
+  );
 }
 
 function findHistoryQueueItemByQueueId(history, queue_id) {
@@ -2198,7 +2265,7 @@ function applyPreDeepEvaluationGuards({
         owner: owner_summary,
         phone: selected_phone_record?.summary || null,
         duplicate_queue_item_id: existing_queue_row.item_id,
-        duplicate_queue_status: getCategoryValue(existing_queue_row, "queue-status", null),
+        duplicate_queue_status: existing_queue_row?.queue_status || null,
         queue_id,
       };
     }
@@ -2217,7 +2284,7 @@ function applyPreDeepEvaluationGuards({
       owner: owner_summary,
       phone: selected_phone_record?.summary || null,
       duplicate_queue_item_id: pending_duplicate.item_id,
-      duplicate_queue_status: getCategoryValue(pending_duplicate, "queue-status", null),
+      duplicate_queue_status: pending_duplicate?.queue_status || null,
     };
   }
 
@@ -2234,10 +2301,8 @@ function applyPreDeepEvaluationGuards({
       owner: owner_summary,
       phone: selected_phone_record?.summary || null,
       blocking_queue_item_id: pending_prior_touch.item_id,
-      blocking_touch_number: Number(
-        getNumberValue(pending_prior_touch, "touch-number", 0) || 0
-      ),
-      blocking_queue_status: getCategoryValue(pending_prior_touch, "queue-status", null),
+      blocking_touch_number: Number(getQueueItemTouch(pending_prior_touch) || 0),
+      blocking_queue_status: pending_prior_touch?.queue_status || null,
     };
   }
 
@@ -2254,7 +2319,7 @@ function applyPreDeepEvaluationGuards({
       owner: owner_summary,
       phone: selected_phone_record?.summary || null,
       active_queue_item_id: active_queue_row.item_id,
-      active_queue_status: getCategoryValue(active_queue_row, "queue-status", null),
+      active_queue_status: active_queue_row?.queue_status || null,
       active_queue_phone_item_id: getQueueItemPhoneItemId(active_queue_row),
       active_queue_touch_number: getQueueItemTouch(active_queue_row),
     };
@@ -2303,7 +2368,7 @@ function applyPostPropertyEvaluationGuards({
     phone: selected_phone_record?.summary || null,
     property: summarizeProperty(property_item, owner_item),
     active_queue_item_id: property_conflict.item_id,
-    active_queue_status: getCategoryValue(property_conflict, "queue-status", null),
+    active_queue_status: property_conflict?.queue_status || null,
     active_queue_phone_item_id: getQueueItemPhoneItemId(property_conflict),
     active_queue_property_item_id: getQueueItemPropertyItemId(property_conflict),
     active_queue_touch_number: getQueueItemTouch(property_conflict),
@@ -2393,8 +2458,8 @@ async function acquireOwnerEvaluationLock({
 function findPendingDuplicate(history, phone_item_id, touch_number = null) {
   return (
     history.queue_items.find((item) => {
-      const status = lower(getCategoryValue(item, "queue-status", null));
-      const candidate_phone_item_id = getFirstAppReferenceId(item, "phone-number", null);
+      const status = getQueueItemStatus(item);
+      const candidate_phone_item_id = getQueueItemPhoneItemId(item);
 
       if (!QUEUE_DUPLICATE_PENDING_STATUSES.has(status)) return false;
       if (String(candidate_phone_item_id || "") !== String(phone_item_id || "")) return false;
@@ -2402,7 +2467,7 @@ function findPendingDuplicate(history, phone_item_id, touch_number = null) {
       // If a touch_number is supplied, only consider it a duplicate when the existing
       // row shares the same touch sequence number.
       if (touch_number !== null) {
-        const candidate_touch = Number(getNumberValue(item, "touch-number", 0) || 0);
+        const candidate_touch = Number(getQueueItemTouch(item) || 0);
         return candidate_touch === touch_number;
       }
 
@@ -2419,11 +2484,11 @@ export function findPendingPriorTouch(history, phone_item_id, current_touch_numb
   if (!current_touch_number || current_touch_number <= 1) return null;
   return (
     history.queue_items.find((item) => {
-      const status = lower(getCategoryValue(item, "queue-status", null));
-      const candidate_phone_item_id = getFirstAppReferenceId(item, "phone-number", null);
+      const status = getQueueItemStatus(item);
+      const candidate_phone_item_id = getQueueItemPhoneItemId(item);
       if (!QUEUE_DUPLICATE_PENDING_STATUSES.has(status)) return false;
       if (String(candidate_phone_item_id || "") !== String(phone_item_id || "")) return false;
-      const candidate_touch = Number(getNumberValue(item, "touch-number", 0) || 0);
+      const candidate_touch = Number(getQueueItemTouch(item) || 0);
       return candidate_touch > 0 && candidate_touch < current_touch_number;
     }) || null
   );
@@ -2432,8 +2497,8 @@ export function findPendingPriorTouch(history, phone_item_id, current_touch_numb
 function findRecentDuplicate(history, phone_item_id, cutoff_ts) {
   const recent_queue_item =
     history.queue_items.find((item) => {
-      const status = lower(getCategoryValue(item, "queue-status", null));
-      const candidate_phone_item_id = getFirstAppReferenceId(item, "phone-number", null);
+      const status = getQueueItemStatus(item);
+      const candidate_phone_item_id = getQueueItemPhoneItemId(item);
       const candidate_ts = toTimestamp(getHistoryTimestampFromQueueItem(item));
 
       return (
@@ -3747,6 +3812,7 @@ async function evaluateOwner({
   });
 
   incrementRuntimeCounter(runtime, "template_eval_count");
+  const use_supabase_templates = hasSupabaseFeederSupport();
   let selected_template = await timedStage(
     log,
     "master_owner_feeder.template_selection",
@@ -3754,7 +3820,13 @@ async function evaluateOwner({
       evaluation_depth,
       ...template_resolution_inputs,
     },
-    () => loadTemplate({ ...template_selection_inputs, require_podio_template: !dry_run })
+    () =>
+      use_supabase_templates
+        ? loadBestSupabaseSmsTemplate(template_selection_inputs)
+        : loadTemplate({
+            ...template_selection_inputs,
+            require_podio_template: !dry_run,
+          })
   );
 
   // ── LIVE SELLER QUEUE: reject local_registry templates ─────────────────────
@@ -3909,7 +3981,10 @@ async function evaluateOwner({
     });
   }
 
-  if (strict_touch_one_mode && clean(selected_template?.source).toLowerCase() !== "podio") {
+  if (
+    strict_touch_one_mode &&
+    !["podio", "supabase"].includes(clean(selected_template?.source).toLowerCase())
+  ) {
     throw buildFeederValidationError("NO_STAGE_1_TEMPLATE_FOUND", {
       master_owner_id,
       template_id: selected_template?.item_id ?? null,
@@ -4168,6 +4243,26 @@ async function evaluateOwner({
         : (selected_template?.use_case || null),
       strict_cold_outbound: strict_touch_one_mode,
     });
+
+    if (queue_result?.ok === false) {
+      return {
+        ok: false,
+        skipped: true,
+        dry_run: false,
+        reason:
+          queue_result?.reason === "duplicate_blocked"
+            ? "duplicate_queue_id"
+            : "queue_create_failed",
+        owner: owner_summary,
+        phone: selected_phone_record.summary,
+        plan,
+        queue_item_id: queue_result?.queue_item_id || null,
+        duplicate_queue_item_id: queue_result?.queue_item_id || null,
+        duplicate_queue_status: queue_result?.raw?.queue_status || "queued",
+        queue_result,
+      };
+    }
+
     incrementRuntimeCounter(runtime, "queue_create_success_count");
 
     // Post-creation duplicate verification — if a concurrent feeder run created
@@ -4176,12 +4271,19 @@ async function evaluateOwner({
     const created_item_id = queue_result?.queue_item_id || null;
     if (created_item_id && idempotency_queue_id) {
       try {
-        const all_matches = await findAllSendQueueItemsByQueueId(idempotency_queue_id);
+        const all_matches = hasSupabaseFeederSupport()
+          ? await findSupabaseQueueRowsByQueueKey(idempotency_queue_id)
+          : await findAllSendQueueItemsByQueueId(idempotency_queue_id);
         if (all_matches.length > 1) {
-          // Keep the oldest item (lowest item_id), cancel the rest.
-          const sorted = [...all_matches].sort(
-            (a, b) => Number(a.item_id) - Number(b.item_id)
-          );
+          // Keep the oldest item, cancel the rest.
+          const sorted = [...all_matches].sort((a, b) => {
+            const left_ts = toTimestamp(a?.created_at || a?.raw?.created_at || null);
+            const right_ts = toTimestamp(b?.created_at || b?.raw?.created_at || null);
+            if (left_ts !== null && right_ts !== null && left_ts !== right_ts) {
+              return left_ts - right_ts;
+            }
+            return String(a?.item_id || "").localeCompare(String(b?.item_id || ""));
+          });
           const keeper = sorted[0];
           const duplicates_to_cancel = sorted.slice(1);
           incrementRuntimeCounter(
@@ -4189,25 +4291,53 @@ async function evaluateOwner({
             "queue_create_duplicate_cancel_count",
             duplicates_to_cancel.length
           );
-          for (const dup of duplicates_to_cancel) {
+          if (hasSupabaseFeederSupport()) {
+            const duplicate_ids = duplicates_to_cancel
+              .map((dup) => dup?.item_id || null)
+              .filter(Boolean);
+
             try {
-              await updateItem(dup.item_id, {
-                "queue-status": { value: "Cancelled" },
-              });
-              log.warn("master_owner_feeder.concurrent_duplicate_cancelled", {
-                master_owner_id,
-                cancelled_item_id: dup.item_id,
-                kept_item_id: keeper.item_id,
-                queue_id: idempotency_queue_id,
-                duplicate_count: all_matches.length,
-              });
+              await cancelSupabaseQueueRows(duplicate_ids);
+              for (const dup of duplicates_to_cancel) {
+                log.warn("master_owner_feeder.concurrent_duplicate_cancelled", {
+                  master_owner_id,
+                  cancelled_item_id: dup.item_id,
+                  kept_item_id: keeper.item_id,
+                  queue_id: idempotency_queue_id,
+                  duplicate_count: all_matches.length,
+                });
+              }
             } catch (cancel_error) {
-              log.warn("master_owner_feeder.concurrent_duplicate_cancel_failed", {
-                master_owner_id,
-                item_id: dup.item_id,
-                queue_id: idempotency_queue_id,
-                error: String(cancel_error?.message || cancel_error),
-              });
+              for (const dup of duplicates_to_cancel) {
+                log.warn("master_owner_feeder.concurrent_duplicate_cancel_failed", {
+                  master_owner_id,
+                  item_id: dup.item_id,
+                  queue_id: idempotency_queue_id,
+                  error: String(cancel_error?.message || cancel_error),
+                });
+              }
+            }
+          } else {
+            for (const dup of duplicates_to_cancel) {
+              try {
+                await updateItem(dup.item_id, {
+                  "queue-status": { value: "Cancelled" },
+                });
+                log.warn("master_owner_feeder.concurrent_duplicate_cancelled", {
+                  master_owner_id,
+                  cancelled_item_id: dup.item_id,
+                  kept_item_id: keeper.item_id,
+                  queue_id: idempotency_queue_id,
+                  duplicate_count: all_matches.length,
+                });
+              } catch (cancel_error) {
+                log.warn("master_owner_feeder.concurrent_duplicate_cancel_failed", {
+                  master_owner_id,
+                  item_id: dup.item_id,
+                  queue_id: idempotency_queue_id,
+                  error: String(cancel_error?.message || cancel_error),
+                });
+              }
             }
           }
         }

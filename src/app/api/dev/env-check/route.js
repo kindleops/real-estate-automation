@@ -1,7 +1,15 @@
+import { requireDevRouteAccess } from "@/lib/security/dev-route-guard.js";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request) {
+  const denied = requireDevRouteAccess(request);
+
+  if (denied) {
+    return denied;
+  }
+
   const supabase_env_keys = Object.keys(process.env)
     .filter((key) => key.includes("SUPABASE"))
     .sort();

@@ -9,6 +9,8 @@ import {
   handleDevSendTestRequest,
   runDevSendTest,
 } from "@/app/api/dev/send-test/route.js";
+import { GET as getDevEnvCheck } from "@/app/api/dev/env-check/route.js";
+import { GET as getDevForceSend } from "@/app/api/dev/force-send/route.js";
 import {
   finalizeSendQueueSuccess,
   loadRunnableSendQueueRows,
@@ -677,4 +679,89 @@ test("dev send-test route exports GET and POST handlers and request helper retur
   assert.equal(body.ok, true);
   assert.equal(body.inserted.item_id, 777);
   assert.equal(body.queue_run, null);
+});
+
+test("dev SMS routes return 404 in production without x-internal-api-secret", async () => {
+  const original_node_env = process.env.NODE_ENV;
+  const original_internal_api_secret = process.env.INTERNAL_API_SECRET;
+
+  process.env.NODE_ENV = "production";
+  process.env.INTERNAL_API_SECRET = "internal-secret";
+
+  try {
+    const denied_send_test = await getDevSendTest({
+      url: "http://localhost/api/dev/send-test",
+      headers: new Headers(),
+    });
+    const denied_force_send = await getDevForceSend({
+      headers: new Headers(),
+    });
+    const denied_env_check = await getDevEnvCheck({
+      headers: new Headers(),
+    });
+
+    assert.equal(denied_send_test.status, 404);
+    assert.equal(denied_force_send.status, 404);
+    assert.equal(denied_env_check.status, 404);
+  } finally {
+    if (original_node_env === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = original_node_env;
+    }
+
+    if (original_internal_api_secret === undefined) {
+      delete process.env.INTERNAL_API_SECRET;
+    } else {
+      process.env.INTERNAL_API_SECRET = original_internal_api_secret;
+    }
+  }
+});
+
+test("dev SMS routes allow access in production with x-internal-api-secret", async () => {
+  const original_node_env = process.env.NODE_ENV;
+  const original_internal_api_secret = process.env.INTERNAL_API_SECRET;
+
+  process.env.NODE_ENV = "production";
+  process.env.INTERNAL_API_SECRET = "internal-secret";
+
+  try {
+    const response = await handleDevSendTestRequest(
+      {
+        url: "http://localhost/api/dev/send-test?run_now=false",
+        headers: new Headers({
+          "x-internal-api-secret": "internal-secret",
+        }),
+      },
+      {
+        insertSupabaseSendQueueRowImpl: async (payload) => ({
+          ok: true,
+          item_id: 778,
+          queue_id: payload.queue_id,
+          queue_key: payload.queue_key,
+          raw: payload,
+        }),
+        fetchImpl: async () => {
+          throw new Error("should_not_fetch_when_run_now_false");
+        },
+      }
+    );
+
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.inserted.item_id, 778);
+  } finally {
+    if (original_node_env === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = original_node_env;
+    }
+
+    if (original_internal_api_secret === undefined) {
+      delete process.env.INTERNAL_API_SECRET;
+    } else {
+      process.env.INTERNAL_API_SECRET = original_internal_api_secret;
+    }
+  }
 });

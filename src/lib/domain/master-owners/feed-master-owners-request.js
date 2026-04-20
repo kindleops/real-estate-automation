@@ -22,6 +22,11 @@ import {
   resolveMutationDryRun,
   resolveScopedId,
 } from "@/lib/config/rollout-controls.js";
+import {
+  hasSupabaseFeederSupport,
+  inspectSupabaseQueueBuffer,
+} from "@/lib/domain/master-owners/supabase-feeder-support.js";
+import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 
 const logger = child({
   module: "api.internal.outbound.feed_master_owners",
@@ -240,6 +245,18 @@ async function defaultInspectQueueBuffer({
     250
   );
   const bounded_snapshot_limit = Math.min(effective_snapshot_limit, 500);
+
+  if (hasSupabaseFeederSupport()) {
+    return inspectSupabaseQueueBuffer({
+      now,
+      critical_low_threshold: normalized_critical_low,
+      replenish_target: normalized_replenish_target,
+      healthy_target: normalized_healthy_target,
+      ideal_target: normalized_ideal_target,
+      snapshot_limit: bounded_snapshot_limit,
+    });
+  }
+
   const [queued_response, sending_response, failed_response] = await Promise.all([
     filterAppItems(
       APP_IDS.send_queue,
@@ -784,12 +801,46 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
         resolved_result?.rollout?.source_view_fallback_occurred ?? false,
       source_view_fallback_reason:
         resolved_result?.rollout?.source_view_fallback_reason ?? null,
+      // Limits
+      effective_limit,
+      effective_scan_limit,
+      // Counts (normalized aliases used by diagnostics)
+      loaded_count:
+        Number(resolved_result?.raw_items_pulled ?? resolved_result?.raw_scanned_count ?? resolved_result?.scanned_count) || 0,
       scanned_count: resolved_result?.scanned_count ?? 0,
+      eligible_count: resolved_result?.eligible_owner_count ?? 0,
       eligible_owner_count: resolved_result?.eligible_owner_count ?? 0,
+      inserted_count: resolved_result?.queued_count ?? 0,
       queued_count: resolved_result?.queued_count ?? 0,
+      duplicate_count:
+        (Number(resolved_result?.duplicate_skip_count) || 0) +
+        (Number(resolved_result?.queue_create_duplicate_cancel_count) || 0),
+      skipped_count: resolved_result?.skipped_count ?? 0,
+      // Skip/error detail
+      first_10_skip_reasons: (resolved_result?.skip_reason_counts ?? []).slice(0, 10),
+      first_10_errors: (Array.isArray(resolved_result?.results) ? resolved_result.results : [])
+        .filter((r) => r?.ok === false && !r?.skipped)
+        .slice(0, 10)
+        .map((r) => ({
+          reason: r?.reason || "unknown",
+          master_owner_id: r?.plan?.master_owner_id ?? r?.owner?.item_id ?? null,
+        })),
       skip_reason_counts: resolved_result?.skip_reason_counts ?? [],
+      // Template resolution
+      template_resolution_summary: resolved_result?.template_resolution_diagnostics ?? null,
       template_resolution_diagnostics:
         resolved_result?.template_resolution_diagnostics ?? null,
+      // Supabase insert summary
+      supabase_insert_summary: {
+        attempted: resolved_result?.queue_create_attempt_count ?? null,
+        succeeded: resolved_result?.queue_create_success_count ?? null,
+        duplicate_canceled: resolved_result?.queue_create_duplicate_cancel_count ?? null,
+      },
+      queue_create_attempt_count: resolved_result?.queue_create_attempt_count ?? null,
+      queue_create_success_count: resolved_result?.queue_create_success_count ?? null,
+      queue_create_duplicate_cancel_count:
+        resolved_result?.queue_create_duplicate_cancel_count ?? null,
+      // Queue inventory
       queued_inventory_count:
         resolved_result?.queue_inventory?.queued_inventory_count ?? null,
       available_inventory_count:
@@ -850,6 +901,18 @@ export async function runFeederWithRollout(input = {}, deps = {}) {
           source_view_name: view_scope.source_view_name,
           lock,
         },
+      });
+
+      sendCriticalAlert({
+        title: "Feeder Lock Active",
+        description: "Master-owner feeder skipped — an active lease is already in progress",
+        color: 0xf39c12,
+        fields: [
+          { name: "Scope", value: String(lock_scope), inline: true },
+          { name: "Reason", value: "master_owner_feeder_lock_active", inline: true },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: "feeder/onLocked" },
       });
 
       return {

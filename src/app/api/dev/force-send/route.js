@@ -1,9 +1,16 @@
 import { sendTextgridSMS } from "@/lib/providers/textgrid.js";
+import { requireDevRouteAccess } from "@/lib/security/dev-route-guard.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request) {
+  const denied = requireDevRouteAccess(request);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     const result = await sendTextgridSMS({
       from: "+16128060495",

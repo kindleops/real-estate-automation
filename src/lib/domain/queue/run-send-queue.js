@@ -10,6 +10,8 @@ import {
   loadRunnableSendQueueRows,
   normalizeQueueRowId,
 } from "@/lib/supabase/sms-engine.js";
+import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
+import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 
 const DEFAULT_BATCH_SIZE = 50;
 const QUEUE_RUN_LOCK_SCOPE = "queue-run";
@@ -591,6 +593,38 @@ export async function runSendQueue(
         now_utc: now,
         first_10_skipped_item_ids_with_reason: skipped_reasons.slice(0, 10),
       });
+
+      captureSystemEvent("queue_run_completed", {
+        ok: summary.ok,
+        partial: summary.partial,
+        dry_run: summary.dry_run,
+        attempted_count: summary.attempted_count,
+        claimed_count: summary.claimed_count,
+        sent_count: summary.sent_count,
+        failed_count: summary.failed_count,
+        blocked_count: summary.blocked_count,
+        skipped_count: summary.skipped_count,
+        duplicate_locked_count: summary.duplicate_locked_count,
+        batch_duration_ms: summary.batch_duration_ms,
+        total_rows_loaded: summary.total_rows_loaded,
+        due_rows: summary.due_rows,
+      });
+
+      if (summary.failed_count > 0) {
+        sendCriticalAlert({
+          title: "Queue Run Failures",
+          description: `${summary.failed_count} SMS send${summary.failed_count === 1 ? "" : "s"} failed in queue run`,
+          color: 0xe74c3c,
+          fields: [
+            { name: "Failed", value: String(summary.failed_count), inline: true },
+            { name: "Sent", value: String(summary.sent_count), inline: true },
+            { name: "Duration (ms)", value: String(summary.batch_duration_ms), inline: true },
+            { name: "First Failure Reason", value: summary.first_failure_reason || "unknown", inline: false },
+          ],
+          timestamp: new Date().toISOString(),
+          footer: { text: "queue_run_completed" },
+        });
+      }
 
       return summary;
     },

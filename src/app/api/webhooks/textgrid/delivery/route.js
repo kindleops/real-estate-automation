@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { child } from "@/lib/logging/logger.js";
 import { handleTextgridDeliveryRequest } from "@/lib/webhooks/textgrid-delivery-request.js";
+import { captureRouteException } from "@/lib/monitoring/sentry.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,9 +20,17 @@ export async function GET() {
 }
 
 export async function POST(request) {
-  const { status, payload } = await handleTextgridDeliveryRequest(request, {
-    logger,
-  });
+  try {
+    const { status, payload } = await handleTextgridDeliveryRequest(request, {
+      logger,
+    });
 
-  return NextResponse.json(payload, { status });
+    return NextResponse.json(payload, { status });
+  } catch (error) {
+    captureRouteException(error, {
+      route: "webhooks/textgrid/delivery",
+      subsystem: "textgrid_delivery",
+    });
+    throw error;
+  }
 }

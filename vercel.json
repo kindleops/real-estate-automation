@@ -20,6 +20,10 @@
     {
       "path": "/api/internal/autopilot/run",
       "schedule": "51 * * * *"
+    },
+    {
+      "path": "/api/internal/events/sync-podio",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
