@@ -46,11 +46,26 @@ async function handle(request) {
     if (!auth.authorized) return auth.response;
 
     const { searchParams } = new URL(request.url);
+
+    // For POST requests also read limit from JSON body as fallback.
+    let body_limit = null;
+    if (request.method === "POST") {
+      try {
+        const body = await request.clone().json();
+        if (body?.limit != null) body_limit = Number(body.limit);
+      } catch (_) {
+        // not JSON or empty body — ignore
+      }
+    }
+
+    // searchParams.get("limit") returns null when absent.
+    // Number(null) === 0, which is falsy for our purposes, so we must check > 0.
+    const raw_limit = searchParams.get("limit") != null
+      ? Number(searchParams.get("limit"))
+      : body_limit;
     const limit = Math.min(
-      Number.isFinite(Number(searchParams.get("limit")))
-        ? Number(searchParams.get("limit"))
-        : 50,
-      200
+      Number.isFinite(raw_limit) && raw_limit > 0 ? raw_limit : 50,
+      100
     );
 
     logger.info("podio_sync.requested", {

@@ -42,6 +42,7 @@ import crypto from "node:crypto";
 
 import {
   syncSupabaseMessageEventsToPodio,
+  buildPodioPayloadForSupabaseEvent,
 } from "@/lib/domain/events/sync-supabase-message-events-to-podio.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -361,7 +362,10 @@ test("syncSupabaseMessageEventsToPodio: does not skip inbound_sms with null mess
   });
 
   assert.equal(result.synced_count, 1, "null-body inbound_sms must sync successfully");
-  assert.equal(synced_payloads[0]["message"], "", "Podio message field must be empty string for null body");
+  assert.ok(
+    synced_payloads[0]["message"] && synced_payloads[0]["message"].length > 0,
+    "Podio message field must be non-empty (placeholder) for null body"
+  );
 });
 
 test("syncSupabaseMessageEventsToPodio: response includes query_filters_used with event types", async () => {
@@ -399,6 +403,102 @@ test("syncSupabaseMessageEventsToPodio: response includes row-filter diagnostic 
   assert.equal(result.rows_after_attempt_filter, 2);
   assert.ok(Array.isArray(result.first_10_candidate_event_keys));
   assert.equal(result.first_10_candidate_event_keys.length, 2);
+});
+
+// ─── field-mapping regression tests (empty body, delivery-status allowlist, limit) ───
+
+test("buildPodioPayloadForSupabaseEvent: blank inbound body uses placeholder not empty string", () => {
+  const BASE = {
+    id: 9001, message_event_key: "inb-9001", provider_message_sid: null,
+    direction: "inbound", event_type: "inbound_sms",
+    message_body: "", character_count: 0, delivery_status: null,
+    provider_delivery_status: null, sent_at: null,
+    created_at: "2026-04-19T12:00:00.000Z",
+    master_owner_id: 201, prospect_id: null, property_id: null,
+    market_id: null, sms_agent_id: null, textgrid_number_id: null,
+    template_id: null, brain_id: null,
+    podio_sync_status: "pending", podio_sync_attempts: 0, metadata: {},
+  };
+  const fields = buildPodioPayloadForSupabaseEvent({ ...BASE, message_body: "" });
+  assert.ok(fields["message"].length > 0, "empty body must not produce empty message field");
+  const fields2 = buildPodioPayloadForSupabaseEvent({ ...BASE, message_body: null });
+  assert.ok(fields2["message"].length > 0, "null body must not produce empty message field");
+  assert.equal(fields2["character-count"], 0, "character-count must be 0 for null body");
+});
+
+test("buildPodioPayloadForSupabaseEvent: delivery_status pending is omitted from delivery-status field", () => {
+  const row = makeOutboundRow({ provider_delivery_status: "pending" });
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  // "pending" is not a valid Podio category option for delivery-status → must be omitted
+  assert.equal(fields["delivery-status"], undefined,
+    "raw 'pending' must be omitted from Podio delivery-status field");
+});
+
+test("buildPodioPayloadForSupabaseEvent: unknown provider_delivery_status is omitted", () => {
+  const row = makeOutboundRow({ provider_delivery_status: "queued" });
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.equal(fields["delivery-status"], undefined,
+    "unrecognised value must be omitted from Podio delivery-status field");
+});
+
+test("buildPodioPayloadForSupabaseEvent: delivery_status sent maps to Sent", () => {
+  const row = makeOutboundRow({ provider_delivery_status: "sent" });
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.equal(fields["delivery-status"], "Sent");
+});
+
+test("buildPodioPayloadForSupabaseEvent: delivery_status delivered maps to Delivered", () => {
+  const row = makeOutboundRow({ provider_delivery_status: "delivered" });
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.equal(fields["delivery-status"], "Delivered");
+});
+
+test("buildPodioPayloadForSupabaseEvent: delivery_status failed maps to Failed", () => {
+  const row = makeOutboundRow({ provider_delivery_status: "failed" });
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.equal(fields["delivery-status"], "Failed");
+});
+
+test("syncSupabaseMessageEventsToPodio: no limit option defaults to effective_limit 50", async () => {
+  const { client } = makeSyncFakeSupabase({ rows: [] });
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 0 }),
+  });
+  assert.equal(result.query_filters_used.limit, 50,
+    "omitting limit must default to 50");
+});
+
+test("syncSupabaseMessageEventsToPodio: limit=20 uses effective_limit 20", async () => {
+  const { client } = makeSyncFakeSupabase({ rows: [] });
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 0 }),
+    limit: 20,
+  });
+  assert.equal(result.query_filters_used.limit, 20);
+});
+
+test("syncSupabaseMessageEventsToPodio: limit=0 defaults to effective_limit 50", async () => {
+  const { client } = makeSyncFakeSupabase({ rows: [] });
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 0 }),
+    limit: 0,
+  });
+  assert.equal(result.query_filters_used.limit, 50,
+    "limit=0 must fall back to 50");
+});
+
+test("syncSupabaseMessageEventsToPodio: negative limit defaults to effective_limit 50", async () => {
+  const { client } = makeSyncFakeSupabase({ rows: [] });
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: client,
+    createMessageEvent: async () => ({ item_id: 0 }),
+    limit: -5,
+  });
+  assert.equal(result.query_filters_used.limit, 50,
+    "negative limit must fall back to 50");
 });
 
 // ─── 14. inbound-diagnostic route file exists ────────────────────────────
