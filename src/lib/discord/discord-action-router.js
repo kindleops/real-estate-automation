@@ -95,6 +95,8 @@ import {
   normalizeAssetType,
   normalizeStrategy,
   resolveTargetSourceViewName,
+  buildNormalizedTargeting,
+  isKnownMarketSlug,
 } from "../domain/campaigns/targeting-console.js";
 import {
   listWireEvents,
@@ -112,6 +114,7 @@ import {
   deferredPublicResponse,
   editOriginalInteractionResponse,
 } from "./discord-followups.js";
+import { info, warn, error as logError } from "../logging/logger.js";
 
 // ---------------------------------------------------------------------------
 // Test dependency injection
@@ -1315,26 +1318,65 @@ async function handleAlertsMode({ options_array, context }) {
 // ---------------------------------------------------------------------------
 
 async function handleTargetScan({ options_array, context, interaction }) {
-  const market      = String(getOption(options_array, "market") ?? "").trim();
-  const asset       = String(getOption(options_array, "asset") ?? "").trim();
-  const strategy    = String(getOption(options_array, "strategy") ?? "").trim();
-  const limit       = Math.min(Math.max(1, Number(getOption(options_array, "limit")) || 25), 500);
-  const scan_limit  = Math.min(Math.max(1, Number(getOption(options_array, "scan_limit")) || 100), 5000);
-  const source_view_name_override = String(getOption(options_array, "source_view_name") ?? "").trim() || null;
+  const market_raw  = String(getOption(options_array, "market") ?? "").trim();
+  const asset_raw   = String(getOption(options_array, "asset") ?? "").trim();
+  const strategy_raw = String(getOption(options_array, "strategy") ?? "").trim();
 
-  if (!market || !asset || !strategy) {
+  if (!market_raw || !asset_raw || !strategy_raw) {
     return errorResponse("market, asset, and strategy are required.");
   }
 
-  const source_view_name = resolveTargetSourceViewName({
-    market,
-    asset_type: asset,
-    strategy,
-    source_view_name: source_view_name_override,
+  // Validate market slug is a known choice (guard against unexpected values)
+  const market_slug = normalizeMarketSlug(market_raw);
+  if (!isKnownMarketSlug(market_slug)) {
+    return errorResponse(`Unknown market: "${market_slug}". Use a supported market choice.`);
+  }
+
+  const limit      = Math.min(Math.max(1, Number(getOption(options_array, "limit")) || 25), 500);
+  const scan_limit = Math.min(Math.max(1, Number(getOption(options_array, "scan_limit")) || 100), 5000);
+
+  // Tags and filters
+  const tag_1         = getOption(options_array, "tag_1")          ?? null;
+  const tag_2         = getOption(options_array, "tag_2")          ?? null;
+  const tag_3         = getOption(options_array, "tag_3")          ?? null;
+  const zip           = getOption(options_array, "zip")            ?? null;
+  const county        = getOption(options_array, "county")         ?? null;
+  const min_equity    = getOption(options_array, "min_equity")     ?? null;
+  const max_year_built  = getOption(options_array, "max_year_built") ?? null;
+  const owner_type    = getOption(options_array, "owner_type")     ?? null;
+  const phone_status  = getOption(options_array, "phone_status")   ?? null;
+  const language      = getOption(options_array, "language")       ?? null;
+  const motivation_min = getOption(options_array, "motivation_min") ?? null;
+
+  const targeting = buildNormalizedTargeting({
+    market: market_raw, asset: asset_raw, strategy: strategy_raw,
+    tag_1, tag_2, tag_3,
+    zip, county, min_equity, max_year_built,
+    owner_type, phone_status, language, motivation_min,
   });
-  const campaign_key = buildCampaignKey({ market, asset_type: asset, strategy });
+
+  const source_view_name = resolveTargetSourceViewName({
+    market:     targeting.market_label,
+    asset_type: targeting.asset_slug,
+    strategy:   targeting.strategy_slug,
+  });
+  const campaign_key = buildCampaignKey({
+    market: targeting.market_slug, asset_type: targeting.asset_slug, strategy: targeting.strategy_slug,
+  });
+
   const app_id = String(process.env.DISCORD_APPLICATION_ID ?? "");
-  const token = interaction.token;
+  const token  = interaction.token;
+
+  info("discord.target.scan.started", {
+    market: targeting.market_slug,
+    asset:  targeting.asset_slug,
+    strategy: targeting.strategy_slug,
+    limit,
+    scan_limit,
+    tag_count:    targeting.tags.length,
+    filter_count: Object.keys(targeting.filters).length,
+    user_id: context.user_id,
+  });
 
   Promise.resolve()
     .then(async () => {
@@ -1345,10 +1387,14 @@ async function handleTargetScan({ options_array, context, interaction }) {
         const result = await callInternal("/api/internal/outbound/feed-master-owners", {
           method: "POST",
           body: {
-            dry_run: true,
+            dry_run:          true,
             limit,
             scan_limit,
             source_view_name,
+            targeting_filters: Object.keys(targeting.filters).length > 0 ? targeting.filters : undefined,
+            property_tags:     targeting.tags.length > 0
+              ? targeting.tags.map((t) => t.slug)
+              : undefined,
           },
           timeout_ms: 30_000,
         });
@@ -1359,12 +1405,12 @@ async function handleTargetScan({ options_array, context, interaction }) {
           content = `Target scan error: ${result.error ?? "unknown"}.`;
         } else {
           const payload = result.data ?? {};
-          const feeder = payload.result ?? {};
+          const feeder  = payload.result ?? {};
           const scan_summary = {
-            scanned: feeder.loaded_count ?? 0,
-            eligible: feeder.eligible_count ?? 0,
+            scanned:    feeder.loaded_count   ?? 0,
+            eligible:   feeder.eligible_count ?? 0,
             would_queue: feeder.inserted_count ?? 0,
-            skipped: feeder.skipped_count ?? 0,
+            skipped:    feeder.skipped_count  ?? 0,
           };
 
           try {
@@ -1374,32 +1420,47 @@ async function handleTargetScan({ options_array, context, interaction }) {
               .select("id")
               .eq("campaign_key", campaign_key)
               .maybeSingle();
-            if (existing || source_view_name_override) {
+            if (existing) {
               await db
                 .from("campaign_targets")
                 .update({
                   last_scan_summary: scan_summary,
-                  last_scan_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
+                  last_scan_at:  new Date().toISOString(),
+                  updated_at:    new Date().toISOString(),
                 })
                 .eq("campaign_key", campaign_key);
             }
           } catch {
-            // Non-fatal: scan result is still shown even if persistence fails.
+            // Non-fatal
           }
 
+          info("discord.target.scan.completed", {
+            market:     targeting.market_slug,
+            asset:      targeting.asset_slug,
+            strategy:   targeting.strategy_slug,
+            ...scan_summary,
+            user_id: context.user_id,
+          });
+
           embeds = [buildTargetScanEmbed({
-            market,
-            asset,
-            strategy,
+            market:          targeting.market_slug,
+            asset:           targeting.asset_slug,
+            strategy:        targeting.strategy_slug,
+            market_label:    targeting.market_label,
+            asset_label:     targeting.asset_label,
+            strategy_label:  targeting.strategy_label,
+            theme:           targeting.theme,
+            tags:            targeting.tags,
+            filters:         targeting.filters,
             source_view_name,
-            scanned: scan_summary.scanned,
-            eligible: scan_summary.eligible,
+            scanned:     scan_summary.scanned,
+            eligible:    scan_summary.eligible,
             would_queue: scan_summary.would_queue,
-            skipped: scan_summary.skipped,
+            skipped:     scan_summary.skipped,
           })];
         }
-      } catch {
+      } catch (err) {
+        logError("discord.target.command.failed", { command: "target.scan", user_id: context.user_id });
         content = "Target scan encountered an error. Check server logs.";
       }
 
@@ -1422,23 +1483,68 @@ async function handleTargetScan({ options_array, context, interaction }) {
 
 async function handleCampaignCreate({ options_array, context }) {
   const campaign_name = String(getOption(options_array, "name") ?? "").trim();
-  const market = String(getOption(options_array, "market") ?? "").trim();
-  const asset = String(getOption(options_array, "asset") ?? "").trim();
-  const strategy = String(getOption(options_array, "strategy") ?? "").trim();
-  const daily_cap = Math.min(Math.max(1, Number(getOption(options_array, "daily_cap")) || 50), 10000);
-  const source_view_name_override = String(getOption(options_array, "source_view_name") ?? "").trim() || null;
-  const language = String(getOption(options_array, "language") ?? "auto").trim() || "auto";
+  const market_raw    = String(getOption(options_array, "market") ?? "").trim();
+  const asset_raw     = String(getOption(options_array, "asset") ?? "").trim();
+  const strategy_raw  = String(getOption(options_array, "strategy") ?? "").trim();
 
-  if (!campaign_name || !market || !asset || !strategy) {
+  if (!campaign_name || !market_raw || !asset_raw || !strategy_raw) {
     return errorResponse("name, market, asset, and strategy are required.");
   }
 
-  const campaign_key = buildCampaignKey({ market, asset_type: asset, strategy });
-  const source_view_name = resolveTargetSourceViewName({
-    market,
-    asset_type: asset,
-    strategy,
-    source_view_name: source_view_name_override,
+  // Validate market slug
+  const market_slug = normalizeMarketSlug(market_raw);
+  if (!isKnownMarketSlug(market_slug)) {
+    return errorResponse(`Unknown market: "${market_slug}". Use a supported market choice.`);
+  }
+
+  // Bound daily_cap: min 1, max 500 for non-Owner; Owners may exceed
+  const raw_cap  = Number(getOption(options_array, "daily_cap")) || 50;
+  const max_cap  = isOwner(context.role_ids) ? 10000 : 500;
+  const daily_cap = Math.min(Math.max(1, raw_cap), max_cap);
+
+  const source_view_name_override = String(getOption(options_array, "source_view_name") ?? "").trim() || null;
+
+  // Tags and filters
+  const tag_1          = getOption(options_array, "tag_1")           ?? null;
+  const tag_2          = getOption(options_array, "tag_2")           ?? null;
+  const tag_3          = getOption(options_array, "tag_3")           ?? null;
+  const zip            = getOption(options_array, "zip")             ?? null;
+  const county         = getOption(options_array, "county")          ?? null;
+  const min_equity     = getOption(options_array, "min_equity")      ?? null;
+  const max_year_built = getOption(options_array, "max_year_built")  ?? null;
+  const owner_type     = getOption(options_array, "owner_type")      ?? null;
+  const phone_status   = getOption(options_array, "phone_status")    ?? null;
+  const language       = getOption(options_array, "language")        ?? null;
+  const motivation_min = getOption(options_array, "motivation_min")  ?? null;
+
+  const targeting = buildNormalizedTargeting({
+    market: market_raw, asset: asset_raw, strategy: strategy_raw,
+    tag_1, tag_2, tag_3,
+    zip, county, min_equity, max_year_built,
+    owner_type, phone_status, language, motivation_min,
+  });
+
+  const source_view_name = source_view_name_override ?? resolveTargetSourceViewName({
+    market:     targeting.market_label,
+    asset_type: targeting.asset_slug,
+    strategy:   targeting.strategy_slug,
+  });
+
+  const campaign_key = buildCampaignKey({
+    market:     targeting.market_slug,
+    asset_type: targeting.asset_slug,
+    strategy:   targeting.strategy_slug,
+  });
+
+  info("discord.campaign.create.started", {
+    campaign_key,
+    market:   targeting.market_slug,
+    asset:    targeting.asset_slug,
+    strategy: targeting.strategy_slug,
+    daily_cap,
+    tag_count:    targeting.tags.length,
+    filter_count: Object.keys(targeting.filters).length,
+    user_id: context.user_id,
   });
 
   try {
@@ -1446,14 +1552,22 @@ async function handleCampaignCreate({ options_array, context }) {
     const row = {
       campaign_key,
       campaign_name,
-      market: normalizeMarketSlug(market),
-      asset_type: normalizeAssetType(asset),
-      strategy: normalizeStrategy(strategy),
-      language,
+      market:     targeting.market_slug,
+      asset_type: targeting.asset_slug,
+      strategy:   targeting.strategy_slug,
+      language:   language ?? "auto",
       source_view_name,
       daily_cap,
-      status: "draft",
+      status:     "draft",
       created_by_discord_user_id: context.user_id || null,
+      metadata: {
+        market_label:   targeting.market_label,
+        asset_label:    targeting.asset_label,
+        strategy_label: targeting.strategy_label,
+        tags:    targeting.tags,
+        filters: targeting.filters,
+        theme:   targeting.theme,
+      },
       updated_at: new Date().toISOString(),
     };
 
@@ -1462,13 +1576,26 @@ async function handleCampaignCreate({ options_array, context }) {
       .upsert(row, { onConflict: "campaign_key" });
     if (error) throw error;
 
+    info("discord.campaign.create.completed", {
+      campaign_key,
+      market:   targeting.market_slug,
+      daily_cap,
+      user_id: context.user_id,
+    });
+
     return cinematicMessage({
       embeds: [buildCampaignCreatedEmbed({
         campaign_key,
         campaign_name,
-        market,
-        asset,
-        strategy,
+        market:          targeting.market_slug,
+        asset:           targeting.asset_slug,
+        strategy:        targeting.strategy_slug,
+        market_label:    targeting.market_label,
+        asset_label:     targeting.asset_label,
+        strategy_label:  targeting.strategy_label,
+        theme:           targeting.theme,
+        tags:            targeting.tags,
+        filters:         targeting.filters,
         daily_cap,
         status: "draft",
         source_view_name,
@@ -1476,6 +1603,7 @@ async function handleCampaignCreate({ options_array, context }) {
       components: campaignActionRow({ campaignKey: campaign_key, paused: false }),
     });
   } catch {
+    logError("discord.target.command.failed", { command: "campaign.create", user_id: context.user_id });
     return errorResponse("Failed to create campaign. Please try again.");
   }
 }

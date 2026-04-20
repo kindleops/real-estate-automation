@@ -367,7 +367,9 @@ export async function queueMessage(params = {}) {
         schedule: params?.schedule || null,
         resolution_source: params?.resolution?.source || null,
         queue_fields: fields,
+        queue_context: params?.context || null,
       },
+      cash_offer_snapshot_id: params?.cash_offer_snapshot_id || null,
     });
 
     info("queue_message.created", {

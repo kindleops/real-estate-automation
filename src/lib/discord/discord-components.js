@@ -183,7 +183,7 @@ export function approvalButtons({ actionId = "", approveLabel = "Approve", denyL
 // ---------------------------------------------------------------------------
 
 /**
- * Buttons for /target scan output.
+ * Buttons for /target scan output. v2 — cinematic targeting console.
  *
  * custom_id prefix: target:
  *
@@ -196,15 +196,15 @@ export function targetActionRow({ campaignKey = "" } = {}) {
   return [
     actionRow([
       button({ label: "Create Campaign",  custom_id: `target:create_campaign:${safe_key}`, style: STYLE.PRIMARY   }),
-      button({ label: "Run Again",        custom_id: `target:run_again:${safe_key}`,       style: STYLE.SECONDARY }),
-      button({ label: "Template Audit",   custom_id: "target:template_audit",             style: STYLE.SECONDARY }),
-      button({ label: "Launch Preflight", custom_id: "target:launch_preflight",           style: STYLE.SECONDARY }),
+      button({ label: "Launch Dry Run",   custom_id: `target:launch_dry_run:${safe_key}`,  style: STYLE.SECONDARY }),
+      button({ label: "Refine Filters",   custom_id: `target:refine_filters:${safe_key}`,  style: STYLE.SECONDARY }),
+      button({ label: "View Territory",   custom_id: "target:view_territory",              style: STYLE.SECONDARY }),
     ]),
   ];
 }
 
 /**
- * Buttons for /campaign create, inspect, and management output.
+ * Buttons for /campaign create, inspect, and management output. v2.
  *
  * custom_id prefix: campaign:
  *
@@ -217,18 +217,18 @@ export function campaignActionRow({ campaignKey = "", paused = false } = {}) {
   const safe_key = String(campaignKey).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
   return [
     actionRow([
-      button({ label: "Scan Campaign", custom_id: `campaign:scan:${safe_key}`,  style: STYLE.PRIMARY   }),
-      button({ label: "Preflight",     custom_id: "campaign:preflight",         style: STYLE.SECONDARY }),
-      button({ label: "Scale",         custom_id: `campaign:scale:${safe_key}`, style: STYLE.SECONDARY }),
+      button({ label: "Approve Launch", custom_id: `campaign:approve_launch:${safe_key}`, style: STYLE.SUCCESS   }),
+      button({ label: "Scale",          custom_id: `campaign:scale:${safe_key}`,          style: STYLE.PRIMARY   }),
       paused
         ? button({ label: "Resume", custom_id: `campaign:resume:${safe_key}`, style: STYLE.SUCCESS })
         : button({ label: "Pause",  custom_id: `campaign:pause:${safe_key}`,  style: STYLE.DANGER  }),
+      button({ label: "Close",          custom_id: `campaign:close:${safe_key}`,          style: STYLE.SECONDARY }),
     ]),
   ];
 }
 
 /**
- * Buttons for /territory map output.
+ * Buttons for /territory map output. v2.
  *
  * custom_id prefix: territory:
  *
@@ -237,9 +237,9 @@ export function campaignActionRow({ campaignKey = "", paused = false } = {}) {
 export function territoryActionRow() {
   return [
     actionRow([
-      button({ label: "Create Target",  custom_id: "territory:create_target",  style: STYLE.PRIMARY   }),
-      button({ label: "Scan Active",    custom_id: "territory:scan_active",    style: STYLE.SECONDARY }),
-      button({ label: "Mission Status", custom_id: "territory:mission_status", style: STYLE.SECONDARY }),
+      button({ label: "Create Campaign",  custom_id: "target:create_campaign",   style: STYLE.PRIMARY   }),
+      button({ label: "Launch Dry Run",   custom_id: "target:launch_dry_run",    style: STYLE.SECONDARY }),
+      button({ label: "Mission Status",   custom_id: "territory:mission_status", style: STYLE.SECONDARY }),
     ]),
   ];
 }

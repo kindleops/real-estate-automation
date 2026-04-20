@@ -55,6 +55,41 @@ function sanitizeTextPayload(value, max = 5000) {
   return clean(value).slice(0, max);
 }
 
+function normalizeBrandKey(value) {
+  return clean(value).toLowerCase();
+}
+
+function resolveBrandEnvVar(brand_key) {
+  const normalized = normalizeBrandKey(brand_key);
+
+  if (["prominent_cash_offer", "prominent", "pco"].includes(normalized)) {
+    return "BREVO_PROMINENT_API_KEY";
+  }
+
+  if (["reivesti", "rivesti"].includes(normalized)) {
+    return "BREVO_REIVESTI_API_KEY";
+  }
+
+  return null;
+}
+
+export function resolveBrevoApiKeyForBrand(
+  brand_key,
+  { allow_legacy_fallback = false } = {}
+) {
+  const env_var = resolveBrandEnvVar(brand_key);
+  if (!env_var) return null;
+
+  const brand_specific_key = clean(process.env[env_var]);
+  if (brand_specific_key) return brand_specific_key;
+
+  if (allow_legacy_fallback) {
+    return clean(process.env.BREVO_API_KEY) || null;
+  }
+
+  return null;
+}
+
 export async function sendBrevoTransactionalEmail(
   {
     to,
@@ -65,13 +100,24 @@ export async function sendBrevoTransactionalEmail(
     replyTo,
     tags,
     params,
+    brand_key,
+    provider_account_key,
   } = {},
   deps = {}
 ) {
-  const api_key = clean(process.env.BREVO_API_KEY);
+  const requested_brand_key = clean(brand_key || provider_account_key);
+  const default_brand_key = clean(process.env.EMAIL_DEFAULT_BRAND_KEY) || "prominent_cash_offer";
+  const effective_brand_key = requested_brand_key || default_brand_key;
+
+  const api_key = resolveBrevoApiKeyForBrand(effective_brand_key, {
+    // Optional legacy fallback is only allowed for implicit/default brand calls.
+    allow_legacy_fallback: !requested_brand_key,
+  });
+
   if (!api_key) {
-    const err = new Error("brevo_not_configured");
-    err.code = "brevo_not_configured";
+    const err = new Error("Email provider is not configured for this brand.");
+    err.code = "missing_brevo_api_key_for_brand";
+    err.brand_key = effective_brand_key || null;
     err.retryable = false;
     throw err;
   }

@@ -36,6 +36,10 @@ import {
   __setEmailSuppressionDeps,
   __resetEmailSuppressionDeps,
 } from "@/lib/email/email-suppression.js";
+import {
+  sendBrevoTransactionalEmail,
+  resolveBrevoApiKeyForBrand,
+} from "@/lib/email/brevo-client.js";
 
 // ---------------------------------------------------------------------------
 // Test 1 — renderEmailTemplate: variable substitution
@@ -544,4 +548,218 @@ test("renderEmailTemplate strips script tags from html_body", () => {
   assert.ok(!result.html_body.includes("<script>"),     "script tags should be stripped");
   assert.ok(!result.html_body.includes("alert"),        "script content should be stripped");
   assert.ok(result.html_body.includes("Hello"),         "legitimate content should remain");
+});
+
+// ---------------------------------------------------------------------------
+// Test 13 — Brevo brand routing uses prominent key
+// ---------------------------------------------------------------------------
+
+function withBrevoEnv(temp, fn) {
+  const keys = [
+    "BREVO_PROMINENT_API_KEY",
+    "BREVO_REIVESTI_API_KEY",
+    "BREVO_API_KEY",
+    "EMAIL_DEFAULT_BRAND_KEY",
+  ];
+  const snapshot = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(temp || {})) {
+    if (v === null || v === undefined) delete process.env[k];
+    else process.env[k] = String(v);
+  }
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      for (const k of keys) {
+        if (snapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = snapshot[k];
+      }
+    });
+}
+
+test("Brevo prominent brand routes to BREVO_PROMINENT_API_KEY", async () => {
+  let used_api_key = null;
+
+  await withBrevoEnv(
+    {
+      BREVO_PROMINENT_API_KEY: "prominent-secret",
+      BREVO_REIVESTI_API_KEY: "reivesti-secret",
+      BREVO_API_KEY: "legacy-secret",
+    },
+    async () => {
+      const result = await sendBrevoTransactionalEmail(
+        {
+          to: "seller@example.com",
+          subject: "Test",
+          htmlContent: "<p>Hello</p>",
+          brand_key: "prominent",
+          sender: { email: "sender@example.com", name: "Ops" },
+        },
+        {
+          fetch_impl: async (_url, options) => {
+            used_api_key = options?.headers?.["api-key"];
+            return {
+              ok: true,
+              json: async () => ({ messageId: "msg-1" }),
+            };
+          },
+        }
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(used_api_key, "prominent-secret");
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 14 — Brevo brand routing uses reivesti key
+// ---------------------------------------------------------------------------
+
+test("Brevo reivesti brand routes to BREVO_REIVESTI_API_KEY", async () => {
+  let used_api_key = null;
+
+  await withBrevoEnv(
+    {
+      BREVO_PROMINENT_API_KEY: "prominent-secret",
+      BREVO_REIVESTI_API_KEY: "reivesti-secret",
+      BREVO_API_KEY: "legacy-secret",
+    },
+    async () => {
+      const result = await sendBrevoTransactionalEmail(
+        {
+          to: "seller@example.com",
+          subject: "Test",
+          htmlContent: "<p>Hello</p>",
+          brand_key: "reivesti",
+          sender: { email: "sender@example.com", name: "Ops" },
+        },
+        {
+          fetch_impl: async (_url, options) => {
+            used_api_key = options?.headers?.["api-key"];
+            return {
+              ok: true,
+              json: async () => ({ messageId: "msg-2" }),
+            };
+          },
+        }
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(used_api_key, "reivesti-secret");
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 15 — unknown brand returns sanitized missing-key error
+// ---------------------------------------------------------------------------
+
+test("unknown Brevo brand throws sanitized missing_brevo_api_key_for_brand", async () => {
+  await withBrevoEnv(
+    {
+      BREVO_PROMINENT_API_KEY: "prominent-secret",
+      BREVO_REIVESTI_API_KEY: "reivesti-secret",
+      BREVO_API_KEY: "legacy-secret",
+    },
+    async () => {
+      await assert.rejects(
+        async () =>
+          sendBrevoTransactionalEmail(
+            {
+              to: "seller@example.com",
+              subject: "Test",
+              htmlContent: "<p>Hello</p>",
+              brand_key: "unknown_brand",
+              sender: { email: "sender@example.com", name: "Ops" },
+            },
+            { fetch_impl: async () => ({ ok: true, json: async () => ({}) }) }
+          ),
+        (err) => {
+          assert.equal(err?.code, "missing_brevo_api_key_for_brand");
+          assert.ok(!String(err?.message || "").includes("legacy-secret"));
+          assert.ok(!String(err?.message || "").includes("prominent-secret"));
+          assert.ok(!String(err?.message || "").includes("reivesti-secret"));
+          return true;
+        }
+      );
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 16 — no raw API key leaks in thrown errors
+// ---------------------------------------------------------------------------
+
+test("missing key error never leaks raw Brevo API key", async () => {
+  await withBrevoEnv(
+    {
+      BREVO_PROMINENT_API_KEY: null,
+      BREVO_REIVESTI_API_KEY: null,
+      BREVO_API_KEY: "legacy-should-not-appear",
+    },
+    async () => {
+      await assert.rejects(
+        async () =>
+          sendBrevoTransactionalEmail(
+            {
+              to: "seller@example.com",
+              subject: "Test",
+              htmlContent: "<p>Hello</p>",
+              brand_key: "reivesti",
+              sender: { email: "sender@example.com", name: "Ops" },
+            },
+            { fetch_impl: async () => ({ ok: true, json: async () => ({}) }) }
+          ),
+        (err) => {
+          const body = `${err?.code || ""} ${err?.message || ""}`;
+          assert.ok(!body.includes("legacy-should-not-appear"));
+          return true;
+        }
+      );
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 17 — legacy fallback does not override brand-specific keys
+// ---------------------------------------------------------------------------
+
+test("legacy BREVO_API_KEY never overrides brand-specific key", async () => {
+  let used_api_key = null;
+
+  await withBrevoEnv(
+    {
+      BREVO_PROMINENT_API_KEY: "prominent-secret",
+      BREVO_REIVESTI_API_KEY: "reivesti-secret",
+      BREVO_API_KEY: "legacy-secret",
+      EMAIL_DEFAULT_BRAND_KEY: "prominent_cash_offer",
+    },
+    async () => {
+      const resolved = resolveBrevoApiKeyForBrand("prominent_cash_offer", {
+        allow_legacy_fallback: true,
+      });
+      assert.equal(resolved, "prominent-secret");
+
+      await sendBrevoTransactionalEmail(
+        {
+          to: "seller@example.com",
+          subject: "Test",
+          htmlContent: "<p>Hello</p>",
+          sender: { email: "sender@example.com", name: "Ops" },
+        },
+        {
+          fetch_impl: async (_url, options) => {
+            used_api_key = options?.headers?.["api-key"];
+            return {
+              ok: true,
+              json: async () => ({ messageId: "msg-3" }),
+            };
+          },
+        }
+      );
+
+      assert.equal(used_api_key, "prominent-secret");
+      assert.notEqual(used_api_key, "legacy-secret");
+    }
+  );
 });

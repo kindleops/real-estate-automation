@@ -311,6 +311,8 @@ export async function queueOutboundMessage({
   rendered_message_text = null,
   template_render_overrides = {},
   textgrid_number_item_id = null,
+  extra_queue_context = null,
+  cash_offer_snapshot_id = null,
 } = {}, deps = {}) {
   const {
     loadContextImpl = loadContext,
@@ -888,6 +890,9 @@ export async function queueOutboundMessage({
     send_priority: resolved_send_priority,
     dnc_check,
     delivery_confirmed,
+    ...(extra_queue_context && typeof extra_queue_context === "object"
+      ? extra_queue_context
+      : {}),
   };
 
   const queue_result = await smsQueueMessageImpl({
@@ -901,6 +906,7 @@ export async function queueOutboundMessage({
     },
     links,
     context: queue_context,
+    cash_offer_snapshot_id: cash_offer_snapshot_id || null,
   });
 
   info("outbound.queue_message_completed", {

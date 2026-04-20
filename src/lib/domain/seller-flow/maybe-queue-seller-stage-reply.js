@@ -156,6 +156,14 @@ export async function maybeQueueSellerStageReply({
   previous_outbound_use_case = null,
   maybe_offer = null,
   existing_offer = null,
+  explicit_use_case = null,
+  explicit_template_lookup_use_case = null,
+  explicit_variant_group = null,
+  explicit_tone = null,
+  force_queue_reply = null,
+  extra_queue_context = null,
+  extra_template_render_overrides = null,
+  cash_offer_snapshot_id = null,
   now = new Date().toISOString(),
   queue_message = queueOutboundMessage,
   schedule_resolver = resolveLatencyAwareQueueSchedule,
@@ -182,7 +190,7 @@ export async function maybeQueueSellerStageReply({
     message_preview: String(message || "").slice(0, 80),
   });
 
-  const plan = routeSellerConversation({
+  const base_plan = routeSellerConversation({
     context,
     classification,
     message,
@@ -190,6 +198,20 @@ export async function maybeQueueSellerStageReply({
     maybe_offer,
     existing_offer,
   });
+
+  const plan = explicit_use_case
+    ? {
+        ...base_plan,
+        handled: true,
+        should_queue_reply: force_queue_reply ?? true,
+        selected_use_case: explicit_use_case,
+        template_lookup_use_case:
+          explicit_template_lookup_use_case ?? explicit_use_case,
+        selected_variant_group:
+          explicit_variant_group ?? base_plan?.selected_variant_group ?? null,
+        selected_tone: explicit_tone ?? base_plan?.selected_tone ?? null,
+      }
+    : base_plan;
 
   if (!plan?.handled) {
     logDeps.info("seller_queue.skip", {
@@ -302,7 +324,10 @@ export async function maybeQueueSellerStageReply({
       template_render_overrides: {
         offer_price: plan.offer_price_display,
         smart_cash_offer_display: plan.offer_price_display,
+        ...(extra_template_render_overrides || {}),
       },
+      extra_queue_context: extra_queue_context || undefined,
+      cash_offer_snapshot_id: cash_offer_snapshot_id || undefined,
     });
   } catch (err) {
     logDeps.warn("seller_queue.create_failed", {

@@ -164,6 +164,8 @@ export async function processEmailQueue({ limit = 25, dry_run = false } = {}) {
         subject: row.subject,
         htmlContent: row.html_body,
         textContent: row.text_body,
+        brand_key: clean(row?.metadata?.brand_key) || undefined,
+        provider_account_key: clean(row?.metadata?.provider_account_key) || undefined,
         sender: identity.sender,
         replyTo: identity.replyTo,
         tags: [

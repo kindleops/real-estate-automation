@@ -394,23 +394,96 @@ const COMMANDS = [
 // Targeting Console command definitions (Targeting Console v1)
 // ---------------------------------------------------------------------------
 
+const MARKET_CHOICES = [
+  { name: "Los Angeles",         value: "los_angeles"       },
+  { name: "Miami",               value: "miami"             },
+  { name: "Dallas / Fort Worth", value: "dallas_fort_worth" },
+  { name: "Houston",             value: "houston"           },
+  { name: "Jacksonville",        value: "jacksonville"      },
+  { name: "New Orleans",         value: "new_orleans"       },
+  { name: "Atlanta",             value: "atlanta"           },
+  { name: "Tampa",               value: "tampa"             },
+  { name: "Orlando",             value: "orlando"           },
+  { name: "Phoenix",             value: "phoenix"           },
+  { name: "Las Vegas",           value: "las_vegas"         },
+  { name: "Cleveland",           value: "cleveland"         },
+  { name: "Detroit",             value: "detroit"           },
+  { name: "Memphis",             value: "memphis"           },
+  { name: "Birmingham",          value: "birmingham"        },
+  { name: "Indianapolis",        value: "indianapolis"      },
+  { name: "Charlotte",           value: "charlotte"         },
+  { name: "San Antonio",         value: "san_antonio"       },
+  { name: "Austin",              value: "austin"            },
+  { name: "Chicago",             value: "chicago"           },
+  { name: "St. Louis",           value: "st_louis"          },
+  { name: "Kansas City",         value: "kansas_city"       },
+  { name: "Minneapolis",         value: "minneapolis"       },
+  { name: "Nashville",           value: "nashville"         },
+  { name: "Philadelphia",        value: "philadelphia"      },
+];
+
 const ASSET_CHOICES = [
-  { name: "SFR",             value: "sfr"             },
-  { name: "Multifamily",     value: "multifamily"     },
-  { name: "Duplex",          value: "duplex"          },
-  { name: "Vacant",          value: "vacant"          },
-  { name: "Absentee",        value: "absentee"        },
-  { name: "Probate",         value: "probate"         },
-  { name: "Tax Delinquent",  value: "tax_delinquent"  },
-  { name: "Corporate Owner", value: "corporate_owner" },
-  { name: "High Equity",     value: "high_equity"     },
-  { name: "Free & Clear",    value: "free_and_clear"  },
+  { name: "\u{1F3E0} SFR / Single Family",    value: "sfr"                    },
+  { name: "\u{1F3E2} Multifamily",             value: "multifamily"            },
+  { name: "\u{1F3D8}\uFE0F Duplex",            value: "duplex"                 },
+  { name: "\u{1F33E} Vacant Land",             value: "vacant_land"            },
+  { name: "\u{1F3DA}\uFE0F Distressed Residential", value: "distressed_residential" },
+  { name: "\u{1F3EC} Commercial",              value: "commercial"             },
+  { name: "\u{1F3E8} Hotel / Motel",           value: "hotel_motel"            },
+  { name: "\u{1F4E6} Self Storage",            value: "self_storage"           },
 ];
 
 const STRATEGY_CHOICES = [
-  { name: "Cash",                   value: "cash"                   },
-  { name: "Creative",               value: "creative"               },
-  { name: "Multifamily Underwrite", value: "multifamily_underwrite" },
+  { name: "\u{1F4B5} Cash Offer",              value: "cash"                   },
+  { name: "\u{1F9E0} Creative Finance",        value: "creative"               },
+  { name: "\u{1F3E2} Multifamily Underwrite",  value: "multifamily_underwrite" },
+  { name: "\u{1F3DA}\uFE0F Distress Stack",    value: "distress_stack"         },
+  { name: "\u{1F9FE} Probate / Inherited",     value: "probate"                },
+  { name: "\u{1F3D8}\uFE0F Tired Landlord",    value: "tired_landlord"         },
+  { name: "\u{1F3E6} Pre-Foreclosure",         value: "pre_foreclosure"        },
+  { name: "\u{1F3AF} High Equity",             value: "high_equity"            },
+];
+
+const PROPERTY_TAG_CHOICES = [
+  { name: "Absentee Owner",       value: "absentee_owner"      },
+  { name: "Out of State Owner",   value: "out_of_state_owner"  },
+  { name: "Vacant",               value: "vacant"              },
+  { name: "High Equity",          value: "high_equity"         },
+  { name: "Free and Clear",       value: "free_and_clear"      },
+  { name: "Tax Delinquent",       value: "tax_delinquent"      },
+  { name: "Pre-Foreclosure",      value: "pre_foreclosure"     },
+  { name: "Probate / Inherited",  value: "probate"             },
+  { name: "Tired Landlord",       value: "tired_landlord"      },
+  { name: "Senior Owner",         value: "senior_owner"        },
+  { name: "Empty Nester",         value: "empty_nester"        },
+  { name: "Corporate Owner",      value: "corporate_owner"     },
+  { name: "Low Equity",           value: "low_equity"          },
+  { name: "Active Lien",          value: "active_lien"         },
+  { name: "Likely To Move",       value: "likely_to_move"      },
+  { name: "Distressed Property",  value: "distressed_property" },
+  { name: "Unknown Equity",       value: "unknown_equity"      },
+];
+
+const OWNER_TYPE_CHOICES = [
+  { name: "Individual", value: "individual" },
+  { name: "Corporate",  value: "corporate"  },
+  { name: "Trust",      value: "trust"      },
+  { name: "LLC",        value: "llc"        },
+  { name: "Investor",   value: "investor"   },
+  { name: "Unknown",    value: "unknown"    },
+];
+
+const PHONE_STATUS_CHOICES = [
+  { name: "Active 12+ Months", value: "active_12_plus"   },
+  { name: "Active",            value: "active"           },
+  { name: "Unknown",           value: "unknown"          },
+  { name: "Exclude Inactive",  value: "exclude_inactive" },
+];
+
+const LANGUAGE_CHOICES = [
+  { name: "Auto",    value: "auto"    },
+  { name: "English", value: "english" },
+  { name: "Spanish", value: "spanish" },
 ];
 
 const TARGETING_COMMANDS = [
@@ -424,16 +497,18 @@ const TARGETING_COMMANDS = [
         name:        "scan",
         description: "Dry-run scan a target territory — no SMS sent",
         options: [
+          // — Required —
           {
             type:        OPT.STRING,
             name:        "market",
-            description: "Market to scan (e.g. Los Angeles, Miami)",
+            description: "Market to scan",
             required:    true,
+            choices:     MARKET_CHOICES,
           },
           {
             type:        OPT.STRING,
             name:        "asset",
-            description: "Asset type",
+            description: "Asset class",
             required:    true,
             choices:     ASSET_CHOICES,
           },
@@ -444,6 +519,90 @@ const TARGETING_COMMANDS = [
             required:    true,
             choices:     STRATEGY_CHOICES,
           },
+          // — Property tags (optional) —
+          {
+            type:        OPT.STRING,
+            name:        "tag_1",
+            description: "Property tag filter (primary)",
+            required:    false,
+            choices:     PROPERTY_TAG_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "tag_2",
+            description: "Property tag filter (secondary)",
+            required:    false,
+            choices:     PROPERTY_TAG_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "tag_3",
+            description: "Property tag filter (tertiary)",
+            required:    false,
+            choices:     PROPERTY_TAG_CHOICES,
+          },
+          // — Geographic filters (optional) —
+          {
+            type:        OPT.STRING,
+            name:        "zip",
+            description: "Zip code filter",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "county",
+            description: "County filter",
+            required:    false,
+          },
+          // — Property filters (optional) —
+          {
+            type:        OPT.INTEGER,
+            name:        "min_equity",
+            description: "Minimum equity percentile (0–100)",
+            required:    false,
+            min_value:   0,
+            max_value:   100,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "max_year_built",
+            description: "Maximum year built (e.g. 1980)",
+            required:    false,
+            min_value:   1800,
+            max_value:   2030,
+          },
+          // — Owner filters (optional) —
+          {
+            type:        OPT.STRING,
+            name:        "owner_type",
+            description: "Owner entity type filter",
+            required:    false,
+            choices:     OWNER_TYPE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "phone_status",
+            description: "Phone activity filter",
+            required:    false,
+            choices:     PHONE_STATUS_CHOICES,
+          },
+          // — Outreach settings (optional) —
+          {
+            type:        OPT.STRING,
+            name:        "language",
+            description: "Outreach language (default auto)",
+            required:    false,
+            choices:     LANGUAGE_CHOICES,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "motivation_min",
+            description: "Minimum motivation score (0–100)",
+            required:    false,
+            min_value:   0,
+            max_value:   100,
+          },
+          // — Volume controls (optional) —
           {
             type:        OPT.INTEGER,
             name:        "limit",
@@ -459,12 +618,6 @@ const TARGETING_COMMANDS = [
             required:    false,
             min_value:   1,
             max_value:   5000,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "source_view_name",
-            description: "Podio view name override (auto-derived if omitted)",
-            required:    false,
           },
         ],
       },
@@ -580,6 +733,7 @@ if (campaign_cmd) {
       name:        "create",
       description: "Create or update a campaign target (SMS Ops, Tech Ops, or Owner)",
       options: [
+        // — Required —
         {
           type:        OPT.STRING,
           name:        "name",
@@ -589,13 +743,14 @@ if (campaign_cmd) {
         {
           type:        OPT.STRING,
           name:        "market",
-          description: "Market (e.g. Los Angeles, Miami)",
+          description: "Market",
           required:    true,
+          choices:     MARKET_CHOICES,
         },
         {
           type:        OPT.STRING,
           name:        "asset",
-          description: "Asset type",
+          description: "Asset class",
           required:    true,
           choices:     ASSET_CHOICES,
         },
@@ -606,10 +761,94 @@ if (campaign_cmd) {
           required:    true,
           choices:     STRATEGY_CHOICES,
         },
+        // — Property tags (optional) —
+        {
+          type:        OPT.STRING,
+          name:        "tag_1",
+          description: "Property tag filter (primary)",
+          required:    false,
+          choices:     PROPERTY_TAG_CHOICES,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "tag_2",
+          description: "Property tag filter (secondary)",
+          required:    false,
+          choices:     PROPERTY_TAG_CHOICES,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "tag_3",
+          description: "Property tag filter (tertiary)",
+          required:    false,
+          choices:     PROPERTY_TAG_CHOICES,
+        },
+        // — Geographic filters (optional) —
+        {
+          type:        OPT.STRING,
+          name:        "zip",
+          description: "Zip code filter",
+          required:    false,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "county",
+          description: "County filter",
+          required:    false,
+        },
+        // — Property filters (optional) —
+        {
+          type:        OPT.INTEGER,
+          name:        "min_equity",
+          description: "Minimum equity percentile (0–100)",
+          required:    false,
+          min_value:   0,
+          max_value:   100,
+        },
+        {
+          type:        OPT.INTEGER,
+          name:        "max_year_built",
+          description: "Maximum year built (e.g. 1980)",
+          required:    false,
+          min_value:   1800,
+          max_value:   2030,
+        },
+        // — Owner filters (optional) —
+        {
+          type:        OPT.STRING,
+          name:        "owner_type",
+          description: "Owner entity type filter",
+          required:    false,
+          choices:     OWNER_TYPE_CHOICES,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "phone_status",
+          description: "Phone activity filter",
+          required:    false,
+          choices:     PHONE_STATUS_CHOICES,
+        },
+        // — Outreach settings (optional) —
+        {
+          type:        OPT.STRING,
+          name:        "language",
+          description: "Outreach language (default auto)",
+          required:    false,
+          choices:     LANGUAGE_CHOICES,
+        },
+        {
+          type:        OPT.INTEGER,
+          name:        "motivation_min",
+          description: "Minimum motivation score (0–100)",
+          required:    false,
+          min_value:   0,
+          max_value:   100,
+        },
+        // — Volume controls (optional) —
         {
           type:        OPT.INTEGER,
           name:        "daily_cap",
-          description: "Max messages per day (default 50)",
+          description: "Max messages per day (default 50, max 500 for non-Owner)",
           required:    false,
           min_value:   1,
           max_value:   10000,
@@ -619,17 +858,6 @@ if (campaign_cmd) {
           name:        "source_view_name",
           description: "Podio view name override (auto-derived if omitted)",
           required:    false,
-        },
-        {
-          type:        OPT.STRING,
-          name:        "language",
-          description: "Message language (default auto)",
-          required:    false,
-          choices: [
-            { name: "Auto",    value: "auto"    },
-            { name: "English", value: "English" },
-            { name: "Spanish", value: "Spanish" },
-          ],
         },
       ],
     },

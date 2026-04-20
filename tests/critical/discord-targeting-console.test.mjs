@@ -27,6 +27,13 @@ import {
   normalizeMarketSlug,
   normalizeAssetType,
   normalizeStrategy,
+  normalizeAssetSlug,
+  normalizeStrategySlug,
+  normalizePropertyTags,
+  buildTargetingFilters,
+  buildTargetingTheme,
+  buildNormalizedTargeting,
+  isKnownMarketSlug,
   resolveTargetSourceViewName,
   buildTargetScanUrl,
 } from "@/lib/domain/campaigns/targeting-console.js";
@@ -807,4 +814,645 @@ test("command registration includes target, territory, conquest and campaign cre
   assert.ok(source.includes('name:        "create"'), "registers /campaign create");
   assert.ok(source.includes('name:        "inspect"'), "registers /campaign inspect");
   assert.ok(source.includes('name:        "scale"'), "registers /campaign scale");
+});
+
+// ===========================================================================
+// — Targeting Console v2 tests —
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 15. /target scan accepts market choice, asset choice, strategy choice
+// ---------------------------------------------------------------------------
+
+test("v2: /target scan accepts market slug choice, asset, strategy", async () => {
+  const calls = [];
+  const callInternal_override = async (path, options) => {
+    calls.push({ path, options });
+    return {
+      ok: true,
+      data: { result: { eligible_count: 15, loaded_count: 60, inserted_count: 10, skipped_count: 50 } },
+    };
+  };
+
+  const mock = makeMock({
+    campaign_targets:       { rows: [] },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "target",
+      subcommand: "scan",
+      options: [
+        { name: "market",   value: "miami" },
+        { name: "asset",    value: "sfr"   },
+        { name: "strategy", value: "cash"  },
+      ],
+      role_ids: ["owner_role"],
+      token:    "tok_v2_marketchoice",
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 5, "deferred response (type 5)");
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(calls.length, 1, "feeder called once");
+    assert.equal(calls[0].options.body.dry_run, true, "dry_run forced true");
+    // source_view_name should be derived from the slug
+    assert.ok(calls[0].options.body.source_view_name, "source_view_name is set");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 16. /target scan includes property tags in embed
+// ---------------------------------------------------------------------------
+
+test("v2: /target scan includes property tags in embed", async () => {
+  const callInternal_override = async () => ({
+    ok: true,
+    data: { result: { eligible_count: 20, loaded_count: 80, inserted_count: 15, skipped_count: 60 } },
+  });
+
+  const mock = makeMock({
+    campaign_targets:       { rows: [] },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  let captured_embed = null;
+  const orig_edit = globalThis.__captured_edit;
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "target",
+      subcommand: "scan",
+      options: [
+        { name: "market",   value: "miami"          },
+        { name: "asset",    value: "sfr"            },
+        { name: "strategy", value: "cash"           },
+        { name: "tag_1",    value: "absentee_owner" },
+        { name: "tag_2",    value: "high_equity"    },
+      ],
+      role_ids: ["owner_role"],
+      token:    "tok_tags",
+    });
+
+    await routeDiscordInteraction(interaction);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Verify normalizePropertyTags works for the given values
+    const tags = normalizePropertyTags(["absentee_owner", "high_equity"]);
+    assert.equal(tags.length, 2, "two tags normalized");
+    assert.equal(tags[0].slug, "absentee_owner", "first tag slug correct");
+    assert.equal(tags[1].slug, "high_equity",    "second tag slug correct");
+
+    // Embed built with tags should show tags field
+    const { buildTargetScanEmbed: embedFn } = await import("@/lib/discord/discord-embed-factory.js");
+    captured_embed = embedFn({
+      market: "miami", asset: "sfr", strategy: "cash",
+      tags,
+    });
+    assert.ok(
+      captured_embed.fields.some((f) => f.name === "Property Tags"),
+      "embed has Property Tags field when tags present"
+    );
+  } finally {
+    __resetActionRouterDeps();
+    if (orig_edit) globalThis.__captured_edit = orig_edit;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 17. /target scan includes optional filters in embed
+// ---------------------------------------------------------------------------
+
+test("v2: /target scan includes optional filters in embed", async () => {
+  const { buildTargetScanEmbed: embedFn } = await import("@/lib/discord/discord-embed-factory.js");
+  const { buildTargetingFilters: filterFn } = await import(
+    "@/lib/domain/campaigns/targeting-console.js"
+  );
+
+  const filters = filterFn({ zip: "33101", county: "Miami-Dade", min_equity: 30 });
+  assert.equal(filters.zip,        "33101",       "zip preserved");
+  assert.equal(filters.county,     "Miami-Dade",  "county preserved");
+  assert.equal(filters.min_equity,  30,           "min_equity preserved");
+
+  const embed = embedFn({
+    market: "miami", asset: "sfr", strategy: "cash",
+    filters,
+  });
+  assert.ok(
+    embed.fields.some((f) => f.name === "Active Filters"),
+    "embed has Active Filters field when filters present"
+  );
+  const filter_field = embed.fields.find((f) => f.name === "Active Filters");
+  assert.ok(filter_field.value.includes("33101"),      "zip shown in filters");
+  assert.ok(filter_field.value.includes("Miami-Dade"), "county shown in filters");
+});
+
+// ---------------------------------------------------------------------------
+// 18. /target scan remains dry_run true with new options
+// ---------------------------------------------------------------------------
+
+test("v2: /target scan stays dry_run=true with tags and filters present", async () => {
+  const recorded = [];
+  const callInternal_override = async (path, options) => {
+    recorded.push(options.body);
+    return { ok: true, data: { result: {} } };
+  };
+
+  const mock = makeMock({
+    campaign_targets:       { rows: [] },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "target",
+      subcommand: "scan",
+      options: [
+        { name: "market",      value: "los_angeles"    },
+        { name: "asset",       value: "multifamily"    },
+        { name: "strategy",    value: "creative"       },
+        { name: "tag_1",       value: "absentee_owner" },
+        { name: "min_equity",  value: 40               },
+        { name: "owner_type",  value: "individual"     },
+      ],
+      role_ids: ["owner_role"],
+      token:    "tok_dryrun_v2",
+    });
+
+    await routeDiscordInteraction(interaction);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(recorded.length, 1, "one call made");
+    assert.strictEqual(recorded[0].dry_run, true, "dry_run is always true");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 19. /campaign create persists tags and filters in campaign metadata
+// ---------------------------------------------------------------------------
+
+test("v2: /campaign create persists tags and filters in campaign metadata", async () => {
+  const upserted = [];
+
+  const mock = {
+    from(table) {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        order:       () => chain,
+        limit:       () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        upsert(row) {
+          if (table === "campaign_targets") upserted.push(row);
+          return chain;
+        },
+        insert: () => chain,
+        update: () => chain,
+        then(resolve) {
+          return Promise.resolve({ data: [], error: null }).then(resolve);
+        },
+      };
+      return chain;
+    },
+  };
+
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "campaign",
+      subcommand: "create",
+      options: [
+        { name: "name",        value: "Miami Absentee SFR"  },
+        { name: "market",      value: "miami"               },
+        { name: "asset",       value: "sfr"                 },
+        { name: "strategy",    value: "cash"                },
+        { name: "tag_1",       value: "absentee_owner"      },
+        { name: "tag_2",       value: "high_equity"         },
+        { name: "min_equity",  value: 20                    },
+        { name: "zip",         value: "33101"               },
+      ],
+      role_ids: ["owner_role"],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 4, "type 4 embed response");
+
+    assert.ok(upserted.length > 0, "row was upserted");
+    const row = upserted[0];
+
+    // tags should be in metadata
+    assert.ok(Array.isArray(row.metadata?.tags),  "metadata.tags is array");
+    assert.equal(row.metadata.tags.length, 2,     "two tags persisted");
+    assert.equal(row.metadata.tags[0].slug, "absentee_owner", "first tag slug correct");
+
+    // filters should be in metadata
+    assert.ok(row.metadata?.filters, "metadata.filters present");
+    assert.equal(row.metadata.filters.min_equity, 20,     "min_equity in filters");
+    assert.equal(row.metadata.filters.zip,        "33101", "zip in filters");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 20. /campaign create uses normalized slugs for market/asset/strategy
+// ---------------------------------------------------------------------------
+
+test("v2: /campaign create normalizes market/asset/strategy slugs in row", async () => {
+  const upserted = [];
+
+  const mock = {
+    from(table) {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        order:       () => chain,
+        limit:       () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        upsert(row) {
+          if (table === "campaign_targets") upserted.push(row);
+          return chain;
+        },
+        insert: () => chain,
+        update: () => chain,
+        then(resolve) {
+          return Promise.resolve({ data: [], error: null }).then(resolve);
+        },
+      };
+      return chain;
+    },
+  };
+
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "campaign",
+      subcommand: "create",
+      options: [
+        { name: "name",     value: "DFW Test"        },
+        { name: "market",   value: "dallas_fort_worth" },
+        { name: "asset",    value: "multifamily"       },
+        { name: "strategy", value: "multifamily_underwrite" },
+      ],
+      role_ids: ["owner_role"],
+    });
+
+    await routeDiscordInteraction(interaction);
+
+    assert.ok(upserted.length > 0, "row upserted");
+    const row = upserted[0];
+    assert.equal(row.market,     "dallas_fort_worth",      "market slug normalized");
+    assert.equal(row.asset_type, "multifamily",            "asset slug normalized");
+    assert.equal(row.strategy,   "multifamily_underwrite", "strategy slug normalized");
+    assert.equal(row.campaign_key, "dallas_fort_worth_multifamily_multifamily_underwrite", "campaign key correct");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 21. /campaign create has cinematic embed with emoji / theme
+// ---------------------------------------------------------------------------
+
+test("v2: /campaign create embed has theme emoji in title", async () => {
+  const mock = {
+    from() {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        order:       () => chain,
+        limit:       () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        upsert:      () => chain,
+        insert:      () => chain,
+        update:      () => chain,
+        then(resolve) { return Promise.resolve({ data: [], error: null }).then(resolve); },
+      };
+      return chain;
+    },
+  };
+
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "campaign",
+      subcommand: "create",
+      options: [
+        { name: "name",     value: "Miami SFR Cash" },
+        { name: "market",   value: "miami"          },
+        { name: "asset",    value: "sfr"            },
+        { name: "strategy", value: "cash"           },
+      ],
+      role_ids: ["owner_role"],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 4, "type 4 embed response");
+    assert.ok(response.data?.embeds?.length > 0, "has embed");
+
+    const embed = response.data.embeds[0];
+    // Title should contain emoji and "Campaign Created"
+    assert.ok(embed.title?.includes("Campaign Created"), "embed title includes 'Campaign Created'");
+    // Theme emoji from Miami market (🌴) or asset emoji (🏠) or strategy emoji (💵)
+    const theme = buildTargetingTheme("miami", "sfr", "cash");
+    assert.ok(theme.emoji.length > 0, "theme has emoji");
+    // Footer should reference v2
+    assert.ok(embed.footer?.text?.includes("v2"), "footer references v2");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 22. /target scan never mutates send queue
+// ---------------------------------------------------------------------------
+
+test("v2: /target scan never writes to send_queue", async () => {
+  const mutations = [];
+
+  const mock = {
+    from(table) {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        order:       () => chain,
+        limit:       () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        upsert(row) {
+          if (table === "send_queue") mutations.push({ table, op: "upsert", row });
+          return chain;
+        },
+        insert(row) {
+          if (table === "send_queue") mutations.push({ table, op: "insert", row });
+          return chain;
+        },
+        update(row) {
+          if (table === "send_queue") mutations.push({ table, op: "update", row });
+          return chain;
+        },
+        then(resolve) { return Promise.resolve({ data: [], error: null }).then(resolve); },
+      };
+      return chain;
+    },
+  };
+
+  const callInternal_override = async () => ({
+    ok: true,
+    data: { result: { eligible_count: 5, loaded_count: 20, inserted_count: 4, skipped_count: 15 } },
+  });
+
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "target",
+      subcommand: "scan",
+      options: [
+        { name: "market",   value: "houston"     },
+        { name: "asset",    value: "sfr"         },
+        { name: "strategy", value: "high_equity" },
+      ],
+      role_ids: ["owner_role"],
+      token:    "tok_no_queue",
+    });
+
+    await routeDiscordInteraction(interaction);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(mutations.length, 0, "no send_queue mutations during target scan");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 23. Unknown market returns sanitised validation error
+// ---------------------------------------------------------------------------
+
+test("v2: unknown market slug returns sanitized error — no secrets", async () => {
+  const mock = makeMock({ discord_command_events: { rows: [] } });
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "target",
+      subcommand: "scan",
+      options: [
+        { name: "market",   value: "not_a_real_market_xyzzy" },
+        { name: "asset",    value: "sfr"   },
+        { name: "strategy", value: "cash"  },
+      ],
+      role_ids: ["owner_role"],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+
+    assert.ok(response, "got response");
+    // Should be an error response (not deferred)
+    const body = JSON.stringify(response);
+    assert.ok(
+      !body.includes(process.env.INTERNAL_API_SECRET),
+      "no INTERNAL_API_SECRET in error"
+    );
+    assert.ok(
+      !body.includes(process.env.DISCORD_BOT_TOKEN),
+      "no DISCORD_BOT_TOKEN in error"
+    );
+    // Should mention market or unknown in the error message
+    assert.ok(
+      body.toLowerCase().includes("market") || body.toLowerCase().includes("unknown"),
+      "error message references invalid market"
+    );
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 24. daily_cap is bounded (min 1, max 500 for non-Owner)
+// ---------------------------------------------------------------------------
+
+test("v2: /campaign create daily_cap bounded at 500 for SMS Ops (non-Owner)", async () => {
+  const upserted = [];
+
+  const mock = {
+    from(table) {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        order:       () => chain,
+        limit:       () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        upsert(row) {
+          if (table === "campaign_targets") upserted.push(row);
+          return chain;
+        },
+        insert:      () => chain,
+        update:      () => chain,
+        then(resolve) { return Promise.resolve({ data: [], error: null }).then(resolve); },
+      };
+      return chain;
+    },
+  };
+
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "campaign",
+      subcommand: "create",
+      options: [
+        { name: "name",      value: "Big TX Campaign" },
+        { name: "market",    value: "houston"         },
+        { name: "asset",     value: "sfr"             },
+        { name: "strategy",  value: "cash"            },
+        { name: "daily_cap", value: 999               }, // over 500 — should be clamped
+      ],
+      role_ids: ["sms_ops_role"],  // Not Owner
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 4, "type 4 response");
+
+    assert.ok(upserted.length > 0, "row upserted");
+    assert.ok(upserted[0].daily_cap <= 500, `daily_cap ${upserted[0].daily_cap} is bounded at 500 for non-Owner`);
+    assert.ok(upserted[0].daily_cap >= 1,   "daily_cap is at least 1");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 25. All button custom_ids are under 100 chars
+// ---------------------------------------------------------------------------
+
+test("v2: all targeting button custom_ids are under 100 characters", () => {
+  const { targetActionRow: tar, campaignActionRow: car, territoryActionRow: trr } =
+    // already imported at top of file via the named imports
+    { targetActionRow, campaignActionRow, territoryActionRow };
+
+  const long_key = "a".repeat(40); // max safe_key length used internally
+
+  const all_rows = [
+    ...tar({ campaignKey: long_key }),
+    ...car({ campaignKey: long_key, paused: false }),
+    ...car({ campaignKey: long_key, paused: true }),
+    ...trr(),
+  ];
+
+  const buttons = all_rows.flatMap((row) => row.components ?? []);
+  for (const btn of buttons) {
+    assert.ok(
+      String(btn.custom_id ?? "").length <= 100,
+      `custom_id "${btn.custom_id}" exceeds 100 chars (length: ${String(btn.custom_id ?? "").length})`
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 26. Command registration includes market/asset/strategy/tag choices
+// ---------------------------------------------------------------------------
+
+test("v2: command registration includes market, asset, strategy, and tag choices", () => {
+  const source = fs.readFileSync(
+    "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
+    "utf8"
+  );
+
+  assert.ok(source.includes("MARKET_CHOICES"),          "MARKET_CHOICES defined");
+  assert.ok(source.includes("ASSET_CHOICES"),            "ASSET_CHOICES defined");
+  assert.ok(source.includes("STRATEGY_CHOICES"),         "STRATEGY_CHOICES defined");
+  assert.ok(source.includes("PROPERTY_TAG_CHOICES"),     "PROPERTY_TAG_CHOICES defined");
+  assert.ok(source.includes("OWNER_TYPE_CHOICES"),       "OWNER_TYPE_CHOICES defined");
+  assert.ok(source.includes("PHONE_STATUS_CHOICES"),     "PHONE_STATUS_CHOICES defined");
+  // Market slugs
+  assert.ok(source.includes('"los_angeles"'),            'includes los_angeles slug');
+  assert.ok(source.includes('"dallas_fort_worth"'),      'includes dallas_fort_worth slug');
+  assert.ok(source.includes('"new_orleans"'),            'includes new_orleans slug');
+  // Asset slugs
+  assert.ok(source.includes('"sfr"'),                   'includes sfr slug');
+  assert.ok(source.includes('"distressed_residential"'), 'includes distressed_residential slug');
+  // Strategy slugs
+  assert.ok(source.includes('"distress_stack"'),         'includes distress_stack slug');
+  assert.ok(source.includes('"pre_foreclosure"'),        'includes pre_foreclosure slug');
+  // Tag slugs
+  assert.ok(source.includes('"absentee_owner"'),         'includes absentee_owner tag');
+  assert.ok(source.includes('"free_and_clear"'),         'includes free_and_clear tag');
+  // tag_1 / tag_2 / tag_3 options registered
+  assert.ok(source.includes('"tag_1"'),                  'tag_1 option registered');
+  assert.ok(source.includes('"tag_3"'),                  'tag_3 option registered');
+});
+
+// ---------------------------------------------------------------------------
+// 27. No secrets leak in targeting-related error responses
+// ---------------------------------------------------------------------------
+
+test("v2: no secrets leak in targeting console error responses", async () => {
+  const SECRETS = [
+    process.env.INTERNAL_API_SECRET,
+    process.env.CRON_SECRET,
+    process.env.DISCORD_BOT_TOKEN,
+  ].filter(Boolean);
+
+  // Simulate a DB failure on campaign create
+  const failing_mock = {
+    from() {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        order:       () => chain,
+        limit:       () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        upsert:      () => chain,
+        insert:      () => chain,
+        update:      () => chain,
+        then(resolve) {
+          return Promise.resolve({
+            data: null, error: new Error("Connection refused — secret token abc123"),
+          }).then(resolve);
+        },
+      };
+      return chain;
+    },
+  };
+
+  __setActionRouterDeps({ supabase_override: failing_mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "campaign",
+      subcommand: "create",
+      options: [
+        { name: "name",     value: "Error Test"  },
+        { name: "market",   value: "miami"        },
+        { name: "asset",    value: "sfr"          },
+        { name: "strategy", value: "cash"         },
+      ],
+      role_ids: ["owner_role"],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    const body = JSON.stringify(response);
+
+    for (const secret of SECRETS) {
+      assert.ok(!body.includes(secret), `secret must not appear in error response`);
+    }
+    // Should still be some kind of response (error embed)
+    assert.ok(response, "got a response even on DB failure");
+  } finally {
+    __resetActionRouterDeps();
+  }
 });

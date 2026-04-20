@@ -10,8 +10,10 @@ import { updateBrainAfterInbound } from "@/lib/domain/brain/update-brain-after-i
 import { updateBrainStage } from "@/lib/domain/brain/update-brain-stage.js";
 import { maybeCreateOfferFromContext } from "@/lib/domain/offers/maybe-create-offer-from-context.js";
 import { maybeProgressOfferStatus } from "@/lib/domain/offers/maybe-progress-offer-status.js";
+import { routeInboundOffer } from "@/lib/domain/offers/route-inbound-offer.js";
 import { maybeUpsertUnderwritingFromInbound } from "@/lib/domain/underwriting/maybe-upsert-underwriting-from-inbound.js";
 import { maybeQueueUnderwritingFollowUp } from "@/lib/domain/underwriting/maybe-queue-underwriting-follow-up.js";
+import { transferDealToUnderwriting } from "@/lib/domain/underwriting/transfer-to-underwriting.js";
 import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/maybe-create-contract-from-accepted-offer.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
@@ -44,8 +46,10 @@ const defaultDeps = {
   updateBrainStage,
   maybeCreateOfferFromContext,
   maybeProgressOfferStatus,
+  routeInboundOffer,
   maybeUpsertUnderwritingFromInbound,
   maybeQueueUnderwritingFollowUp,
+  transferDealToUnderwriting,
   maybeCreateContractFromAcceptedOffer,
   syncPipelineState,
   maybeQueueSellerStageReply,
@@ -75,6 +79,12 @@ export function __resetTextgridInboundTestDeps() {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function formatOfferCurrency(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 }
 
 function buildInboundStepFailure(error, err) {
@@ -232,6 +242,20 @@ function shouldCreatePipelineForInbound({
   if (!routed_use_case) return false;
 
   return !PRE_PIPELINE_USE_CASES.has(routed_use_case);
+}
+
+function shouldBypassInboundOfferRouting({ classification = null, route = null } = {}) {
+  if (classification?.compliance_flag === "stop_texting") return true;
+
+  const routed_use_case = normalizeSellerFlowUseCase(
+    route?.use_case,
+    route?.variant_group
+  );
+
+  return [
+    SELLER_FLOW_STAGES.WRONG_PERSON,
+    SELLER_FLOW_STAGES.STOP_OR_OPT_OUT,
+  ].includes(routed_use_case);
 }
 
 export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
@@ -481,7 +505,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // Classify the message body, handle negative-reply cancellations, and
     // resolve the routing decision.
     let classification, inbound_is_negative, queue_cancellation, route, signals,
-      deterministic_state;
+      deterministic_state, offer_routing;
     try {
       classification = await runtimeDeps.classify(message_body, brain_item);
       signals = runtimeDeps.extractUnderwritingSignals({
@@ -531,6 +555,24 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         message: message_body,
         signals,
       });
+
+      offer_routing = shouldBypassInboundOfferRouting({ classification, route })
+        ? {
+            ok: true,
+            offer_route: "bypassed_existing_suppression",
+            reason: "existing_compliance_or_wrong_number_route",
+            meta: { bypassed: true },
+          }
+        : await runtimeDeps.routeInboundOffer({
+            seller_message: message_body,
+            message: message_body,
+            classification,
+            context,
+            route,
+            property: context.items?.property_item || null,
+            owner: context.items?.master_owner_item || null,
+            deal_strategy: route?.deal_strategy || context.summary?.deal_strategy || null,
+          });
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_conversation_resolution", err);
     }
@@ -591,9 +633,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // ── SEGMENT: podio_write ──────────────────────────────────────────────
     // All offer, underwriting, contract, and pipeline writes happen here.
     let maybe_offer_progress, initial_offer, underwriting, seller_stage_reply,
-        underwriting_follow_up, maybe_offer, active_offer_item_id, contract, pipeline;
+        underwriting_follow_up, maybe_offer, active_offer_item_id, contract, pipeline,
+        underwriting_transfer;
 
     try {
+      const offer_route = offer_routing?.offer_route || null;
+      const defer_immediate_offer_create = [
+        "underwriting",
+        "sfh_cash_preview",
+        "condition_clarifier",
+        "manual_review",
+      ].includes(offer_route);
+
       maybe_offer_progress = existing_offer
         ? await runtimeDeps.maybeProgressOfferStatus({
             offer_item_id: existing_offer.item_id,
@@ -611,6 +662,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             existing_offer_item_id: existing_offer?.item_id || null,
             progress: maybe_offer_progress,
           }
+        : defer_immediate_offer_create
+          ? {
+              ok: true,
+              created: false,
+              reason: `offer_route_${offer_route}_deferred`,
+            }
         : await runtimeDeps.maybeCreateOfferFromContext({
             context,
             classification,
@@ -619,6 +676,19 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             notes: message_body,
             created_by: "Inbound Offer Engine",
           });
+
+      underwriting_transfer = offer_route === "underwriting"
+        ? await runtimeDeps.transferDealToUnderwriting({
+            owner: context.items?.master_owner_item || null,
+            property: context.items?.property_item || null,
+            prospect: context.items?.prospect_item || null,
+            phone: context.items?.phone_item || null,
+            sellerMessage: message_body,
+            routeReason: offer_routing?.reason || offer_routing?.meta?.underwriting_reason || "offer_route_underwriting",
+            dealStrategy: route?.deal_strategy || context.summary?.deal_strategy || null,
+            sourceMessageEventId: inbound_message_event_id,
+          })
+        : null;
 
       underwriting = await runtimeDeps.maybeUpsertUnderwritingFromInbound({
         context,
@@ -634,14 +704,76 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         notes: message_body,
       });
 
-      seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
-        inbound_from,
-        context,
-        classification,
-        message: message_body,
-        maybe_offer: initial_offer,
-        existing_offer,
-      });
+      if (offer_route === "sfh_cash_preview") {
+        const cash_offer = offer_routing?.meta?.cash_offer ?? null;
+        const snapshot_id = offer_routing?.meta?.snapshot_id ?? null;
+        seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+          inbound_from,
+          context,
+          classification,
+          message: message_body,
+          maybe_offer: initial_offer,
+          existing_offer,
+          explicit_use_case: "offer_reveal_cash",
+          explicit_template_lookup_use_case: "offer_reveal_cash",
+          force_queue_reply: true,
+          extra_queue_context: {
+            offer_route,
+            cash_offer_amount: cash_offer,
+            cash_offer_snapshot_id: snapshot_id,
+          },
+          extra_template_render_overrides: {
+            offer_price: formatOfferCurrency(cash_offer),
+            smart_cash_offer_display: formatOfferCurrency(cash_offer),
+          },
+          cash_offer_snapshot_id: snapshot_id,
+        });
+      } else if (offer_route === "condition_clarifier") {
+        seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+          inbound_from,
+          context,
+          classification,
+          message: message_body,
+          maybe_offer: initial_offer,
+          existing_offer,
+          explicit_use_case: "ask_condition_clarifier",
+          explicit_template_lookup_use_case: "ask_condition_clarifier",
+          force_queue_reply: true,
+          extra_queue_context: {
+            offer_route,
+            condition_clarifier_reason: offer_routing?.reason || null,
+          },
+        });
+      } else if (offer_route === "manual_review") {
+        seller_stage_reply = {
+          ok: true,
+          queued: false,
+          handled: true,
+          reason: "offer_manual_review_no_auto_send",
+          plan: {
+            selected_use_case: null,
+            detected_intent: null,
+          },
+          brain_stage: null,
+        };
+
+        safeWarn("textgrid.inbound_offer_manual_review", {
+          message_id: extracted.message_id,
+          inbound_from,
+          master_owner_id,
+          property_id,
+          offer_route_reason: offer_routing?.reason || null,
+        });
+      } else {
+        seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+          inbound_from,
+          context,
+          classification,
+          message: message_body,
+          maybe_offer: initial_offer,
+          existing_offer,
+        });
+      }
 
       if (shouldCreateBrainForInbound({ brain_id, seller_stage_reply })) {
         brain_item = await runtimeDeps.createBrain({
@@ -703,7 +835,10 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         underwriting_follow_up?.offer_ready === true;
 
       maybe_offer =
-        initial_offer?.created || initial_offer?.existing_offer_item_id || !underwriting_offer_ready
+        defer_immediate_offer_create ||
+        initial_offer?.created ||
+        initial_offer?.existing_offer_item_id ||
+        !underwriting_offer_ready
           ? initial_offer
           : await runtimeDeps.maybeCreateOfferFromContext({
               context,
@@ -794,6 +929,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             route_use_case: route?.use_case || null,
             seller_stage_use_case:
               seller_stage_reply?.plan?.selected_use_case || null,
+            offer_route: offer_routing?.offer_route || null,
+            offer_route_reason: offer_routing?.reason || null,
+            underwriting_route_reason:
+              offer_routing?.offer_route === "underwriting"
+                ? offer_routing?.reason || null
+                : null,
           },
         });
       }
@@ -828,6 +969,14 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       seller_stage_reply_queued: Boolean(seller_stage_reply?.queued),
       seller_stage_reply_reason: seller_stage_reply?.reason || null,
       seller_stage_use_case: seller_stage_reply?.plan?.selected_use_case || null,
+      offer_route: offer_routing?.offer_route || null,
+      offer_route_reason: offer_routing?.reason || null,
+      underwriting_route_reason:
+        offer_routing?.offer_route === "underwriting"
+          ? offer_routing?.reason || null
+          : null,
+      underwriting_transfer_ok: underwriting_transfer?.ok ?? null,
+      underwriting_transfer_item_id: underwriting_transfer?.underwriting_item_id || null,
       underwriting_follow_up_queued: Boolean(underwriting_follow_up?.queued),
       underwriting_follow_up_reason: underwriting_follow_up?.reason || null,
       contract_created: Boolean(contract?.created),
@@ -852,7 +1001,17 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       existing_offer,
       offer_progress: maybe_offer_progress,
       offer: maybe_offer,
+      offer_routing,
+      diagnostics: {
+        offer_route: offer_routing?.offer_route || null,
+        offer_route_reason: offer_routing?.reason || null,
+        underwriting_route_reason:
+          offer_routing?.offer_route === "underwriting"
+            ? offer_routing?.reason || null
+            : null,
+      },
       underwriting,
+      underwriting_transfer,
       seller_stage_reply,
       underwriting_follow_up,
       contract,
