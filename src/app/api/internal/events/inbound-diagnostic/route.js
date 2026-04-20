@@ -165,6 +165,10 @@ export async function GET(request) {
       logs_with_unknown_body_field,
       all_payload_keys_seen,
     },
+    // Canonical names (required by diagnostic contract)
+    webhook_logs_recent: recent_webhook_logs,
+    message_events_recent: recent_message_events,
+    // Backward-compatible aliases
     recent_webhook_logs,
     recent_message_events,
     errors: {

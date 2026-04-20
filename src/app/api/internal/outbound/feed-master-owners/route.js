@@ -54,6 +54,35 @@ function buildFeederSummary(result = {}) {
   };
 }
 
+/**
+ * Determine the human-readable reason feeder inserted zero rows.
+ * Returns null when rows were inserted.
+ */
+function buildZeroInsertReason(result = {}, summary = {}) {
+  if (summary.inserted_count > 0) return null;
+  if (result?.skipped) return result.reason || "feeder_run_skipped";
+  if (summary.loaded_count === 0) return "no_source_items";
+  if (summary.eligible_count === 0) {
+    // Check skip_reason_counts for clues
+    const reasons = Array.isArray(result?.skip_reason_counts) ? result.skip_reason_counts : [];
+    const reason_keys = reasons.map((r) => String(r?.reason || r || ""));
+    if (reason_keys.some((r) => r.includes("dnc") || r.includes("opt_out"))) return "all_dnc";
+    if (reason_keys.some((r) => r.includes("phone"))) return "all_missing_phone";
+    if (reason_keys.some((r) => r.includes("window"))) return "outside_contact_window";
+    if (reason_keys.some((r) => r.includes("from") || r.includes("number"))) return "all_missing_from_number";
+    return "no_eligible_items";
+  }
+  if (summary.duplicate_count > 0 && summary.error_count === 0) return "all_duplicates";
+  if (summary.error_count > 0 && summary.duplicate_count === 0) {
+    const failures = Array.isArray(result?.results) ? result.results : [];
+    const fail_reasons = failures.filter((r) => r?.ok === false && !r?.skipped).map((r) => String(r?.reason || ""));
+    if (fail_reasons.some((r) => r.includes("template"))) return "all_template_resolution_failed";
+    if (fail_reasons.some((r) => r.includes("supabase") || r.includes("insert"))) return "all_supabase_insert_failed";
+    return "all_errors";
+  }
+  return "unknown_no_insert_reason";
+}
+
 export async function GET(request) {
   let feeder_stage = "auth";
   try {
@@ -116,6 +145,8 @@ export async function GET(request) {
     const get_summary = buildFeederSummary(result);
     const get_effective_limit = result?.rollout?.effective_limit ?? options.limit ?? null;
     const get_effective_scan_limit = result?.rollout?.effective_scan_limit ?? options.scan_limit ?? null;
+    const get_effective_dry_run = result?.dry_run ?? options.dry_run ?? false;
+    const get_zero_insert_reason = buildZeroInsertReason(result, get_summary);
 
     logger.info("master_owner_feeder.route_completed", {
       method: "GET",
@@ -124,12 +155,14 @@ export async function GET(request) {
       reason: result?.reason || null,
       effective_limit: get_effective_limit,
       effective_scan_limit: get_effective_scan_limit,
+      effective_dry_run: get_effective_dry_run,
       loaded_count: get_summary.loaded_count,
       eligible_count: get_summary.eligible_count,
       inserted_count: get_summary.inserted_count,
       duplicate_count: get_summary.duplicate_count,
       skipped_count: get_summary.skipped_count,
       error_count: get_summary.error_count,
+      zero_insert_reason: get_zero_insert_reason,
       first_10_skip_reasons: (result?.skip_reason_counts ?? []).slice(0, 10),
       first_10_errors: (Array.isArray(result?.results) ? result.results : [])
         .filter((r) => r?.ok === false && !r?.skipped)
@@ -150,6 +183,8 @@ export async function GET(request) {
         route: "internal/outbound/feed-master-owners",
         effective_limit: get_effective_limit,
         effective_scan_limit: get_effective_scan_limit,
+        effective_dry_run: get_effective_dry_run,
+        zero_insert_reason: get_zero_insert_reason,
         result: {
           ...result,
           ...get_summary,
@@ -271,6 +306,8 @@ export async function POST(request) {
     const post_summary = buildFeederSummary(result);
     const post_effective_limit = result?.rollout?.effective_limit ?? options.limit ?? null;
     const post_effective_scan_limit = result?.rollout?.effective_scan_limit ?? options.scan_limit ?? null;
+    const post_effective_dry_run = result?.dry_run ?? options.dry_run ?? false;
+    const post_zero_insert_reason = buildZeroInsertReason(result, post_summary);
 
     logger.info("master_owner_feeder.route_completed", {
       method: "POST",
@@ -279,12 +316,14 @@ export async function POST(request) {
       reason: result?.reason || null,
       effective_limit: post_effective_limit,
       effective_scan_limit: post_effective_scan_limit,
+      effective_dry_run: post_effective_dry_run,
       loaded_count: post_summary.loaded_count,
       eligible_count: post_summary.eligible_count,
       inserted_count: post_summary.inserted_count,
       duplicate_count: post_summary.duplicate_count,
       skipped_count: post_summary.skipped_count,
       error_count: post_summary.error_count,
+      zero_insert_reason: post_zero_insert_reason,
       first_10_skip_reasons: (result?.skip_reason_counts ?? []).slice(0, 10),
       first_10_errors: (Array.isArray(result?.results) ? result.results : [])
         .filter((r) => r?.ok === false && !r?.skipped)
@@ -305,6 +344,8 @@ export async function POST(request) {
         route: "internal/outbound/feed-master-owners",
         effective_limit: post_effective_limit,
         effective_scan_limit: post_effective_scan_limit,
+        effective_dry_run: post_effective_dry_run,
+        zero_insert_reason: post_zero_insert_reason,
         result: {
           ...result,
           ...post_summary,

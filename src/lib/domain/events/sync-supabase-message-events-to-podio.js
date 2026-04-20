@@ -258,15 +258,18 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
   const createEvent = options.createMessageEvent || runtimeDeps.createMessageEvent;
   const limit = options.limit ?? SYNC_BATCH_SIZE;
 
+  const started_at = Date.now();
   console.log("PODIO MESSAGE EVENT SYNC STARTED");
 
   // ------------------------------------------------------------------
   // 1. Load candidate rows
   // ------------------------------------------------------------------
+  // Treat null podio_sync_status as pending so rows created before the
+  // migration column was added are still picked up without a manual backfill.
   const { data: rows, error: load_error } = await supabase
     .from("message_events")
     .select("*")
-    .in("podio_sync_status", ["pending", "failed"])
+    .or("podio_sync_status.in.(pending,failed),podio_sync_status.is.null")
     .in("direction", ["outbound", "inbound"])
     .order("created_at", { ascending: true })
     .limit(limit);
@@ -360,8 +363,10 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
         .eq("id", row.id);
 
       const error_detail = {
+        id:               row.id ?? null,
         key:              row.message_event_key || null,
         event_type:       row.event_type || null,
+        direction:        row.direction || null,
         attempts,
         error:            String(err?.message ?? err),
         direction_sent:   fields?.["direction"] ?? null,
@@ -431,6 +436,8 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     total: events.length,
   });
 
+  const duration_ms = Date.now() - started_at;
+
   return {
     // Named counts (preferred)
     loaded_count,
@@ -446,6 +453,9 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
     first_10_event_keys,
     first_10_failed_errors: failed_errors,
     first_10_skipped_reasons,
+    // Metadata
+    duration_ms,
+    syncable_event_types: [...SYNCABLE_EVENT_TYPES],
   };
 }
 
