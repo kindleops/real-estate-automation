@@ -80,6 +80,11 @@ const COMMANDS = [
           },
         ],
       },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "cockpit",
+        description: "Rich queue cockpit — status counts, due now, stuck rows",
+      },
     ],
   },
 
@@ -188,6 +193,50 @@ const COMMANDS = [
           },
         ],
       },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "scan",
+        description: "Dry-run scan — show eligible owners without enqueueing (deferred, Tech Ops+)",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Max owners to evaluate (default 50)",
+            required:    false,
+            min_value:   1,
+            max_value:   200,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "scan_limit",
+            description: "Max Podio owners to scan (default 500)",
+            required:    false,
+            min_value:   1,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "launch",
+        description: "Live feeder launch — enqueue owners (>25 requires Owner approval)",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Max owners to enqueue (default 10; >25 requires Owner approval)",
+            required:    false,
+            min_value:   1,
+            max_value:   200,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "scan_limit",
+            description: "Max Podio owners to scan (default 500)",
+            required:    false,
+            min_value:   1,
+          },
+        ],
+      },
     ],
   },
 
@@ -240,6 +289,100 @@ const COMMANDS = [
             name:        "phone_or_owner_id",
             description: "Phone number (E.164) or numeric master_owner_id",
             required:    true,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "inspect",
+        description: "Deep-inspect a lead's message event history (ephemeral)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "phone_or_owner_id",
+            description: "Phone number (E.164) or numeric master_owner_id",
+            required:    true,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /mission ───────────────────────────────────────────────────────────
+  {
+    name:        "mission",
+    description: "Operations command center",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "status",
+        description: "Show full mission health — queue, templates, integrations",
+      },
+    ],
+  },
+
+  // ── /launch ────────────────────────────────────────────────────────────
+  {
+    name:        "launch",
+    description: "Launch readiness checks",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "preflight",
+        description: "Run read-only preflight checks — GO / WARN / HOLD",
+      },
+    ],
+  },
+
+  // ── /templates ─────────────────────────────────────────────────────────
+  {
+    name:        "templates",
+    description: "SMS template inspection (Tech Ops or Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "audit",
+        description: "Full audit of sms_templates — counts, blockers, missing fields",
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "stage1",
+        description: "Show active Stage 1 / first-touch ownership templates",
+      },
+    ],
+  },
+
+  // ── /hotleads ──────────────────────────────────────────────────────────
+  {
+    name:        "hotleads",
+    description: "Show recent inbound SMS lead responses",
+    options: [
+      {
+        type:        OPT.INTEGER,
+        name:        "limit",
+        description: "Max leads to show (1–25, default 10)",
+        required:    false,
+        min_value:   1,
+        max_value:   25,
+      },
+    ],
+  },
+
+  // ── /alerts ────────────────────────────────────────────────────────────
+  {
+    name:        "alerts",
+    description: "Alert mode configuration (Tech Ops or Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "mode",
+        description: "Get or set the active alert mode",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "value",
+            description: "New mode value (e.g. verbose, silent, normal) — omit to read current",
+            required:    false,
           },
         ],
       },

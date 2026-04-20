@@ -170,3 +170,78 @@ export function allowedRoleMentions(role_ids) {
       : [],
   };
 }
+
+// ---------------------------------------------------------------------------
+// Cinematic command-center helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a rich embed-based interaction response (type 4).
+ *
+ * All responses produced by this helper include `allowed_mentions: { parse: [] }`
+ * to prevent accidental @everyone/@here/@role pings.
+ *
+ * @param {object}    opts
+ * @param {string}    [opts.content]    - Optional text above embeds (max 2000 chars)
+ * @param {object[]}  [opts.embeds]     - Discord embed objects (max 10)
+ * @param {object[]}  [opts.components] - Action rows / buttons
+ * @param {boolean}   [opts.ephemeral]  - If true, only the invoker sees the reply
+ * @returns {object}  Discord interaction response
+ */
+export function cinematicMessage({ content = null, embeds = [], components = [], ephemeral = false } = {}) {
+  const data = {
+    ...(content          ? { content: String(content).slice(0, 2000) } : {}),
+    ...(embeds.length    ? { embeds:  embeds.slice(0, 10) }            : {}),
+    ...(components.length ? { components }                             : {}),
+    ...(ephemeral        ? { flags: MESSAGE_FLAGS.EPHEMERAL }          : {}),
+    allowed_mentions: { parse: [] },
+  };
+  return { type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE, data };
+}
+
+/**
+ * Return a deferred acknowledgement that shows "thinking…" to the user.
+ *
+ * Use when the actual work will take longer than ~3 seconds.  After the work
+ * finishes, call editOriginalInteractionResponse from discord-followups.js to
+ * deliver the result.
+ *
+ * @param {object}  [opts]
+ * @param {boolean} [opts.ephemeral]  - If true, only the invoker sees the reply
+ * @returns {{ type: 5 }}
+ */
+export function deferMessage({ ephemeral = false } = {}) {
+  return ephemeral
+    ? { type: 5, data: { flags: MESSAGE_FLAGS.EPHEMERAL } }
+    : { type: 5 };
+}
+
+/**
+ * Return an `allowed_mentions` block that suppresses all automatic pings.
+ * Use in any message where @mentions appear in content but should NOT notify.
+ *
+ * @returns {{ parse: [] }}
+ */
+export function safeAllowedMentions() {
+  return { parse: [] };
+}
+
+/**
+ * Produce a safe, user-facing error string from an Error or unknown value.
+ * Never exposes raw error messages, stack traces, or credential-like strings.
+ *
+ * @param {unknown} error
+ * @returns {string}  Safe display string (max 200 chars)
+ */
+export function formatCommandError(error) {
+  if (!error) return "An unexpected error occurred.";
+  // Never pass through raw error messages — they may contain secrets, stack
+  // traces, or internal details.  Only relay a message when the error has an
+  // explicit, known-safe code property.
+  const SAFE_CODES = ["not_found", "not_configured", "permission_denied", "timeout", "validation_error"];
+  const code = error?.code ?? null;
+  if (code && SAFE_CODES.includes(code)) {
+    return String(error.message ?? code).slice(0, 200) || "An unexpected error occurred.";
+  }
+  return "An unexpected error occurred. Check server logs for details.";
+}

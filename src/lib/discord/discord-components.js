@@ -1,0 +1,179 @@
+/**
+ * discord-components.js
+ *
+ * Button component builders for Discord interaction responses.
+ *
+ * custom_id prefix registry (safe, colon-separated):
+ *   mission:    – /mission subcommand shortcuts
+ *   queue:      – /queue subcommand shortcuts
+ *   preflight:  – /launch preflight shortcuts
+ *   templates:  – /templates subcommand shortcuts
+ *   lead:       – /lead subcommand shortcuts
+ *   campaign:   – campaign control actions
+ *   approval:   – approval / deny gate (new style)
+ *
+ * Button styles:
+ *   PRIMARY   1  blurple
+ *   SECONDARY 2  grey
+ *   SUCCESS   3  green
+ *   DANGER    4  red
+ */
+
+const STYLE = {
+  PRIMARY:   1,
+  SECONDARY: 2,
+  SUCCESS:   3,
+  DANGER:    4,
+};
+
+// ---------------------------------------------------------------------------
+// Low-level helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a Discord button component object.
+ *
+ * @param {object} opts
+ * @param {string}  opts.label
+ * @param {string}  opts.custom_id  - max 100 chars
+ * @param {number}  [opts.style]    - STYLE constant
+ * @param {boolean} [opts.disabled]
+ * @returns {object}
+ */
+function button({ label, custom_id, style = STYLE.PRIMARY, disabled = false }) {
+  return {
+    type:      2,   // BUTTON
+    style,
+    label:     String(label).slice(0, 80),
+    custom_id: String(custom_id).slice(0, 100),
+    disabled:  Boolean(disabled),
+  };
+}
+
+/**
+ * Wrap buttons in a Discord ACTION_ROW (max 5 buttons per row).
+ * @param {object[]} buttons
+ * @returns {object}
+ */
+function actionRow(buttons) {
+  return { type: 1, components: buttons.slice(0, 5) };
+}
+
+// ---------------------------------------------------------------------------
+// Public button builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Buttons for /mission status output.
+ * @returns {object[]}  Array of action rows
+ */
+export function missionButtons() {
+  return [
+    actionRow([
+      button({ label: "Refresh Status",   custom_id: "mission:refresh",   style: STYLE.SECONDARY }),
+      button({ label: "Launch Preflight", custom_id: "mission:preflight", style: STYLE.PRIMARY   }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for /queue cockpit output.
+ * @returns {object[]}
+ */
+export function queueButtons() {
+  return [
+    actionRow([
+      button({ label: "Cockpit",        custom_id: "queue:cockpit",  style: STYLE.SECONDARY }),
+      button({ label: "Run Queue (10)", custom_id: "queue:run:10",   style: STYLE.PRIMARY   }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for /launch preflight output.
+ * @returns {object[]}
+ */
+export function preflightButtons() {
+  return [
+    actionRow([
+      button({ label: "Recheck",     custom_id: "preflight:recheck",     style: STYLE.PRIMARY   }),
+      button({ label: "Feeder Scan", custom_id: "preflight:scan_feeder", style: STYLE.SECONDARY }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for /templates audit output.
+ * @returns {object[]}
+ */
+export function templateAuditButtons() {
+  return [
+    actionRow([
+      button({ label: "Stage 1 Detail", custom_id: "templates:stage1", style: STYLE.PRIMARY   }),
+      button({ label: "Full Audit",     custom_id: "templates:audit",  style: STYLE.SECONDARY }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for /lead inspect output.
+ *
+ * @param {object} opts
+ * @param {string} [opts.ownerId]  - owner ID to embed in custom_id
+ * @param {string} [opts.phone]    - phone number (E.164) to embed in custom_id
+ * @returns {object[]}
+ */
+export function leadInspectButtons({ ownerId = "", phone = "" } = {}) {
+  // Strip characters that are unsafe in custom_ids.
+  const safe_owner = String(ownerId).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  const safe_phone = String(phone).replace(/[^0-9+]/g, "").slice(0, 20);
+
+  return [
+    actionRow([
+      button({ label: "Inspect",      custom_id: `lead:inspect:${safe_owner}`,  style: STYLE.PRIMARY   }),
+      button({ label: "Mark Handled", custom_id: `lead:handled:${safe_phone}`,  style: STYLE.SECONDARY }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for campaign control.
+ *
+ * @param {object}  opts
+ * @param {string}  opts.campaignId
+ * @param {boolean} opts.paused      - true → show Resume; false → show Pause
+ * @returns {object[]}
+ */
+export function campaignControlButtons({ campaignId = "", paused = false } = {}) {
+  const safe_id = String(campaignId).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+
+  return [
+    actionRow([
+      paused
+        ? button({ label: "Resume Campaign", custom_id: `campaign:resume:${safe_id}`, style: STYLE.SUCCESS })
+        : button({ label: "Pause Campaign",  custom_id: `campaign:pause:${safe_id}`,  style: STYLE.DANGER  }),
+      button({ label: "Details", custom_id: `campaign:details:${safe_id}`, style: STYLE.SECONDARY }),
+    ]),
+  ];
+}
+
+/**
+ * Approval / deny button pair (new-style approval: prefix).
+ *
+ * @param {object} opts
+ * @param {string} opts.actionId       - opaque token, embedded in custom_id
+ * @param {string} [opts.approveLabel]
+ * @param {string} [opts.denyLabel]
+ * @returns {object[]}
+ */
+export function approvalButtons({ actionId = "", approveLabel = "Approve", denyLabel = "Deny" } = {}) {
+  // Strip non-safe characters from the token.
+  const safe_id = String(actionId).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 50);
+
+  return [
+    actionRow([
+      button({ label: String(approveLabel).slice(0, 60), custom_id: `approval:approve:${safe_id}`, style: STYLE.SUCCESS }),
+      button({ label: String(denyLabel).slice(0, 60),    custom_id: `approval:deny:${safe_id}`,    style: STYLE.DANGER  }),
+    ]),
+  ];
+}
