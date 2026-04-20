@@ -479,10 +479,14 @@ function buildFeederRunCounters({
       new Set(["no_usable_phone"])
     ),
     no_property_skip_count: countSkippedByReasons(results, NO_PROPERTY_SKIP_REASONS),
-    template_not_found_count: countSkippedByReasons(
-      results,
-      new Set(["template_not_found"])
-    ),
+    template_not_found_count:
+      countSkippedByReasons(results, new Set(["template_not_found"])) +
+      results.filter(
+        (r) =>
+          r?.skipped &&
+          r?.reason === "owner_evaluation_failed" &&
+          r?.diagnostics?.message === "NO_STAGE_1_TEMPLATE_FOUND"
+      ).length,
     queue_create_attempt_count: Number(queue_create_attempt_count || 0) || 0,
     queue_create_success_count: Number(queue_create_success_count || 0) || 0,
     queue_create_duplicate_cancel_count:
@@ -3830,7 +3834,6 @@ async function evaluateOwner({
   });
 
   incrementRuntimeCounter(runtime, "template_eval_count");
-  const use_supabase_templates = hasSupabaseFeederSupport();
   let selected_template = await timedStage(
     log,
     "master_owner_feeder.template_selection",
@@ -3839,12 +3842,10 @@ async function evaluateOwner({
       ...template_resolution_inputs,
     },
     () =>
-      use_supabase_templates
-        ? loadBestSupabaseSmsTemplate(template_selection_inputs)
-        : loadTemplate({
-            ...template_selection_inputs,
-            require_podio_template: !dry_run,
-          })
+      loadTemplate({
+        ...template_selection_inputs,
+        require_podio_template: !dry_run,
+      })
   );
 
   // ── LIVE SELLER QUEUE: reject local_registry templates ─────────────────────

@@ -1,4 +1,5 @@
 import APP_IDS from "@/lib/config/app-ids.js";
+import { fetchSupabaseTemplateCandidates } from "@/lib/domain/templates/load-supabase-template-candidates.js";
 import { evaluateTemplatePlaceholders } from "@/lib/domain/templates/render-template.js";
 import { LOCAL_TEMPLATE_CANDIDATES } from "@/lib/domain/templates/local-template-registry.js";
 import {
@@ -286,6 +287,11 @@ function createTemplateResolutionDiagnostics() {
     podio_filter_requests: [],
     local_candidates_considered: 0,
     selected_bucket_source: null,
+    supabase_template_lookup_enabled: false,
+    supabase_raw_candidates_loaded: 0,
+    supabase_candidates_considered: 0,
+    supabase_survivor_count: 0,
+    supabase_filter_used: null,
   };
 }
 
@@ -306,6 +312,11 @@ function summarizeTemplateResolutionDiagnostics(diagnostics = {}) {
       : [],
     local_candidates_considered: diagnostics.local_candidates_considered || 0,
     selected_bucket_source: diagnostics.selected_bucket_source || null,
+    supabase_template_lookup_enabled: Boolean(diagnostics.supabase_template_lookup_enabled),
+    supabase_raw_candidates_loaded: diagnostics.supabase_raw_candidates_loaded || 0,
+    supabase_candidates_considered: diagnostics.supabase_candidates_considered || 0,
+    supabase_survivor_count: diagnostics.supabase_survivor_count || 0,
+    supabase_filter_used: diagnostics.supabase_filter_used || null,
   };
 }
 
@@ -1006,6 +1017,7 @@ export async function loadTemplateCandidates({
   message_type = null,
   property_type_scope = null,
   deal_strategy = null,
+  supabase_fetcher = fetchSupabaseTemplateCandidates,
 } = {}) {
   const resolution_diagnostics = createTemplateResolutionDiagnostics();
   const selector_input = buildTemplateSelectorInput({
@@ -1039,6 +1051,87 @@ export async function loadTemplateCandidates({
   const sources = (strict_touch_one_podio_only || require_podio_template)
     ? ["podio"]
     : ["podio", "local_registry"];
+
+  // ── Supabase sms_templates (first-class runtime source) ──────────────────
+  // Query sms_templates BEFORE Podio / local-registry.  Fail open: if Supabase
+  // is not configured or has no survivors, fall through to the Podio path.
+  if (supabase_fetcher) {
+    resolution_diagnostics.supabase_template_lookup_enabled = true;
+    const is_stage1_req =
+      selector_input.touch_type === TEMPLATE_TOUCH_TYPES.FIRST_TOUCH ||
+      normalizeSelectorText(selector_input.use_case || "") ===
+        normalizeSelectorText("ownership_check");
+    resolution_diagnostics.supabase_filter_used = is_stage1_req
+      ? "stage1_or"
+      : "use_case_exact";
+
+    try {
+      const supabase_raw = await supabase_fetcher(selector_input);
+      resolution_diagnostics.supabase_raw_candidates_loaded = supabase_raw.length;
+
+      const supabase_evaluated = supabase_raw
+        .map((template) =>
+          evaluateTemplateCandidate(template, {
+            selector_input,
+            recently_used_template_ids,
+            context,
+            template_render_overrides,
+            strict_touch_one_podio_only,
+            skip_render_validation,
+          })
+        )
+        .sort((left, right) => {
+          if (right.score !== left.score) return right.score - left.score;
+          return String(left?.item_id ?? "").localeCompare(String(right?.item_id ?? ""));
+        });
+
+      resolution_diagnostics.supabase_candidates_considered = supabase_evaluated.length;
+
+      const supabase_survivors = supabase_evaluated.filter(
+        (c) =>
+          c.rejection_reasons.length === 0 &&
+          c.operational_rejection_reasons.length === 0
+      );
+      resolution_diagnostics.supabase_survivor_count = supabase_survivors.length;
+
+      if (supabase_survivors.length) {
+        resolution_diagnostics.selected_bucket_source = "supabase_sms_templates";
+        const supabase_selection_diagnostics = {
+          selector_input,
+          requested_use_cases,
+          use_case_candidates,
+          resolution: summarizeTemplateResolutionDiagnostics(resolution_diagnostics),
+          audit_summary: {
+            source: "supabase_sms_templates",
+            raw_candidate_count: supabase_raw.length,
+            total_candidates: supabase_evaluated.length,
+            survivor_count: supabase_survivors.length,
+            rejection_counts: countRejectionReasons(
+              supabase_evaluated,
+              "rejection_reasons"
+            ),
+            operational_rejection_counts: countRejectionReasons(
+              supabase_evaluated,
+              "operational_rejection_reasons"
+            ),
+          },
+        };
+        return supabase_survivors.map((template) => ({
+          ...template,
+          rotation_key,
+          template_resolution_source: "supabase_sms_templates",
+          template_fallback_reason: null,
+          selected_template_source: "supabase_sms_templates",
+          selected_supabase_template_id: template.id ?? null,
+          selected_podio_template_id: template.podio_template_id ?? null,
+          selected_template_id: template.item_id ?? null,
+          template_selection_diagnostics: supabase_selection_diagnostics,
+        }));
+      }
+    } catch {
+      // Supabase unavailable — fall through to Podio.
+    }
+  }
 
   let last_audit_payload = null;
   let last_prefetch_audit_payload = null;
@@ -1146,6 +1239,10 @@ export async function loadTemplateCandidates({
         rotation_key,
         template_resolution_source,
         template_fallback_reason,
+        selected_template_source: source,
+        selected_supabase_template_id: template.id ?? template.supabase_template_id ?? null,
+        selected_podio_template_id: template.podio_template_id ?? template.item_id ?? null,
+        selected_template_id: template.item_id ?? null,
         template_selection_diagnostics: selection_diagnostics,
       }));
     }
@@ -1367,6 +1464,7 @@ export async function loadTemplate({
   message_type = null,
   property_type_scope = null,
   deal_strategy = null,
+  supabase_fetcher = fetchSupabaseTemplateCandidates,
 } = {}) {
   const scored = await loadTemplateCandidates({
     template_selector,
@@ -1400,6 +1498,7 @@ export async function loadTemplate({
     message_type,
     property_type_scope,
     deal_strategy,
+    supabase_fetcher,
   });
 
   if (!scored.length) return null;
