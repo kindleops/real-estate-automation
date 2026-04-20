@@ -243,3 +243,57 @@ export function territoryActionRow() {
     ]),
   ];
 }
+
+/**
+ * Buttons for /email subcommands.
+ *
+ * custom_id prefix: email:
+ *
+ * @returns {object[]}
+ */
+export function emailActionRow() {
+  return [
+    actionRow([
+      button({ label: "Cockpit",     custom_id: "email:cockpit",     style: STYLE.PRIMARY   }),
+      button({ label: "Queue",       custom_id: "email:queue",       style: STYLE.SECONDARY }),
+      button({ label: "Stats",       custom_id: "email:stats",       style: STYLE.SECONDARY }),
+      button({ label: "Suppression", custom_id: "email:suppression", style: STYLE.DANGER    }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for /wires cockpit output.
+ *
+ * custom_id prefix: wires:
+ *
+ * @returns {object[]}
+ */
+export function wireCockpitButtons() {
+  return [
+    actionRow([
+      button({ label: "Refresh",    custom_id: "wires:refresh",    style: STYLE.PRIMARY   }),
+      button({ label: "Forecast",   custom_id: "wires:forecast",   style: STYLE.SECONDARY }),
+      button({ label: "Reconcile",  custom_id: "wires:reconcile",  style: STYLE.DANGER    }),
+      button({ label: "Close",      custom_id: "wires:close",      style: STYLE.SECONDARY }),
+    ]),
+  ];
+}
+
+/**
+ * Buttons for individual wire event interactions.
+ *
+ * custom_id prefix: wires:
+ *
+ * @returns {object[]}
+ */
+export function wireEventButtons() {
+  return [
+    actionRow([
+      button({ label: "Mark Received", custom_id: "wires:mark_received", style: STYLE.SUCCESS }),
+      button({ label: "Mark Cleared",  custom_id: "wires:mark_cleared",  style: STYLE.SUCCESS }),
+      button({ label: "View Deal",     custom_id: "wires:view_deal",     style: STYLE.SECONDARY }),
+      button({ label: "Close",         custom_id: "wires:close",         style: STYLE.SECONDARY }),
+    ]),
+  ];
+}

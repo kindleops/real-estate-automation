@@ -489,6 +489,86 @@ const TARGETING_COMMANDS = [
     name:        "conquest",
     description: "Empire-level campaign overview — active, draft, paused, and recommended next move",
   },
+
+  // ── /email ─────────────────────────────────────────────────────────────
+  {
+    name:        "email",
+    description: "Email cockpit — preview, send-test, queue, suppression, and stats (Tech Ops / Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "cockpit",
+        description: "Full email layer dashboard — queue status, event counts, templates, suppression",
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "preview",
+        description: "Preview a rendered email template without sending",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "template_key",
+            description: "Template key to render (e.g. seller_intro)",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "owner_id",
+            description: "Owner ID for context variable substitution (optional)",
+            required:    false,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "send-test",
+        description: "Send a live test email via Brevo (allowlisted addresses only)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "email_address",
+            description: "Recipient email address (must be on EMAIL_TEST_ALLOWLIST)",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "template_key",
+            description: "Template key to send",
+            required:    true,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "queue",
+        description: "Run the email send queue (dry_run=true by default)",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Max rows to process (default 20, max 200)",
+            required:    false,
+          },
+          {
+            type:        OPT.BOOLEAN,
+            name:        "dry_run",
+            description: "If true, simulate without sending (default: true)",
+            required:    false,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "suppression",
+        description: "Show suppressed email addresses (hard-bounce / spam / unsubscribe)",
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "stats",
+        description: "Email event statistics — delivered, opened, clicked, bounced",
+      },
+    ],
+  },
 ];
 
 // Extend /campaign with create, inspect, scale (preserve pause/resume).
@@ -590,8 +670,303 @@ if (campaign_cmd) {
   );
 }
 
-// Final command set = existing + targeting console additions.
-const ALL_COMMANDS = [...COMMANDS, ...TARGETING_COMMANDS];
+// ───────────────────────────────────────────────────────────────────────────
+// /replay — Inbound conversation and template replay/simulation (testing)
+// ───────────────────────────────────────────────────────────────────────────
+
+const REPLAY_COMMANDS = [
+  {
+    name:        "replay",
+    description: "Simulate inbound seller replies and test routing/template alignment (SMS Ops / Tech Ops / Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "inbound",
+        description: "Simulate arbitrary seller inbound reply — classify, route, and show template selection",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "text",
+            description: "Seller message text to simulate",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "language",
+            description: "Seller language preference (English, Spanish)",
+            required:    false,
+            choices: [
+              { name: "English", value: "English" },
+              { name: "Spanish", value: "Spanish" },
+            ],
+          },
+          {
+            type:        OPT.STRING,
+            name:        "stage",
+            description: "Current seller stage (e.g. ownership_check, offer_reveal_cash)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "property_type",
+            description: "Property type (e.g. Single Family, Multifamily)",
+            required:    false,
+            choices: [
+              { name: "Single Family",       value: "Single Family" },
+              { name: "Multifamily (2-4)",   value: "Multifamily (2-4)" },
+              { name: "Multifamily (5+)",    value: "Multifamily (5+)" },
+              { name: "Commercial",          value: "Commercial" },
+            ],
+          },
+          {
+            type:        OPT.STRING,
+            name:        "deal_strategy",
+            description: "Deal strategy (cash, creative, etc)",
+            required:    false,
+            choices: [
+              { name: "Cash",                  value: "cash" },
+              { name: "Creative Financing",    value: "creative" },
+              { name: "Wholesale",             value: "wholesale" },
+            ],
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "owner",
+        description: "Simulate inbound reply for a real owner — shows real property, offer, routing context",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "owner_id",
+            description: "Master owner ID (numeric or string)",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "text",
+            description: "Seller message text to simulate for this owner",
+            required:    true,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "template",
+        description: "Resolve and preview template for a specific use case",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "use_case",
+            description: "Template use case (e.g. offer_reveal_cash, ownership_confirmation)",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "language",
+            description: "Language (default English)",
+            required:    false,
+            choices: [
+              { name: "English", value: "English" },
+              { name: "Spanish", value: "Spanish" },
+            ],
+          },
+          {
+            type:        OPT.STRING,
+            name:        "property_type",
+            description: "Property type scope (default Residential)",
+            required:    false,
+            choices: [
+              { name: "Single Family",       value: "Single Family" },
+              { name: "Multifamily (2-4)",   value: "Multifamily (2-4)" },
+              { name: "Multifamily (5+)",    value: "Multifamily (5+)" },
+            ],
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "batch",
+        description: "Run multiple preset replay scenarios and show pass/fail summary",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "scenario",
+            description: "Predefined scenario batch (e.g. ownership, offer_requests, all)",
+            required:    true,
+            choices: [
+              { name: "Ownership Checks",      value: "ownership" },
+              { name: "Offer Requests",       value: "offer_requests" },
+              { name: "Objections & Concerns", value: "objections" },
+              { name: "Underwriting Replies",  value: "underwriting" },
+              { name: "Compliance Edge Cases", value: "compliance" },
+              { name: "All Scenarios",         value: "all" },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+];
+
+// ── /wires ─────────────────────────────────────────────────────────────
+
+const WIRES_COMMANDS = [
+  {
+    name:        "wires",
+    description: "Wire/closing command center — track expected, received, cleared wires (Owner / Closings / Tech Ops)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "cockpit",
+        description: "Show wire command center summary — expected, pending, received, cleared",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "days",
+            description: "Look back N days (default 7)",
+            required:    false,
+            min_value:   1,
+            max_value:   90,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "expected",
+        description: "Create an expected wire event (Owner / Closings)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "amount",
+            description: "Wire amount (e.g. 50000)",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "account",
+            description: "Account key or display name",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "deal_key",
+            description: "Deal identifier (optional)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "property_id",
+            description: "Podio property item ID (optional)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "closing_id",
+            description: "Podio closing item ID (optional)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "expected_at",
+            description: "Expected arrival date ISO format (optional)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "note",
+            description: "Additional notes",
+            required:    false,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "received",
+        description: "Mark wire as received (Owner only)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "wire_key",
+            description: "Wire identifier",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "note",
+            description: "Received note",
+            required:    false,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "cleared",
+        description: "Mark wire as cleared (Owner only)",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "wire_key",
+            description: "Wire identifier",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "note",
+            description: "Clearance note",
+            required:    false,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "forecast",
+        description: "Show wire forecast — expected wires over next N days",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "days",
+            description: "Forecast horizon (default 14)",
+            required:    false,
+            min_value:   1,
+            max_value:   90,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "deal",
+        description: "Show all wires linked to a deal / property / closing",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "deal_key",
+            description: "Deal identifier or property/closing lookup",
+            required:    true,
+          },
+        ],
+      },
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "reconcile",
+        description: "Show wire anomalies — missing account links, stale pending, mismatches",
+        options: [
+          {
+            type:        OPT.INTEGER,
+            name:        "days",
+            description: "Scope (default 30)",
+            required:    false,
+            min_value:   1,
+            max_value:   365,
+          },
+        ],
+      },
+    ],
+  },
+];
+
+// Final command set = existing + targeting console additions + replay additions + wires additions.
+const ALL_COMMANDS = [...COMMANDS, ...TARGETING_COMMANDS, ...REPLAY_COMMANDS, ...WIRES_COMMANDS];
 
 // ---------------------------------------------------------------------------
 // Registration

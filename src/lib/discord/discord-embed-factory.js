@@ -812,3 +812,793 @@ export function buildConquestEmbed(payload = {}) {
     footer: { text: "Empire Intelligence — Targeting Console v1" },
   };
 }
+
+// ---------------------------------------------------------------------------
+// buildEmailCockpitEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Email Layer v1 cockpit overview embed.
+ *
+ * @param {object} payload
+ * @param {object} [payload.queue_status_counts]   - { queued, sent, failed, delivered, opened, clicked }
+ * @param {object} [payload.event_type_counts]     - { delivered, opened, clicked, hard_bounce, ... }
+ * @param {number} [payload.queue_total]
+ * @param {number} [payload.active_templates]
+ * @param {number} [payload.suppression_total]
+ * @param {string} [payload.latest_event_at]
+ * @returns {object}
+ */
+export function buildEmailCockpitEmbed(payload = {}) {
+  const {
+    queue_status_counts  = {},
+    event_type_counts    = {},
+    queue_total          = 0,
+    active_templates     = 0,
+    suppression_total    = 0,
+    latest_event_at      = null,
+  } = payload;
+
+  const queued    = queue_status_counts.queued    ?? 0;
+  const sent      = queue_status_counts.sent      ?? 0;
+  const failed    = queue_status_counts.failed    ?? 0;
+  const delivered = queue_status_counts.delivered ?? 0;
+  const opened    = queue_status_counts.opened    ?? 0;
+  const clicked   = queue_status_counts.clicked   ?? 0;
+
+  const ev_delivered = event_type_counts.delivered  ?? 0;
+  const ev_opened    = event_type_counts.opened      ?? 0;
+  const ev_bounced   = event_type_counts.hard_bounce ?? 0;
+  const ev_spam      = event_type_counts.spam        ?? 0;
+
+  const color = failed > 0 ? COLOR.red : queued > 0 ? COLOR.blue : COLOR.green;
+
+  const last_event_str = latest_event_at
+    ? new Date(latest_event_at).toISOString().slice(0, 16).replace("T", " ") + " UTC"
+    : "No events yet";
+
+  return {
+    title:     "📧 Email Cockpit",
+    color,
+    timestamp: now(),
+    fields: [
+      f("Queued",       String(queued),    true),
+      f("Sent",         String(sent),      true),
+      f("Failed",       String(failed),    true),
+      f("Delivered",    String(delivered), true),
+      f("Opened",       String(opened),    true),
+      f("Clicked",      String(clicked),   true),
+      f("Bounces",      String(ev_bounced), true),
+      f("Spam Reports", String(ev_spam),    true),
+      f("Ev. Delivered", String(ev_delivered), true),
+      f("Ev. Opened",   String(ev_opened), true),
+      f("Total Queued", String(queue_total), true),
+      f("Active Templates", String(active_templates), true),
+      f("Suppressed",   String(suppression_total), true),
+      f("Latest Event", last_event_str, false),
+    ],
+    footer: { text: "Email Layer v1 — Brevo" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildEmailPreviewEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} payload
+ * @param {string} [payload.template_key]
+ * @param {string} [payload.subject]
+ * @param {string} [payload.html_body]
+ * @param {string} [payload.text_body]
+ * @param {string[]} [payload.missing_variables]
+ * @returns {object}
+ */
+export function buildEmailPreviewEmbed(payload = {}) {
+  const {
+    template_key      = "unknown",
+    subject           = "(no subject)",
+    html_body         = "",
+    text_body         = "",
+    missing_variables = [],
+  } = payload;
+
+  const preview_text = (text_body || html_body.replace(/<[^>]+>/g, " "))
+    .trim()
+    .slice(0, 300);
+
+  const color = missing_variables.length > 0 ? COLOR.yellow : COLOR.blue;
+
+  const fields = [
+    f("Template Key", template_key, true),
+    f("Subject",      subject,      false),
+    f("Preview",      preview_text || "(empty)", false),
+  ];
+
+  if (missing_variables.length > 0) {
+    fields.push(f("⚠️ Missing Variables", missing_variables.join(", "), false));
+  }
+
+  return {
+    title:     "🔍 Email Template Preview",
+    color,
+    timestamp: now(),
+    fields,
+    footer: { text: "Preview only — will NOT send" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildEmailSendTestEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} payload
+ * @param {boolean} [payload.sent]
+ * @param {string}  [payload.email_address]
+ * @param {string}  [payload.template_key]
+ * @param {string}  [payload.brevo_message_id]
+ * @param {string}  [payload.error]
+ * @returns {object}
+ */
+export function buildEmailSendTestEmbed(payload = {}) {
+  const {
+    sent             = false,
+    email_address    = "unknown",
+    template_key     = "unknown",
+    brevo_message_id = null,
+    error            = null,
+  } = payload;
+
+  const color = sent ? COLOR.green : COLOR.red;
+
+  const fields = [
+    f("Recipient",    email_address, true),
+    f("Template Key", template_key,  true),
+    f("Status",       sent ? "✅ Sent" : "❌ Failed", true),
+  ];
+
+  if (brevo_message_id) fields.push(f("Brevo Message ID", brevo_message_id, false));
+  if (error)            fields.push(f("Error", String(error).slice(0, 200), false));
+
+  return {
+    title:     "📤 Email Send Test",
+    color,
+    timestamp: now(),
+    fields,
+    footer: { text: "Test send via Brevo transactional API" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildEmailStatsEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} payload
+ * @param {object} [payload.event_type_counts]
+ * @param {string} [payload.latest_event_at]
+ * @param {number} [payload.suppression_total]
+ * @returns {object}
+ */
+export function buildEmailStatsEmbed(payload = {}) {
+  const {
+    event_type_counts  = {},
+    latest_event_at    = null,
+    suppression_total  = 0,
+  } = payload;
+
+  const last_event_str = latest_event_at
+    ? new Date(latest_event_at).toISOString().slice(0, 16).replace("T", " ") + " UTC"
+    : "No events yet";
+
+  const fields = Object.entries(event_type_counts).map(([k, v]) =>
+    f(k.replace(/_/g, " "), String(v), true)
+  );
+
+  fields.push(f("Suppressed Addresses", String(suppression_total), true));
+  fields.push(f("Latest Event", last_event_str, false));
+
+  return {
+    title:     "📊 Email Stats",
+    color:     COLOR.purple,
+    timestamp: now(),
+    fields:    fields.slice(0, 25),
+    footer:    { text: "Email Layer v1 — event log stats" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildEmailSuppressionEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} payload
+ * @param {number} [payload.suppression_total]
+ * @param {object[]} [payload.recent_suppressions]  - array of { email_address, reason, suppressed_at }
+ * @returns {object}
+ */
+export function buildEmailSuppressionEmbed(payload = {}) {
+  const {
+    suppression_total    = 0,
+    recent_suppressions  = [],
+  } = payload;
+
+  const fields = [f("Total Suppressed", String(suppression_total), false)];
+
+  if (recent_suppressions.length > 0) {
+    const list = recent_suppressions.slice(0, 10).map(r => {
+      const date = r.suppressed_at
+        ? new Date(r.suppressed_at).toISOString().slice(0, 10)
+        : "unknown";
+      return `\`${r.email_address}\`  —  ${r.reason ?? "unknown"}  (${date})`;
+    }).join("\n");
+    fields.push(f("Recent Suppressions", list, false));
+  }
+
+  return {
+    title:     "🚫 Email Suppression List",
+    color:     COLOR.red,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Hard-bounce / spam / unsubscribe auto-suppression" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildReplayInboundEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Inbound seller reply simulation result embed.
+ *
+ * @param {object} payload
+ * @param {string} [payload.message_body]
+ * @param {object} [payload.classification]
+ * @param {string} [payload.previous_stage]
+ * @param {string} [payload.next_stage]
+ * @param {string} [payload.selected_use_case]
+ * @param {string} [payload.selected_template_source]
+ * @param {boolean} [payload.would_queue_reply]
+ * @param {object} [payload.underwriting_signals]
+ * @param {string} [payload.underwriting_route]
+ * @param {boolean} [payload.alignment_passed]
+ * @returns {object}
+ */
+export function buildReplayInboundEmbed(payload = {}) {
+  const {
+    message_body           = "(no text)",
+    classification         = {},
+    previous_stage         = null,
+    next_stage             = null,
+    selected_use_case      = null,
+    selected_template_source = null,
+    would_queue_reply      = false,
+    underwriting_signals   = {},
+    underwriting_route     = null,
+    alignment_passed       = true,
+  } = payload;
+
+  const color = alignment_passed ? COLOR.green : COLOR.yellow;
+  const msg_preview = String(message_body).slice(0, 150).trim();
+
+  const fields = [
+    f("Seller Text",  msg_preview || "(empty)", false),
+    f("Language",     classification.language ?? "unknown", true),
+    f("Objection",    classification.objection ?? "no", true),
+    f("Emotion",      classification.emotion ?? "neutral", true),
+    f("Current Stage",   previous_stage ?? "unknown", true),
+    f("Next Stage",      next_stage ?? "none", true),
+    f("Selected Use Case", selected_use_case ?? "unknown", true),
+    f("Template Source",  selected_template_source ?? "unresolved", true),
+    f("Property Type",    underwriting_signals?.property_type ?? "unknown", true),
+    f("Strategy",        underwriting_signals?.creative_strategy ?? "unknown", true),
+    f("Would Queue",      would_queue_reply ? "✅ Yes" : "❌ No", true),
+    f("Underwriting Route", underwriting_route ?? "none", true),
+    f("Alignment",        alignment_passed ? "✅ Pass" : "⚠️ Warning", true),
+  ];
+
+  return {
+    title:     "🎮 Inbound Replay",
+    color,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Dry-run simulation — no SMS sent, no queue writes" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildReplayOwnerEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Owner-specific replay result with real context.
+ *
+ * @param {object} payload
+ * @param {string} [payload.owner_id]
+ * @param {string} [payload.owner_name]
+ * @param {string} [payload.property_address]
+ * @param {string} [payload.property_type]
+ * @param {string} [payload.message_body]
+ * @param {object} [payload.classification]
+ * @param {string} [payload.current_stage]
+ * @param {string} [payload.next_stage]
+ * @param {string} [payload.selected_use_case]
+ * @param {string} [payload.selected_template_source]
+ * @param {string} [payload.cash_offer_snapshot]
+ * @param {string} [payload.underwriting_route]
+ * @param {boolean} [payload.would_queue]
+ * @returns {object}
+ */
+export function buildReplayOwnerEmbed(payload = {}) {
+  const {
+    owner_id                = "unknown",
+    owner_name              = null,
+    property_address        = "unknown address",
+    property_type           = "unknown",
+    message_body            = "(no text)",
+    classification          = {},
+    current_stage           = null,
+    next_stage              = null,
+    selected_use_case       = null,
+    selected_template_source = null,
+    cash_offer_snapshot     = null,
+    underwriting_route      = null,
+    would_queue             = false,
+  } = payload;
+
+  const msg_preview = String(message_body).slice(0, 100).trim();
+
+  const fields = [
+    f("Owner",            owner_name || owner_id, true),
+    f("Property",         property_address, true),
+    f("Property Type",    property_type, true),
+    f("Latest Stage",     current_stage ?? "unknown", true),
+    f("Next Stage",       next_stage ?? "none", true),
+    f("Seller Text",      msg_preview || "(empty)", false),
+    f("Classification",   classification.stage_hint ?? "unknown", true),
+    f("Route",            next_stage || "no route", true),
+    f("Template Use Case", selected_use_case ?? "unknown", true),
+    f("Template Source",  selected_template_source ?? "unresolved", true),
+    f("Cash Offer Snapshot", cash_offer_snapshot ?? "—", true),
+    f("Underwriting",     underwriting_route ?? "none", true),
+    f("Would Queue",      would_queue ? "✅ Yes" : "❌ No", true),
+  ];
+
+  return {
+    title:     "🧠 Owner Replay",
+    color:     COLOR.blue,
+    timestamp: now(),
+    fields,
+    footer:    { text: `Owner ${owner_id} — dry-run only` },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildReplayTemplateEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Template resolution and preview embed.
+ *
+ * @param {object} payload
+ * @param {string} [payload.use_case]
+ * @param {string} [payload.template_id]
+ * @param {string} [payload.template_source]
+ * @param {string} [payload.stage_code]
+ * @param {string} [payload.language]
+ * @param {string} [payload.template_text]
+ * @param {string} [payload.property_type_resolved]
+ * @returns {object}
+ */
+export function buildReplayTemplateEmbed(payload = {}) {
+  const {
+    use_case              = "unknown",
+    template_id           = "unknown",
+    template_source       = "unknown",
+    stage_code            = null,
+    language              = "English",
+    template_text         = "(no template)",
+    property_type_resolved = "Residential",
+  } = payload;
+
+  const text_preview = String(template_text).slice(0, 200).trim();
+
+  const fields = [
+    f("Use Case",         use_case, true),
+    f("Template ID",      template_id, true),
+    f("Stage Code",       stage_code || "—", true),
+    f("Source",           template_source, true),
+    f("Language",         language, true),
+    f("Property Type",    property_type_resolved, true),
+    f("Preview",          text_preview || "(empty)", false),
+  ];
+
+  return {
+    title:     "📋 Template Resolution",
+    color:     COLOR.purple,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Template preview with safe mock context" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildReplayBatchEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Batch scenario test results summary.
+ *
+ * @param {object} payload
+ * @param {string} [payload.scenario]
+ * @param {number} [payload.tested]
+ * @param {number} [payload.passed]
+ * @param {number} [payload.warnings]
+ * @param {number} [payload.failed]
+ * @param {object[]} [payload.results] - array of { name, status, note }
+ * @returns {object}
+ */
+export function buildReplayBatchEmbed(payload = {}) {
+  const {
+    scenario  = "unknown",
+    tested    = 0,
+    passed    = 0,
+    warnings  = 0,
+    failed    = 0,
+    results   = [],
+  } = payload;
+
+  const status_line = `✅ ${passed} pass  ⚠️ ${warnings} warn  ❌ ${failed} fail  (${tested} total)`;
+
+  const result_list = results.slice(0, 10).map(r => {
+    const icon = r.status === "pass" ? "✅" : r.status === "warn" ? "⚠️" : "❌";
+    return `${icon} ${String(r.name).slice(0, 40)}`;
+  }).join("\n");
+
+  const fields = [
+    f("Scenario",  scenario, true),
+    f("Tested",    String(tested), true),
+    f("Status",    status_line, false),
+  ];
+
+  if (result_list) {
+    fields.push(f("Results",  result_list, false));
+  }
+
+  const color = failed > 0 ? COLOR.red : warnings > 0 ? COLOR.yellow : COLOR.green;
+
+  return {
+    title:     "📊 Batch Test Results",
+    color,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Scenario batch dry-run simulation" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireCockpitEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire command center cockpit — summary of expected, pending, received, cleared.
+ *
+ * @param {object} payload
+ * @param {number} [payload.expected]
+ * @param {number} [payload.pending]
+ * @param {number} [payload.received]
+ * @param {number} [payload.cleared]
+ * @param {number} [payload.total_amount]
+ * @param {string} [payload.days]
+ * @returns {object}
+ */
+export function buildWireCockpitEmbed(payload = {}) {
+  const {
+    expected      = 0,
+    pending       = 0,
+    received      = 0,
+    cleared       = 0,
+    total_amount  = 0,
+    days          = "7",
+  } = payload;
+
+  const total = expected + pending + received + cleared;
+  const summary = `📩 ${expected} expected  ⏳ ${pending} pending  ✓ ${received} received  ✅ ${cleared} cleared`;
+
+  const fields = [
+    f("Summary",          summary, false),
+    f("Scope",            `Last ${days} days`, true),
+    f("Total Wires",      String(total), true),
+    f("Total Amount",     `$${Number(total_amount).toLocaleString("en-US", { maximumFractionDigits: 2 })}`, true),
+    f("Next 5 Expected",  "(use forecast command)", false),
+  ];
+
+  const url_emoji = "https://cdn.discordapp.com/emojis/879519779192045579.png";
+  return {
+    title:     "💸 Wire Command Center",
+    color:     COLOR.blue,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Wire tracking cockpit" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireExpectedEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Expected wire event created confirmation.
+ *
+ * @param {object}  payload
+ * @param {number}  [payload.amount]
+ * @param {string}  [payload.account_display]
+ * @param {string}  [payload.deal_key]
+ * @param {string}  [payload.expected_at]
+ * @param {string}  [payload.wire_key]
+ * @returns {object}
+ */
+export function buildWireExpectedEmbed(payload = {}) {
+  const {
+    amount          = 0,
+    account_display = "—",
+    deal_key        = null,
+    expected_at     = null,
+    wire_key        = "pending",
+  } = payload;
+
+  const fields = [
+    f("Amount",           `$${Number(amount).toLocaleString("en-US", { maximumFractionDigits: 2 })}`, true),
+    f("Account",          account_display, true),
+    f("Expected",         expected_at ? new Date(expected_at).toLocaleString() : "—", true),
+    f("Wire Key",         `\`${wire_key}\``, false),
+  ];
+
+  if (deal_key) {
+    fields.push(f("Deal",  deal_key, true));
+  }
+
+  return {
+    title:     "📨 Expected Wire Created",
+    color:     COLOR.blue,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Wire event created — no bank movement initiated" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireReceivedEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire marked as received.
+ *
+ * @param {object} payload
+ * @param {string} [payload.wire_key]
+ * @param {number} [payload.amount]
+ * @param {string} [payload.received_at]
+ * @param {string} [payload.note]
+ * @returns {object}
+ */
+export function buildWireReceivedEmbed(payload = {}) {
+  const {
+    wire_key    = "—",
+    amount      = 0,
+    received_at = null,
+    note        = null,
+  } = payload;
+
+  const fields = [
+    f("Wire Key",     `\`${wire_key}\``, true),
+    f("Amount",       `$${Number(amount).toLocaleString("en-US", { maximumFractionDigits: 2 })}`, true),
+    f("Received",     received_at ? new Date(received_at).toLocaleString() : new Date().toLocaleString(), true),
+  ];
+
+  if (note) {
+    fields.push(f("Note", note, false));
+  }
+
+  return {
+    title:     "✓ Wire Received",
+    color:     COLOR.green,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Wire marked as in-transit" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireClearedEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire marked as cleared.
+ *
+ * @param {object} payload
+ * @param {string} [payload.wire_key]
+ * @param {number} [payload.amount]
+ * @param {string} [payload.cleared_at]
+ * @param {string} [payload.note]
+ * @returns {object}
+ */
+export function buildWireClearedEmbed(payload = {}) {
+  const {
+    wire_key    = "—",
+    amount      = 0,
+    cleared_at  = null,
+    note        = null,
+  } = payload;
+
+  const fields = [
+    f("Wire Key",   `\`${wire_key}\``, true),
+    f("Amount",     `$${Number(amount).toLocaleString("en-US", { maximumFractionDigits: 2 })}`, true),
+    f("Cleared",    cleared_at ? new Date(cleared_at).toLocaleString() : new Date().toLocaleString(), true),
+  ];
+
+  if (note) {
+    fields.push(f("Note", note, false));
+  }
+
+  return {
+    title:     "✅ Wire Cleared",
+    color:     COLOR.green,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Wire fully cleared and settled" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireForecastEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire forecast — expected wires over next N days.
+ *
+ * @param {object}  payload
+ * @param {number}  [payload.days_ahead]
+ * @param {number}  [payload.total_expected]
+ * @param {number}  [payload.total_pending]
+ * @param {number}  [payload.total_amount]
+ * @param {object[]} [payload.wires] - [{ expected_at, days_until, amount, account_key }]
+ * @param {number}  [payload.confidence_score]
+ * @returns {object}
+ */
+export function buildWireForecastEmbed(payload = {}) {
+  const {
+    days_ahead      = 14,
+    total_expected  = 0,
+    total_pending   = 0,
+    total_amount    = 0,
+    wires           = [],
+    confidence_score = 0,
+  } = payload;
+
+  const forecast_list = wires.slice(0, 5).map(w => {
+    const days = w.days_until > 0 ? `in ${w.days_until}d` : "today";
+    const amt = `$${Number(w.amount).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+    return `${w.expected_at ? new Date(w.expected_at).toLocaleDateString() : "—"} · ${amt} (${days})`;
+  }).join("\n");
+
+  const fields = [
+    f("Horizon",           `${days_ahead} days`, true),
+    f("Confidence",        `${confidence_score}%`, true),
+    f("Total Expected",    String(total_expected), true),
+    f("Total Pending",     String(total_pending), true),
+    f("Total Amount",      `$${Number(total_amount).toLocaleString("en-US", { maximumFractionDigits: 2 })}`, true),
+    f("Next 5 Wires",      forecast_list || "(none expected)", false),
+  ];
+
+  const color = confidence_score >= 80 ? COLOR.green : confidence_score >= 60 ? COLOR.yellow : COLOR.red;
+
+  return {
+    title:     "📅 Wire Forecast",
+    color,
+    timestamp: now(),
+    fields,
+    footer:    { text: "7-day and 14-day forecasts available" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireDealEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Wires linked to a deal / property / closing.
+ *
+ * @param {object}  payload
+ * @param {string}  [payload.deal_key]
+ * @param {object[]} [payload.wires] - [{ wire_key, status, amount, expected_at }]
+ * @param {string}  [payload.property_address]
+ * @param {string}  [payload.closing_status]
+ * @returns {object}
+ */
+export function buildWireDealEmbed(payload = {}) {
+  const {
+    deal_key         = "—",
+    wires            = [],
+    property_address = null,
+    closing_status   = null,
+  } = payload;
+
+  const wire_links = wires.slice(0, 10).map(w => {
+    const icon = w.status === "cleared" ? "✅" : w.status === "received" ? "✓" : "📨";
+    const amt = `$${Number(w.amount).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+    return `${icon} ${w.status} · ${amt}`;
+  }).join("\n");
+
+  const fields = [
+    f("Deal Key",      deal_key, true),
+    f("Wire Count",    String(wires.length), true),
+  ];
+
+  if (property_address) {
+    fields.push(f("Property",  property_address, false));
+  }
+  if (closing_status) {
+    fields.push(f("Closing Status",  closing_status, true));
+  }
+
+  fields.push(f("Wires",  wire_links || "(no wires linked)", false));
+
+  return {
+    title:     "🔗 Deal Wire Summary",
+    color:     COLOR.purple,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Wires linked to deal/property/closing" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildWireReconcileEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire reconciliation anomalies.
+ *
+ * @param {object}  payload
+ * @param {number}  [payload.missing_account_links]
+ * @param {number}  [payload.missing_deal_links]
+ * @param {number}  [payload.stale_pending]
+ * @param {number}  [payload.total_anomalies]
+ * @param {string}  [payload.scope_days]
+ * @returns {object}
+ */
+export function buildWireReconcileEmbed(payload = {}) {
+  const {
+    missing_account_links = 0,
+    missing_deal_links    = 0,
+    stale_pending         = 0,
+    total_anomalies       = 0,
+    scope_days            = "30",
+  } = payload;
+
+  const issues = [];
+  if (missing_account_links > 0) issues.push(`⚠️ ${missing_account_links} wires missing account link`);
+  if (missing_deal_links > 0)    issues.push(`⚠️ ${missing_deal_links} wires missing deal/closing link`);
+  if (stale_pending > 0)         issues.push(`⚠️ ${stale_pending} wires pending > 7 days`);
+
+  const anomaly_text = issues.length > 0
+    ? issues.join("\n")
+    : "✅ No anomalies detected";
+
+  const fields = [
+    f("Scope",            `Last ${scope_days} days`, true),
+    f("Total Issues",     String(total_anomalies), true),
+    f("Issues",           anomaly_text, false),
+  ];
+
+  const color = total_anomalies > 5 ? COLOR.red : total_anomalies > 0 ? COLOR.yellow : COLOR.green;
+
+  return {
+    title:     "🔍 Wire Reconciliation",
+    color,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Anomaly detection and reconciliation report" },
+  };
+}

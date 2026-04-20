@@ -58,6 +58,22 @@ import {
   buildCampaignScaleEmbed,
   buildTerritoryMapEmbed,
   buildConquestEmbed,
+  buildEmailCockpitEmbed,
+  buildEmailPreviewEmbed,
+  buildEmailSendTestEmbed,
+  buildEmailStatsEmbed,
+  buildEmailSuppressionEmbed,
+  buildReplayInboundEmbed,
+  buildReplayOwnerEmbed,
+  buildReplayTemplateEmbed,
+  buildReplayBatchEmbed,
+  buildWireCockpitEmbed,
+  buildWireExpectedEmbed,
+  buildWireReceivedEmbed,
+  buildWireClearedEmbed,
+  buildWireForecastEmbed,
+  buildWireDealEmbed,
+  buildWireReconcileEmbed,
 } from "./discord-embed-factory.js";
 import {
   missionButtons,
@@ -69,6 +85,9 @@ import {
   targetActionRow,
   campaignActionRow,
   territoryActionRow,
+  emailActionRow,
+  wireCockpitButtons,
+  wireEventButtons,
 } from "./discord-components.js";
 import {
   buildCampaignKey,
@@ -77,6 +96,18 @@ import {
   normalizeStrategy,
   resolveTargetSourceViewName,
 } from "../domain/campaigns/targeting-console.js";
+import {
+  listWireEvents,
+  getWireSummary,
+  createExpectedWire,
+  markWireReceived,
+  markWireCleared,
+  buildWireKey,
+  formatMaskedAccount,
+} from "../domain/wires/wire-ledger.js";
+import {
+  buildWireForecast,
+} from "../domain/wires/wire-forecast.js";
 import {
   deferredPublicResponse,
   editOriginalInteractionResponse,
@@ -1598,6 +1629,533 @@ async function handleTerritoryMap(context) {
 }
 
 // ---------------------------------------------------------------------------
+// Command: /email
+// ---------------------------------------------------------------------------
+
+async function handleEmailCockpit(context) {
+  try {
+    const result = await callInternal("/api/internal/email/cockpit", { method: "GET" });
+    if (!result?.ok) {
+      return cinematicMessage([buildEmailCockpitEmbed({})], emailActionRow());
+    }
+    const embed = buildEmailCockpitEmbed(result);
+    return cinematicMessage([embed], emailActionRow());
+  } catch {
+    return errorResponse("Email cockpit unavailable.");
+  }
+}
+
+async function handleEmailPreview({ options_array, context }) {
+  const template_key = options_array?.find(o => o.name === "template_key")?.value ?? "";
+  const owner_id     = options_array?.find(o => o.name === "owner_id")?.value     ?? null;
+  if (!template_key) return errorResponse("template_key is required.");
+  try {
+    const result = await callInternal("/api/internal/email/preview", {
+      method: "POST",
+      body: { template_key, context: { owner_id } },
+    });
+    if (!result?.ok) return errorResponse("Preview failed.");
+    const { preview = {} } = result;
+    const embed = buildEmailPreviewEmbed({ template_key, ...preview });
+    return cinematicMessage([embed]);
+  } catch {
+    return errorResponse("Email preview unavailable.");
+  }
+}
+
+async function handleEmailSendTest({ options_array, context }) {
+  const email_address = options_array?.find(o => o.name === "email_address")?.value ?? "";
+  const template_key  = options_array?.find(o => o.name === "template_key")?.value  ?? "";
+  if (!email_address || !template_key) return errorResponse("email_address and template_key are required.");
+  try {
+    const result = await callInternal("/api/internal/email/send-test", {
+      method: "POST",
+      body: { email_address, template_key, context: {} },
+    });
+    if (!result?.ok) {
+      const embed = buildEmailSendTestEmbed({ sent: false, email_address, template_key, error: result?.error ?? "Send failed" });
+      return cinematicMessage([embed]);
+    }
+    const embed = buildEmailSendTestEmbed({ sent: true, email_address, template_key, brevo_message_id: result.brevo_message_id });
+    return cinematicMessage([embed]);
+  } catch {
+    return errorResponse("Email send-test unavailable.");
+  }
+}
+
+async function handleEmailQueueStatus({ options_array, context }) {
+  const limit   = options_array?.find(o => o.name === "limit")?.value   ?? 20;
+  const dry_run = options_array?.find(o => o.name === "dry_run")?.value  ?? true;
+  try {
+    const result = await callInternal("/api/internal/email/queue/run", {
+      method: "POST",
+      body: { limit, dry_run },
+    });
+    if (!result?.ok) return errorResponse("Email queue run failed.");
+    const embed = buildEmailStatsEmbed({
+      event_type_counts:  { attempted: result.attempted_count ?? 0, sent: result.sent_count ?? 0, failed: result.failed_count ?? 0, skipped: result.skipped_count ?? 0 },
+      suppression_total:  0,
+      latest_event_at:    null,
+    });
+    return cinematicMessage([embed], emailActionRow());
+  } catch {
+    return errorResponse("Email queue status unavailable.");
+  }
+}
+
+async function handleEmailSuppression(context) {
+  try {
+    const db = getDb();
+    const { count, data, error } = await db
+      .from("email_suppression")
+      .select("email_address, reason, suppressed_at", { count: "exact" })
+      .order("suppressed_at", { ascending: false })
+      .limit(10);
+    if (error) return errorResponse("Failed to load suppression list.");
+    const embed = buildEmailSuppressionEmbed({
+      suppression_total:   count ?? 0,
+      recent_suppressions: data  ?? [],
+    });
+    return cinematicMessage([embed]);
+  } catch {
+    return errorResponse("Email suppression unavailable.");
+  }
+}
+
+async function handleEmailStats(context) {
+  try {
+    const result = await callInternal("/api/internal/email/cockpit", { method: "GET" });
+    if (!result?.ok) return errorResponse("Email stats unavailable.");
+    const embed = buildEmailStatsEmbed({
+      event_type_counts: result.event_type_counts  ?? {},
+      latest_event_at:   result.latest_event_at    ?? null,
+      suppression_total: result.suppression_total  ?? 0,
+    });
+    return cinematicMessage([embed], emailActionRow());
+  } catch {
+    return errorResponse("Email stats unavailable.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command: /replay
+// ---------------------------------------------------------------------------
+
+async function handleReplayInbound({ options_array, context }) {
+  const text       = options_array?.find(o => o.name === "text")?.value       ?? "";
+  const language   = options_array?.find(o => o.name === "language")?.value   ?? "English";
+  const stage      = options_array?.find(o => o.name === "stage")?.value      ?? null;
+  const property_type = options_array?.find(o => o.name === "property_type")?.value ?? null;
+  const deal_strategy = options_array?.find(o => o.name === "deal_strategy")?.value ?? null;
+
+  if (!text) return errorResponse("text is required.");
+
+  try {
+    const result = await callInternal("/api/internal/testing/replay-inbound", {
+      method: "POST",
+      body: {
+        message_body:   text,
+        prior_language: language,
+        prior_stage:    stage,
+        property_type,
+        deal_strategy,
+        dry_run:        true,
+      },
+    });
+
+    if (!result?.ok) {
+      return errorResponse(`Replay failed: ${result?.error ?? "unknown error"}`);
+    }
+
+    const embed = buildReplayInboundEmbed({
+      message_body:            text,
+      classification:          result.classification ?? {},
+      previous_stage:          result.previous_stage,
+      next_stage:              result.next_stage,
+      selected_use_case:       result.selected_use_case,
+      selected_template_source: result.selected_template_source,
+      would_queue_reply:       result.would_queue_reply ?? false,
+      underwriting_signals:    result.underwriting_signals ?? {},
+      underwriting_route:      result.underwriting_route,
+      alignment_passed:        result.alignment_passed ?? true,
+    });
+
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse("Replay inbound unavailable.");
+  }
+}
+
+async function handleReplayOwner({ options_array, context }) {
+  const owner_id = options_array?.find(o => o.name === "owner_id")?.value ?? "";
+  const text     = options_array?.find(o => o.name === "text")?.value     ?? "";
+
+  if (!owner_id || !text) return errorResponse("owner_id and text are required.");
+
+  try {
+    const result = await callInternal("/api/internal/testing/replay-inbound", {
+      method: "POST",
+      body: {
+        message_body:   text,
+        master_owner_id: owner_id,
+        dry_run:        true,
+      },
+    });
+
+    if (!result?.ok) {
+      return errorResponse(`Replay failed: ${result?.error ?? "unknown error"}`);
+    }
+
+    const embed = buildReplayOwnerEmbed({
+      owner_id,
+      owner_name:           null,
+      property_address:     "unknown",
+      property_type:        result.underwriting_signals?.property_type ?? "unknown",
+      message_body:         text,
+      classification:       result.classification ?? {},
+      current_stage:        result.previous_stage,
+      next_stage:           result.next_stage,
+      selected_use_case:    result.selected_use_case,
+      selected_template_source: result.selected_template_source,
+      cash_offer_snapshot:  null,
+      underwriting_route:   result.underwriting_route,
+      would_queue:          result.would_queue_reply ?? false,
+    });
+
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse("Replay owner unavailable.");
+  }
+}
+
+async function handleReplayTemplate({ options_array, context }) {
+  const use_case      = options_array?.find(o => o.name === "use_case")?.value ?? "";
+  const language      = options_array?.find(o => o.name === "language")?.value ?? "English";
+  const property_type = options_array?.find(o => o.name === "property_type")?.value ?? "Single Family";
+
+  if (!use_case) return errorResponse("use_case is required.");
+
+  try {
+    // Call replay with empty message to trigger template resolution only
+    const result = await callInternal("/api/internal/testing/replay-inbound", {
+      method: "POST",
+      body: {
+        message_body:   "[template preview]",
+        prior_language: language,
+        property_type,
+        dry_run:        true,
+      },
+    });
+
+    if (!result?.ok || !result.selected_template_id) {
+      return errorResponse("Template resolution failed");
+    }
+
+    const embed = buildReplayTemplateEmbed({
+      use_case,
+      template_id:            result.selected_template_id,
+      template_source:        result.selected_template_source,
+      stage_code:             result.selected_template_stage_code,
+      language:               result.selected_template_language || language,
+      template_text:          result.rendered_message_text || "(template not rendered)",
+      property_type_resolved: property_type,
+    });
+
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse("Template resolution unavailable.");
+  }
+}
+
+async function handleReplayBatch({ options_array, context }) {
+  const scenario = options_array?.find(o => o.name === "scenario")?.value ?? "all";
+
+  const scenarios_map = {
+    "ownership": [
+      { text: "Hi who is this?", stage: "ownership_check" },
+      { text: "Is this the right number?", stage: "ownership_check" },
+      { text: "Wrong number", stage: "ownership_check" },
+    ],
+    "offer_requests": [
+      { text: "What is your offer?", stage: "offer_reveal_cash" },
+      { text: "Can you tell me more about the offer?", stage: "offer_reveal_cash" },
+    ],
+    "objections": [
+      { text: "I do not want to sell", stage: "consider_selling" },
+      { text: "Are you paying cash?", stage: "asking_price" },
+    ],
+    "underwriting": [
+      { text: "How many units is this?", stage: "mf_confirm_units" },
+      { text: "What kind of property is it?", stage: "property_discovery" },
+    ],
+    "compliance": [
+      { text: "Stop calling me", stage: "stop_or_opt_out" },
+      { text: "Do not contact me", stage: "stop_or_opt_out" },
+    ],
+  };
+
+  let test_cases = [];
+  if (scenario === "all") {
+    for (const cases of Object.values(scenarios_map)) {
+      test_cases.push(...cases);
+    }
+  } else {
+    test_cases = scenarios_map[scenario] ?? [];
+  }
+
+  const results = [];
+  let passed = 0;
+  let warnings = 0;
+  let failed = 0;
+
+  for (const test_case of test_cases) {
+    try {
+      const result = await callInternal("/api/internal/testing/replay-inbound", {
+        method: "POST",
+        body: {
+          message_body: test_case.text,
+          prior_stage:  test_case.stage,
+          dry_run:      true,
+        },
+      });
+
+      if (result?.ok && result?.alignment_passed) {
+        results.push({ name: test_case.text, status: "pass", note: result.selected_use_case });
+        passed++;
+      } else if (result?.ok) {
+        results.push({ name: test_case.text, status: "warn", note: "alignment warning" });
+        warnings++;
+      } else {
+        results.push({ name: test_case.text, status: "fail", note: result?.error });
+        failed++;
+      }
+    } catch (err) {
+      results.push({ name: test_case.text, status: "fail", note: "error" });
+      failed++;
+    }
+  }
+
+  const embed = buildReplayBatchEmbed({
+    scenario,
+    tested:   test_cases.length,
+    passed,
+    warnings,
+    failed,
+    results,
+  });
+
+  return cinematicMessage([embed]);
+}
+
+// ---------------------------------------------------------------------------
+// /wires handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * handleWiresCockpit — show wire command center summary
+ */
+async function handleWiresCockpit({ options_array, context }) {
+  const days = options_array?.find(o => o.name === "days")?.value ?? 7;
+
+  try {
+    const summary = await getWireSummary({ days, db: getDb() });
+    const embed = buildWireCockpitEmbed({
+      ...summary,
+      days: String(days),
+    });
+    return cinematicMessage([embed], wireCockpitButtons());
+  } catch (err) {
+    return errorResponse(`Wire cockpit unavailable: ${err?.message ?? "error"}`);
+  }
+}
+
+/**
+ * handleWiresExpected — create an expected wire event
+ */
+async function handleWiresExpected({ options_array, context }) {
+  const amount = options_array?.find(o => o.name === "amount")?.value ?? "0";
+  const account = options_array?.find(o => o.name === "account")?.value ?? "";
+  const deal_key = options_array?.find(o => o.name === "deal_key")?.value ?? null;
+  const property_id = options_array?.find(o => o.name === "property_id")?.value ?? null;
+  const closing_id = options_array?.find(o => o.name === "closing_id")?.value ?? null;
+  const expected_at = options_array?.find(o => o.name === "expected_at")?.value ?? null;
+  const note = options_array?.find(o => o.name === "note")?.value ?? null;
+
+  if (!amount || !account) {
+    return errorResponse("amount and account are required.");
+  }
+
+  try {
+    const wire = await createExpectedWire({
+      amount: Number(amount),
+      account_key: account,
+      deal_key,
+      property_id: property_id ? Number(property_id) : null,
+      closing_id: closing_id ? Number(closing_id) : null,
+      expected_at,
+      metadata: note ? { note } : {},
+      created_by_discord_user_id: context.user_id,
+      db: getDb(),
+    });
+
+    const embed = buildWireExpectedEmbed({
+      amount: Number(amount),
+      account_display: account,
+      deal_key,
+      expected_at,
+      wire_key: wire.wire_key,
+    });
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse(`Failed to create expected wire: ${err?.message ?? "error"}`);
+  }
+}
+
+/**
+ * handleWiresReceived — mark wire as received
+ */
+async function handleWiresReceived({ options_array, context }) {
+  const wire_key = options_array?.find(o => o.name === "wire_key")?.value ?? "";
+  const note = options_array?.find(o => o.name === "note")?.value ?? null;
+
+  if (!wire_key) {
+    return errorResponse("wire_key is required.");
+  }
+
+  try {
+    const wire = await markWireReceived({
+      wire_key,
+      status_note: note,
+      discord_user_id: context.user_id,
+      db: getDb(),
+    });
+
+    const embed = buildWireReceivedEmbed({
+      wire_key: wire.wire_key,
+      amount: wire.amount,
+      received_at: wire.received_at,
+      note,
+    });
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse(`Failed to mark wire received: ${err?.message ?? "error"}`);
+  }
+}
+
+/**
+ * handleWiresCleared — mark wire as cleared
+ */
+async function handleWiresCleared({ options_array, context }) {
+  const wire_key = options_array?.find(o => o.name === "wire_key")?.value ?? "";
+  const note = options_array?.find(o => o.name === "note")?.value ?? null;
+
+  if (!wire_key) {
+    return errorResponse("wire_key is required.");
+  }
+
+  try {
+    const wire = await markWireCleared({
+      wire_key,
+      status_note: note,
+      discord_user_id: context.user_id,
+      db: getDb(),
+    });
+
+    const embed = buildWireClearedEmbed({
+      wire_key: wire.wire_key,
+      amount: wire.amount,
+      cleared_at: wire.cleared_at,
+      note,
+    });
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse(`Failed to mark wire cleared: ${err?.message ?? "error"}`);
+  }
+}
+
+/**
+ * handleWiresForecast — show forecast of expected wires
+ */
+async function handleWiresForecast({ options_array, context }) {
+  const days = options_array?.find(o => o.name === "days")?.value ?? 14;
+
+  try {
+    const forecast = await buildWireForecast({ days, db: getDb() });
+    const embed = buildWireForecastEmbed(forecast);
+    return cinematicMessage([embed], wireCockpitButtons());
+  } catch (err) {
+    return errorResponse(`Wire forecast unavailable: ${err?.message ?? "error"}`);
+  }
+}
+
+/**
+ * handleWiresDeal — show wires linked to deal/property/closing
+ */
+async function handleWiresDeal({ options_array, context }) {
+  const deal_key = options_array?.find(o => o.name === "deal_key")?.value ?? "";
+
+  if (!deal_key) {
+    return errorResponse("deal_key is required.");
+  }
+
+  try {
+    const wires = await listWireEvents({
+      db: getDb(),
+      limit: 100,
+    });
+
+    // Filter wires by deal_key or property_id
+    const filtered_wires = wires.filter(w =>
+      w.deal_key === deal_key || String(w.property_id) === deal_key || String(w.closing_id) === deal_key
+    );
+
+    const embed = buildWireDealEmbed({
+      deal_key,
+      wires: filtered_wires,
+    });
+    return cinematicMessage([embed]);
+  } catch (err) {
+    return errorResponse(`Deal wire lookup failed: ${err?.message ?? "error"}`);
+  }
+}
+
+/**
+ * handleWiresReconcile — show wire anomalies
+ */
+async function handleWiresReconcile({ options_array, context }) {
+  const days = options_array?.find(o => o.name === "days")?.value ?? 30;
+
+  try {
+    const wires = await listWireEvents({
+      db: getDb(),
+      days,
+      limit: 1000,
+    });
+
+    const missing_account_links = wires.filter(w => !w.account_key).length;
+    const missing_deal_links = wires.filter(w => !w.deal_key && !w.closing_id).length;
+    const stale_pending = wires.filter(w => {
+      if (w.status !== "pending") return false;
+      const created = new Date(w.created_at).getTime();
+      const now = Date.now();
+      const age_days = (now - created) / (1000 * 60 * 60 * 24);
+      return age_days > 7;
+    }).length;
+
+    const embed = buildWireReconcileEmbed({
+      missing_account_links,
+      missing_deal_links,
+      stale_pending,
+      total_anomalies: missing_account_links + missing_deal_links + stale_pending,
+      scope_days: String(days),
+    });
+    return cinematicMessage([embed], wireCockpitButtons());
+  } catch (err) {
+    return errorResponse(`Wire reconciliation failed: ${err?.message ?? "error"}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Command: /conquest
 // ---------------------------------------------------------------------------
 
@@ -2173,6 +2731,104 @@ export async function routeDiscordInteraction(interaction) {
         response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
       } else {
         response = await handleConquest(context);
+      }
+
+    // ── /email ────────────────────────────────────────────────────────────────
+    } else if (command_name === "email") {
+      if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+        response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+      } else if (sub_name === "cockpit") {
+        response = await handleEmailCockpit(context);
+      } else if (sub_name === "preview") {
+        response = await handleEmailPreview({ options_array: sub_opts, context });
+      } else if (sub_name === "send-test") {
+        response = await handleEmailSendTest({ options_array: sub_opts, context });
+      } else if (sub_name === "queue") {
+        response = await handleEmailQueueStatus({ options_array: sub_opts, context });
+      } else if (sub_name === "suppression") {
+        response = await handleEmailSuppression(context);
+      } else if (sub_name === "stats") {
+        response = await handleEmailStats(context);
+      } else {
+        response = errorResponse(`Unknown /email subcommand: ${sub_name}`);
+      }
+
+    // ── /replay ────────────────────────────────────────────────────────────────
+    } else if (command_name === "replay") {
+      if (sub_name === "inbound") {
+        if (!checkPermission(role_ids, ["sms_ops", "tech_ops", "owner"])) {
+          response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleReplayInbound({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "owner") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+          response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+        } else {
+          response = await handleReplayOwner({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "template") {
+        if (!checkPermission(role_ids, ["sms_ops", "tech_ops", "owner"])) {
+          response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleReplayTemplate({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "batch") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+          response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+        } else {
+          response = await handleReplayBatch({ options_array: sub_opts, context });
+        }
+      } else {
+        response = errorResponse(`Unknown /replay subcommand: ${sub_name}`);
+      }
+
+    // ── /wires ─────────────────────────────────────────────────────────────────
+    } else if (command_name === "wires") {
+      if (sub_name === "cockpit") {
+        if (!checkPermission(role_ids, ["owner", "closings", "tech_ops"])) {
+          response = deniedResponse("Requires **Closings**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleWiresCockpit({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "expected") {
+        if (!checkPermission(role_ids, ["owner", "closings"])) {
+          response = deniedResponse("Requires **Closings** or **Owner**.");
+        } else {
+          response = await handleWiresExpected({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "received") {
+        if (!checkPermission(role_ids, ["owner"])) {
+          response = deniedResponse("Requires **Owner** role.");
+        } else {
+          response = await handleWiresReceived({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "cleared") {
+        if (!checkPermission(role_ids, ["owner"])) {
+          response = deniedResponse("Requires **Owner** role.");
+        } else {
+          response = await handleWiresCleared({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "forecast") {
+        if (!checkPermission(role_ids, ["owner", "closings", "tech_ops"])) {
+          response = deniedResponse("Requires **Closings**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleWiresForecast({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "deal") {
+        if (!checkPermission(role_ids, ["owner", "closings", "tech_ops"])) {
+          response = deniedResponse("Requires **Closings**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleWiresDeal({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "reconcile") {
+        if (!checkPermission(role_ids, ["owner", "closings"])) {
+          response = deniedResponse("Requires **Closings** or **Owner**.");
+        } else {
+          response = await handleWiresReconcile({ options_array: sub_opts, context });
+        }
+      } else {
+        response = errorResponse(`Unknown /wires subcommand: ${sub_name}`);
       }
 
     } else {
