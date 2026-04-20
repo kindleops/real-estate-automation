@@ -52,6 +52,12 @@ import {
   buildHotLeadEmbed,
   buildApprovalEmbed,
   buildSuccessEmbed,
+  buildTargetScanEmbed,
+  buildCampaignCreatedEmbed,
+  buildCampaignInspectEmbed,
+  buildCampaignScaleEmbed,
+  buildTerritoryMapEmbed,
+  buildConquestEmbed,
 } from "./discord-embed-factory.js";
 import {
   missionButtons,
@@ -60,7 +66,17 @@ import {
   templateAuditButtons,
   leadInspectButtons,
   approvalButtons,
+  targetActionRow,
+  campaignActionRow,
+  territoryActionRow,
 } from "./discord-components.js";
+import {
+  buildCampaignKey,
+  normalizeMarketSlug,
+  normalizeAssetType,
+  normalizeStrategy,
+  resolveTargetSourceViewName,
+} from "../domain/campaigns/targeting-console.js";
 import {
   deferredPublicResponse,
   editOriginalInteractionResponse,
@@ -70,11 +86,11 @@ import {
 // Test dependency injection
 // ---------------------------------------------------------------------------
 
-let _router_deps = { supabase_override: null };
+let _router_deps = { supabase_override: null, callInternal_override: null };
 
 /**
  * Override internal dependencies for unit testing.
- * @param {{ supabase_override?: object }} overrides
+ * @param {{ supabase_override?: object, callInternal_override?: Function }} overrides
  */
 export function __setActionRouterDeps(overrides) {
   _router_deps = { ..._router_deps, ...overrides };
@@ -82,7 +98,7 @@ export function __setActionRouterDeps(overrides) {
 
 /** Reset injected dependencies to production defaults. */
 export function __resetActionRouterDeps() {
-  _router_deps = { supabase_override: null };
+  _router_deps = { supabase_override: null, callInternal_override: null };
 }
 
 /** Return the active Supabase client (real or injected mock). */
@@ -126,6 +142,9 @@ const REJECT_PREFIX  = "discord_reject:";
  * @param {object} options - { method, body, timeout_ms }
  */
 async function callInternal(path, options = {}) {
+  if (_router_deps.callInternal_override) {
+    return _router_deps.callInternal_override(path, options);
+  }
   const base   = String(process.env.APP_BASE_URL ?? "").replace(/\/$/, "");
   const url    = `${base}${path}`;
   const secret = String(process.env.INTERNAL_API_SECRET ?? "");
@@ -1261,6 +1280,380 @@ async function handleAlertsMode({ options_array, context }) {
 }
 
 // ---------------------------------------------------------------------------
+// Command: /target scan  (deferred, always dry_run=true)
+// ---------------------------------------------------------------------------
+
+async function handleTargetScan({ options_array, context, interaction }) {
+  const market      = String(getOption(options_array, "market") ?? "").trim();
+  const asset       = String(getOption(options_array, "asset") ?? "").trim();
+  const strategy    = String(getOption(options_array, "strategy") ?? "").trim();
+  const limit       = Math.min(Math.max(1, Number(getOption(options_array, "limit")) || 25), 500);
+  const scan_limit  = Math.min(Math.max(1, Number(getOption(options_array, "scan_limit")) || 100), 5000);
+  const source_view_name_override = String(getOption(options_array, "source_view_name") ?? "").trim() || null;
+
+  if (!market || !asset || !strategy) {
+    return errorResponse("market, asset, and strategy are required.");
+  }
+
+  const source_view_name = resolveTargetSourceViewName({
+    market,
+    asset_type: asset,
+    strategy,
+    source_view_name: source_view_name_override,
+  });
+  const campaign_key = buildCampaignKey({ market, asset_type: asset, strategy });
+  const app_id = String(process.env.DISCORD_APPLICATION_ID ?? "");
+  const token = interaction.token;
+
+  Promise.resolve()
+    .then(async () => {
+      let embeds;
+      let content;
+
+      try {
+        const result = await callInternal("/api/internal/outbound/feed-master-owners", {
+          method: "POST",
+          body: {
+            dry_run: true,
+            limit,
+            scan_limit,
+            source_view_name,
+          },
+          timeout_ms: 30_000,
+        });
+
+        if (result.timed_out) {
+          content = "Target scan is still running — check alerts channel.";
+        } else if (!result.ok) {
+          content = `Target scan error: ${result.error ?? "unknown"}.`;
+        } else {
+          const payload = result.data ?? {};
+          const feeder = payload.result ?? {};
+          const scan_summary = {
+            scanned: feeder.loaded_count ?? 0,
+            eligible: feeder.eligible_count ?? 0,
+            would_queue: feeder.inserted_count ?? 0,
+            skipped: feeder.skipped_count ?? 0,
+          };
+
+          try {
+            const db = getDb();
+            const { data: existing } = await db
+              .from("campaign_targets")
+              .select("id")
+              .eq("campaign_key", campaign_key)
+              .maybeSingle();
+            if (existing || source_view_name_override) {
+              await db
+                .from("campaign_targets")
+                .update({
+                  last_scan_summary: scan_summary,
+                  last_scan_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("campaign_key", campaign_key);
+            }
+          } catch {
+            // Non-fatal: scan result is still shown even if persistence fails.
+          }
+
+          embeds = [buildTargetScanEmbed({
+            market,
+            asset,
+            strategy,
+            source_view_name,
+            scanned: scan_summary.scanned,
+            eligible: scan_summary.eligible,
+            would_queue: scan_summary.would_queue,
+            skipped: scan_summary.skipped,
+          })];
+        }
+      } catch {
+        content = "Target scan encountered an error. Check server logs.";
+      }
+
+      await editOriginalInteractionResponse({
+        applicationId: app_id,
+        token,
+        content,
+        embeds,
+        components: embeds ? targetActionRow({ campaignKey: campaign_key }) : undefined,
+      }).catch(() => {});
+    })
+    .catch(() => {});
+
+  return deferredPublicResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Command: /campaign create
+// ---------------------------------------------------------------------------
+
+async function handleCampaignCreate({ options_array, context }) {
+  const campaign_name = String(getOption(options_array, "name") ?? "").trim();
+  const market = String(getOption(options_array, "market") ?? "").trim();
+  const asset = String(getOption(options_array, "asset") ?? "").trim();
+  const strategy = String(getOption(options_array, "strategy") ?? "").trim();
+  const daily_cap = Math.min(Math.max(1, Number(getOption(options_array, "daily_cap")) || 50), 10000);
+  const source_view_name_override = String(getOption(options_array, "source_view_name") ?? "").trim() || null;
+  const language = String(getOption(options_array, "language") ?? "auto").trim() || "auto";
+
+  if (!campaign_name || !market || !asset || !strategy) {
+    return errorResponse("name, market, asset, and strategy are required.");
+  }
+
+  const campaign_key = buildCampaignKey({ market, asset_type: asset, strategy });
+  const source_view_name = resolveTargetSourceViewName({
+    market,
+    asset_type: asset,
+    strategy,
+    source_view_name: source_view_name_override,
+  });
+
+  try {
+    const db = getDb();
+    const row = {
+      campaign_key,
+      campaign_name,
+      market: normalizeMarketSlug(market),
+      asset_type: normalizeAssetType(asset),
+      strategy: normalizeStrategy(strategy),
+      language,
+      source_view_name,
+      daily_cap,
+      status: "draft",
+      created_by_discord_user_id: context.user_id || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await db
+      .from("campaign_targets")
+      .upsert(row, { onConflict: "campaign_key" });
+    if (error) throw error;
+
+    return cinematicMessage({
+      embeds: [buildCampaignCreatedEmbed({
+        campaign_key,
+        campaign_name,
+        market,
+        asset,
+        strategy,
+        daily_cap,
+        status: "draft",
+        source_view_name,
+      })],
+      components: campaignActionRow({ campaignKey: campaign_key, paused: false }),
+    });
+  } catch {
+    return errorResponse("Failed to create campaign. Please try again.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command: /campaign inspect
+// ---------------------------------------------------------------------------
+
+async function handleCampaignInspect({ options_array, context }) {
+  const campaign_key = String(getOption(options_array, "campaign") ?? "").trim();
+  if (!campaign_key) return errorResponse("campaign key is required.");
+
+  try {
+    const db = getDb();
+    const { data, error } = await db
+      .from("campaign_targets")
+      .select("*")
+      .eq("campaign_key", campaign_key)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return errorResponse(`Campaign not found: ${campaign_key}`);
+
+    return cinematicMessage({
+      embeds: [buildCampaignInspectEmbed(data)],
+      components: campaignActionRow({ campaignKey: campaign_key, paused: data.status === "paused" }),
+    });
+  } catch {
+    return errorResponse("Failed to load campaign.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command: /campaign scale
+// ---------------------------------------------------------------------------
+
+async function handleCampaignScale({ options_array, context, interaction }) {
+  const campaign_key = String(getOption(options_array, "campaign") ?? "").trim();
+  const daily_cap = Math.max(1, Number(getOption(options_array, "daily_cap")) || 0);
+
+  if (!campaign_key) return errorResponse("campaign key is required.");
+  if (!daily_cap) return errorResponse("daily_cap must be a positive integer.");
+  if (!checkPermission(context.role_ids, ["owner", "tech_ops", "sms_ops"])) {
+    return deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+  }
+
+  const needs_approval = daily_cap > 100 && !isOwner(context.role_ids) && !isTechOps(context.role_ids);
+  if (needs_approval) {
+    const approval_token = crypto.randomUUID();
+    const action_payload = { command: "campaign_scale", campaign_key, daily_cap };
+
+    await auditLog({
+      interaction_id: interaction.id,
+      guild_id: context.guild_id,
+      channel_id: context.channel_id,
+      user_id: context.user_id,
+      username: context.username,
+      command_name: "campaign",
+      subcommand: "scale",
+      options: action_payload,
+      role_ids: context.role_ids,
+      permission_outcome: "allowed",
+      action_outcome: "approval_pending",
+      approval_token,
+    });
+
+    return cinematicMessage({
+      embeds: [buildCampaignScaleEmbed({
+        campaign_key,
+        current_cap: null,
+        requested_cap: daily_cap,
+        status: "pending",
+        recommendation: "Requires Owner or Tech Ops approval for daily_cap > 100",
+        risk_level: "high",
+      })],
+      components: approvalButtons({
+        actionId: approval_token,
+        approveLabel: `Scale to ${daily_cap}`,
+        denyLabel: "Cancel",
+      }),
+    });
+  }
+
+  try {
+    const db = getDb();
+    const { data: existing } = await db
+      .from("campaign_targets")
+      .select("daily_cap, status")
+      .eq("campaign_key", campaign_key)
+      .maybeSingle();
+
+    if (!existing) return errorResponse(`Campaign not found: ${campaign_key}`);
+
+    await db
+      .from("campaign_targets")
+      .update({ daily_cap, updated_at: new Date().toISOString() })
+      .eq("campaign_key", campaign_key);
+
+    return cinematicMessage({
+      embeds: [buildCampaignScaleEmbed({
+        campaign_key,
+        current_cap: existing.daily_cap,
+        requested_cap: daily_cap,
+        status: "applied",
+        recommendation: daily_cap > 200 ? "High volume — monitor closely" : "Within safe range",
+        risk_level: daily_cap > 200 ? "high" : daily_cap > 100 ? "medium" : "low",
+      })],
+    });
+  } catch {
+    return errorResponse("Failed to update campaign scale.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command: /territory map
+// ---------------------------------------------------------------------------
+
+async function handleTerritoryMap(context) {
+  try {
+    const db = getDb();
+    const { data, error } = await db
+      .from("campaign_targets")
+      .select("*")
+      .order("market", { ascending: true })
+      .order("status", { ascending: true });
+
+    if (error) throw error;
+
+    const rows = data ?? [];
+    if (rows.length === 0) {
+      return cinematicMessage({
+        embeds: [buildTerritoryMapEmbed({ grouped: {}, empty: true })],
+        components: territoryActionRow(),
+      });
+    }
+
+    const grouped = {};
+    for (const row of rows) {
+      const key = row.market || "unknown";
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(row);
+    }
+
+    return cinematicMessage({
+      embeds: [buildTerritoryMapEmbed({ grouped, empty: false })],
+      components: territoryActionRow(),
+    });
+  } catch {
+    return errorResponse("Failed to load territory map.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command: /conquest
+// ---------------------------------------------------------------------------
+
+async function handleConquest(context) {
+  try {
+    const db = getDb();
+    const { data, error } = await db
+      .from("campaign_targets")
+      .select("status, daily_cap, market, last_scan_at");
+
+    if (error) throw error;
+
+    const rows = data ?? [];
+    let active = 0;
+    let draft = 0;
+    let paused = 0;
+    let total_daily_cap = 0;
+    let last_scan = null;
+    const markets = new Set();
+
+    for (const row of rows) {
+      const status = String(row.status ?? "").toLowerCase();
+      if (status === "active") active++;
+      if (status === "draft") draft++;
+      if (status === "paused") paused++;
+      total_daily_cap += Number(row.daily_cap) || 0;
+      if (row.market) markets.add(row.market);
+      if (row.last_scan_at && (!last_scan || row.last_scan_at > last_scan)) last_scan = row.last_scan_at;
+    }
+
+    const recommended_next_move =
+      active === 0 && draft === 0
+        ? "Create your first campaign with /campaign create"
+        : active === 0
+          ? "Run /target scan on draft campaigns before requesting launch"
+          : !last_scan || Date.now() - new Date(last_scan).getTime() > 86_400_000
+            ? "Refresh territory intel with /target scan"
+            : "Monitor mission health and hot leads while campaigns run";
+
+    return cinematicMessage({
+      embeds: [buildConquestEmbed({
+        active,
+        draft,
+        paused,
+        total_daily_cap,
+        markets_unlocked: markets.size,
+        last_scan,
+        recommended_next_move,
+      })],
+    });
+  } catch {
+    return errorResponse("Failed to load conquest overview.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Button: approve / reject
 // ---------------------------------------------------------------------------
 
@@ -1360,6 +1753,18 @@ async function handleApproval({ interaction, custom_id }) {
       method: "POST",
       body:   { limit, scan_limit, dry_run: false },
     });
+  } else if (action_payload.command === "campaign_scale") {
+    const { campaign_key, daily_cap } = action_payload;
+    try {
+      const db_a = getDb();
+      await db_a
+        .from("campaign_targets")
+        .update({ daily_cap: Number(daily_cap), updated_at: new Date().toISOString() })
+        .eq("campaign_key", campaign_key);
+      exec_result = { ok: true, data: { campaign_key, daily_cap } };
+    } catch {
+      exec_result = { ok: false, error: "campaign_scale_failed" };
+    }
   } else {
     return updateMessage(
       `⚠️ Approved by <@${context.user_id}> but unknown action type "${pending.command_name}/${pending.subcommand}".`,
@@ -1456,13 +1861,80 @@ export async function routeDiscordInteraction(interaction) {
 
     // Shortcut buttons — re-run commands inline.
     const ctx = extractMemberContext(interaction);
-    if (custom_id === "mission:refresh")        return handleMissionStatus(ctx);
-    if (custom_id === "mission:preflight")       return handleLaunchPreflight(ctx);
-    if (custom_id === "queue:cockpit")           return handleQueueCockpit(ctx);
-    if (custom_id === "preflight:recheck")       return handleLaunchPreflight(ctx);
-    if (custom_id === "preflight:scan_feeder")   return handleFeederScan({ options_array: [], context: ctx, interaction });
-    if (custom_id === "templates:audit")         return handleTemplatesAudit(ctx);
-    if (custom_id === "templates:stage1")        return handleTemplatesStage1(ctx);
+    if (custom_id === "mission:refresh") return handleMissionStatus(ctx);
+    if (custom_id === "mission:preflight") return handleLaunchPreflight(ctx);
+    if (custom_id === "queue:cockpit") return handleQueueCockpit(ctx);
+    if (custom_id === "preflight:recheck") return handleLaunchPreflight(ctx);
+    if (custom_id === "preflight:scan_feeder") return handleFeederScan({ options_array: [], context: ctx, interaction });
+    if (custom_id === "templates:audit") return handleTemplatesAudit(ctx);
+    if (custom_id === "templates:stage1") return handleTemplatesStage1(ctx);
+
+    if (custom_id.startsWith("target:create_campaign:")) {
+      const ck = custom_id.slice("target:create_campaign:".length);
+      return cinematicMessage({
+        embeds: [buildSuccessEmbed({
+          title: "Create Campaign",
+          description: `Use \`/campaign create\` to create a campaign${ck ? ` for key \`${ck}\`` : ""}.`,
+        })],
+        ephemeral: true,
+      });
+    }
+    if (custom_id.startsWith("target:run_again:")) return handleMissionStatus(ctx);
+    if (custom_id === "target:template_audit") return handleTemplatesAudit(ctx);
+    if (custom_id === "target:launch_preflight") return handleLaunchPreflight(ctx);
+
+    if (custom_id === "campaign:preflight") return handleLaunchPreflight(ctx);
+    if (custom_id.startsWith("campaign:scan:")) {
+      const ck = custom_id.slice("campaign:scan:".length);
+      return cinematicMessage({
+        embeds: [buildSuccessEmbed({
+          title: "Scan Campaign",
+          description: `Use \`/target scan\` with the campaign's market/asset/strategy to run a dry-run scan for \`${ck}\`.`,
+        })],
+        ephemeral: true,
+      });
+    }
+    if (custom_id.startsWith("campaign:scale:")) {
+      const ck = custom_id.slice("campaign:scale:".length);
+      return cinematicMessage({
+        embeds: [buildSuccessEmbed({
+          title: "Scale Campaign",
+          description: `Use \`/campaign scale\` with campaign key \`${ck}\` to update the daily cap.`,
+        })],
+        ephemeral: true,
+      });
+    }
+    if (custom_id.startsWith("campaign:pause:")) {
+      const ck = custom_id.slice("campaign:pause:".length);
+      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
+        return deniedResponse("Requires **SMS Ops** or **Owner** to pause a campaign.");
+      }
+      return handleCampaignPause({ options_array: [{ name: "campaign_id", value: ck }], context: ctx });
+    }
+    if (custom_id.startsWith("campaign:resume:")) {
+      const ck = custom_id.slice("campaign:resume:".length);
+      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
+        return deniedResponse("Requires **SMS Ops** or **Owner** to resume a campaign.");
+      }
+      return handleCampaignResume({
+        options_array: [{ name: "campaign_id", value: ck }],
+        context: ctx,
+        interaction,
+      });
+    }
+
+    if (custom_id === "territory:create_target") {
+      return cinematicMessage({
+        embeds: [buildSuccessEmbed({
+          title: "Create Target",
+          description: "Use `/campaign create` to add a new territory target.",
+        })],
+        ephemeral: true,
+      });
+    }
+    if (custom_id === "territory:scan_active") return handleTerritoryMap(ctx);
+    if (custom_id === "territory:mission_status") return handleMissionStatus(ctx);
+
     if (custom_id.startsWith("queue:run:")) {
       const run_limit = Number(custom_id.split(":")[2]) || 10;
       if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
@@ -1569,6 +2041,18 @@ export async function routeDiscordInteraction(interaction) {
         response = errorResponse(`Unknown /feeder subcommand: ${sub_name}`);
       }
 
+    // ── /target ──────────────────────────────────────────────────────────────
+    } else if (command_name === "target") {
+      if (sub_name === "scan") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+          response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleTargetScan({ options_array: sub_opts, context, interaction });
+        }
+      } else {
+        response = errorResponse(`Unknown /target subcommand: ${sub_name}`);
+      }
+
     // ── /campaign ────────────────────────────────────────────────────────────
     } else if (command_name === "campaign") {
       if (sub_name === "pause") {
@@ -1587,6 +2071,20 @@ export async function routeDiscordInteraction(interaction) {
             interaction,
           });
         }
+      } else if (sub_name === "create") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+          response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleCampaignCreate({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "inspect") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops", "acquisitions"])) {
+          response = deniedResponse("Requires **Acquisitions**, **SMS Ops**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleCampaignInspect({ options_array: sub_opts, context });
+        }
+      } else if (sub_name === "scale") {
+        response = await handleCampaignScale({ options_array: sub_opts, context, interaction });
       } else {
         response = errorResponse(`Unknown /campaign subcommand: ${sub_name}`);
       }
@@ -1655,6 +2153,26 @@ export async function routeDiscordInteraction(interaction) {
         }
       } else {
         response = errorResponse(`Unknown /alerts subcommand: ${sub_name}`);
+      }
+
+    // ── /territory ───────────────────────────────────────────────────────────
+    } else if (command_name === "territory") {
+      if (sub_name === "map") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops", "acquisitions"])) {
+          response = deniedResponse("Requires a recognised team role.");
+        } else {
+          response = await handleTerritoryMap(context);
+        }
+      } else {
+        response = errorResponse(`Unknown /territory subcommand: ${sub_name}`);
+      }
+
+    // ── /conquest ────────────────────────────────────────────────────────────
+    } else if (command_name === "conquest") {
+      if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+        response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+      } else {
+        response = await handleConquest(context);
       }
 
     } else {

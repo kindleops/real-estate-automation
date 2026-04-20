@@ -478,3 +478,337 @@ export function buildApprovalEmbed(payload = {}) {
     footer: { text: "Owner must click Approve to proceed" },
   };
 }
+
+// ---------------------------------------------------------------------------
+// buildTargetScanEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Target scan result embed (always dry-run).
+ *
+ * @param {object} payload
+ * @param {string}  payload.market
+ * @param {string}  payload.asset
+ * @param {string}  payload.strategy
+ * @param {string}  [payload.source_view_name]
+ * @param {number}  [payload.scanned]
+ * @param {number}  [payload.eligible]
+ * @param {number}  [payload.would_queue]
+ * @param {number}  [payload.skipped]
+ * @param {number}  [payload.no_phone]
+ * @param {number}  [payload.dnc]
+ * @param {string}  [payload.template_source]
+ * @param {number}  [payload.stage1_errors]
+ * @param {number}  [payload.recommended_batch]
+ * @param {string}  [payload.risk_level]   - "low" | "medium" | "high"
+ * @returns {object}
+ */
+export function buildTargetScanEmbed(payload = {}) {
+  const {
+    market            = "",
+    asset             = "",
+    strategy          = "",
+    source_view_name  = "",
+    scanned           = null,
+    eligible          = null,
+    would_queue       = null,
+    skipped           = null,
+    no_phone          = null,
+    dnc               = null,
+    template_source   = null,
+    stage1_errors     = null,
+    recommended_batch = null,
+    risk_level        = null,
+  } = payload;
+
+  const rc = recommended_batch ?? eligible ?? 0;
+  const rl = risk_level ?? (rc > 100 ? "high" : rc > 50 ? "medium" : "low");
+  const color =
+    rl === "high"   ? COLOR.red    :
+    rl === "medium" ? COLOR.yellow :
+    COLOR.green;
+
+  return {
+    title:     "🎯 Target Scan",
+    color,
+    timestamp: now(),
+    fields: [
+      f("Market",            String(market).slice(0, 100),           true),
+      f("Asset",             String(asset).slice(0, 100),            true),
+      f("Strategy",          String(strategy).slice(0, 100),         true),
+      f("Source View",       String(source_view_name).slice(0, 100), false),
+      f("Scanned",           scanned     != null ? String(scanned)     : "—", true),
+      f("Eligible",          eligible    != null ? String(eligible)    : "—", true),
+      f("Would Queue",       would_queue != null ? String(would_queue) : "—", true),
+      f("Skipped",           skipped     != null ? String(skipped)     : "—", true),
+      f("No Phone",          no_phone    != null ? String(no_phone)    : "—", true),
+      f("DNC",               dnc         != null ? String(dnc)         : "—", true),
+      ...(template_source  != null ? [f("Template Source",  String(template_source),  true)] : []),
+      ...(stage1_errors    != null ? [f("Stage 1 Errors",   String(stage1_errors),    true)] : []),
+      f("Recommended Batch", String(rc),                              true),
+      f("Risk Level",        String(rl).toUpperCase(),                true),
+    ].slice(0, 25),
+    footer: { text: "Dry-run only — no SMS sent" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildCampaignCreatedEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Campaign created / upserted confirmation embed.
+ *
+ * @param {object} payload
+ * @param {string}  payload.campaign_key
+ * @param {string}  [payload.campaign_name]
+ * @param {string}  payload.market
+ * @param {string}  payload.asset
+ * @param {string}  payload.strategy
+ * @param {number}  [payload.daily_cap]
+ * @param {string}  [payload.status]
+ * @param {string}  [payload.source_view_name]
+ * @returns {object}
+ */
+export function buildCampaignCreatedEmbed(payload = {}) {
+  const {
+    campaign_key     = "",
+    campaign_name    = "",
+    market           = "",
+    asset            = "",
+    strategy         = "",
+    daily_cap        = 50,
+    status           = "draft",
+    source_view_name = "",
+  } = payload;
+
+  return {
+    title:     "🎮 Campaign Created",
+    color:     COLOR.blue,
+    timestamp: now(),
+    fields: [
+      f("Campaign Key",  String(campaign_key).slice(0, 80),                    false),
+      f("Name",          String(campaign_name || campaign_key).slice(0, 100),  true),
+      f("Market",        String(market).slice(0, 60),                          true),
+      f("Asset",         String(asset).slice(0, 60),                           true),
+      f("Strategy",      String(strategy).slice(0, 60),                        true),
+      f("Daily Cap",     String(daily_cap),                                    true),
+      f("Status",        String(status).toUpperCase(),                         true),
+      f("Source View",   String(source_view_name).slice(0, 100),               false),
+    ],
+    footer: { text: "Use /campaign inspect to view full details" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildCampaignInspectEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Campaign detail inspect embed.
+ *
+ * @param {object} payload  - campaign_targets row
+ * @returns {object}
+ */
+export function buildCampaignInspectEmbed(payload = {}) {
+  const {
+    campaign_key      = "",
+    campaign_name     = null,
+    market            = "",
+    asset_type        = "",
+    strategy          = "",
+    daily_cap         = null,
+    status            = "",
+    last_scan_at      = null,
+    last_scan_summary = null,
+    last_launched_at  = null,
+    source_view_name  = null,
+  } = payload;
+
+  const scan = last_scan_summary ?? {};
+  const scan_line =
+    scan.eligible != null
+      ? `Scanned: **${scan.scanned ?? "—"}** | Eligible: **${scan.eligible ?? "—"}** | Would Queue: **${scan.would_queue ?? "—"}**`
+      : "No scan data yet";
+
+  const status_color =
+    status === "active" ? COLOR.green  :
+    status === "paused" ? COLOR.yellow :
+    COLOR.gray;
+
+  return {
+    title:     `📋 ${String(campaign_key).slice(0, 60)}`,
+    color:     status_color,
+    timestamp: now(),
+    fields: [
+      f("Campaign Key",  String(campaign_key).slice(0, 80),                   false),
+      f("Name",          String(campaign_name || campaign_key).slice(0, 100), true),
+      f("Market",        String(market).slice(0, 60),                         true),
+      f("Asset Type",    String(asset_type).slice(0, 60),                     true),
+      f("Strategy",      String(strategy).slice(0, 60),                       true),
+      f("Daily Cap",     daily_cap != null ? String(daily_cap) : "—",         true),
+      f("Status",        String(status).toUpperCase() || "—",                 true),
+      f("Last Scan",     last_scan_at ? new Date(last_scan_at).toISOString().slice(0, 10) : "Never", true),
+      f("Scan Summary",  scan_line,                                           false),
+      f("Last Launch",   last_launched_at ? new Date(last_launched_at).toISOString().slice(0, 10) : "Never", true),
+      ...(source_view_name ? [f("Source View", String(source_view_name).slice(0, 100), false)] : []),
+    ].slice(0, 25),
+    footer: { text: "Read-only campaign snapshot" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildCampaignScaleEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Campaign scale request or confirmation embed.
+ *
+ * @param {object}  payload
+ * @param {string}  payload.campaign_key
+ * @param {number}  [payload.current_cap]
+ * @param {number}  [payload.requested_cap]
+ * @param {string}  [payload.status]        - "applied" | "pending"
+ * @param {string}  [payload.recommendation]
+ * @param {string}  [payload.risk_level]    - "low" | "medium" | "high"
+ * @returns {object}
+ */
+export function buildCampaignScaleEmbed(payload = {}) {
+  const {
+    campaign_key   = "",
+    current_cap    = null,
+    requested_cap  = null,
+    status         = "applied",
+    recommendation = "",
+    risk_level     = "low",
+  } = payload;
+
+  const color =
+    risk_level === "high"   ? COLOR.red    :
+    risk_level === "medium" ? COLOR.yellow :
+    COLOR.green;
+
+  const title = status === "applied" ? "📈 Scale Applied" : "📈 Scale Request";
+
+  return {
+    title,
+    color,
+    timestamp: now(),
+    fields: [
+      f("Campaign",       String(campaign_key).slice(0, 80),                false),
+      f("Current Cap",    current_cap   != null ? String(current_cap)   : "—", true),
+      f("Requested Cap",  requested_cap != null ? String(requested_cap) : "—", true),
+      f("Recommendation", String(recommendation).slice(0, 200),             false),
+      f("Risk Level",     String(risk_level).toUpperCase(),                 true),
+      f("Status",         String(status).toUpperCase(),                     true),
+    ],
+    footer: { text: status === "pending" ? "Owner approval required" : "Scale processed" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildTerritoryMapEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Territory map embed — shows all campaign_targets grouped by market.
+ *
+ * @param {object}   payload
+ * @param {object}   payload.grouped  - { [market]: campaign_targets_row[] }
+ * @param {boolean}  [payload.empty]  - true when no campaigns exist
+ * @returns {object}
+ */
+export function buildTerritoryMapEmbed(payload = {}) {
+  const { grouped = {}, empty = false } = payload;
+
+  if (empty || Object.keys(grouped).length === 0) {
+    return {
+      title:       "🗺️ Territory Map",
+      description: 'No territories unlocked yet. Create one with `/campaign create`.',
+      color:       COLOR.gray,
+      timestamp:   now(),
+      footer:      { text: "Targeting Console v1" },
+    };
+  }
+
+  const STATUS_ICONS = { active: "🟢", draft: "🟡", paused: "🔴" };
+
+  const all_rows   = Object.values(grouped).flat();
+  const total      = all_rows.length;
+  const active     = all_rows.filter((r) => r.status === "active").length;
+  const draft      = all_rows.filter((r) => r.status === "draft").length;
+  const paused     = all_rows.filter((r) => r.status === "paused").length;
+
+  const fields = Object.entries(grouped)
+    .slice(0, 10)
+    .map(([market, rows]) => {
+      const summary = rows
+        .map((r) => {
+          const icon = STATUS_ICONS[r.status] ?? "⚪";
+          return `${icon} ${String(r.asset_type ?? "").toUpperCase()} / ${String(r.strategy ?? "")} (cap: ${r.daily_cap ?? "—"})`;
+        })
+        .join("\n");
+      return f(String(market).slice(0, 80), summary.slice(0, 1024));
+    });
+
+  return {
+    title:       "🗺️ Territory Map",
+    description: `**${total}** territories across **${Object.keys(grouped).length}** markets  |  Active: **${active}**  |  Draft: **${draft}**  |  Paused: **${paused}**`,
+    color:       active > 0 ? COLOR.green : draft > 0 ? COLOR.blue : COLOR.gray,
+    timestamp:   now(),
+    fields:      fields.slice(0, 25),
+    footer:      { text: "Targeting Console v1" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildConquestEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Empire-level conquest overview embed.
+ *
+ * @param {object}  payload
+ * @param {number}  [payload.active]
+ * @param {number}  [payload.draft]
+ * @param {number}  [payload.paused]
+ * @param {number}  [payload.total_daily_cap]
+ * @param {number}  [payload.markets_unlocked]
+ * @param {string}  [payload.last_scan]         - ISO date string
+ * @param {string}  [payload.recommended_next_move]
+ * @returns {object}
+ */
+export function buildConquestEmbed(payload = {}) {
+  const {
+    active                = 0,
+    draft                 = 0,
+    paused                = 0,
+    total_daily_cap       = 0,
+    markets_unlocked      = 0,
+    last_scan             = null,
+    recommended_next_move = "",
+  } = payload;
+
+  const total        = active + draft + paused;
+  const color        = active > 0 ? COLOR.green : draft > 0 ? COLOR.blue : COLOR.gray;
+  const last_scan_str = last_scan
+    ? new Date(last_scan).toISOString().slice(0, 10)
+    : "Never";
+
+  return {
+    title:     "⚔️ Conquest Overview",
+    color,
+    timestamp: now(),
+    fields: [
+      f("Active Campaigns",  String(active),          true),
+      f("Draft Campaigns",   String(draft),           true),
+      f("Paused Campaigns",  String(paused),          true),
+      f("Total Daily Cap",   String(total_daily_cap), true),
+      f("Markets Unlocked",  String(markets_unlocked),true),
+      f("Total Campaigns",   String(total),           true),
+      f("Last Scan",         last_scan_str,           true),
+      f("Next Move",         String(recommended_next_move).slice(0, 200), false),
+    ],
+    footer: { text: "Empire Intelligence — Targeting Console v1" },
+  };
+}

@@ -391,12 +391,215 @@ const COMMANDS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Targeting Console command definitions (Targeting Console v1)
+// ---------------------------------------------------------------------------
+
+const ASSET_CHOICES = [
+  { name: "SFR",             value: "sfr"             },
+  { name: "Multifamily",     value: "multifamily"     },
+  { name: "Duplex",          value: "duplex"          },
+  { name: "Vacant",          value: "vacant"          },
+  { name: "Absentee",        value: "absentee"        },
+  { name: "Probate",         value: "probate"         },
+  { name: "Tax Delinquent",  value: "tax_delinquent"  },
+  { name: "Corporate Owner", value: "corporate_owner" },
+  { name: "High Equity",     value: "high_equity"     },
+  { name: "Free & Clear",    value: "free_and_clear"  },
+];
+
+const STRATEGY_CHOICES = [
+  { name: "Cash",                   value: "cash"                   },
+  { name: "Creative",               value: "creative"               },
+  { name: "Multifamily Underwrite", value: "multifamily_underwrite" },
+];
+
+const TARGETING_COMMANDS = [
+  // ── /target ────────────────────────────────────────────────────────────
+  {
+    name:        "target",
+    description: "Market targeting operations (SMS Ops, Tech Ops, or Owner)",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "scan",
+        description: "Dry-run scan a target territory — no SMS sent",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "market",
+            description: "Market to scan (e.g. Los Angeles, Miami)",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "asset",
+            description: "Asset type",
+            required:    true,
+            choices:     ASSET_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "strategy",
+            description: "Acquisition strategy",
+            required:    true,
+            choices:     STRATEGY_CHOICES,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "limit",
+            description: "Max owners to evaluate (default 25, max 500)",
+            required:    false,
+            min_value:   1,
+            max_value:   500,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "scan_limit",
+            description: "Max Podio owners to scan (default 100, max 5000)",
+            required:    false,
+            min_value:   1,
+            max_value:   5000,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "source_view_name",
+            description: "Podio view name override (auto-derived if omitted)",
+            required:    false,
+          },
+        ],
+      },
+    ],
+  },
+
+  // ── /territory ─────────────────────────────────────────────────────────
+  {
+    name:        "territory",
+    description: "Territory map and campaign overview",
+    options: [
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "map",
+        description: "Show all territories grouped by market and status",
+      },
+    ],
+  },
+
+  // ── /conquest ──────────────────────────────────────────────────────────
+  {
+    name:        "conquest",
+    description: "Empire-level campaign overview — active, draft, paused, and recommended next move",
+  },
+];
+
+// Extend /campaign with create, inspect, scale (preserve pause/resume).
+const campaign_cmd = COMMANDS.find((c) => c.name === "campaign");
+if (campaign_cmd) {
+  campaign_cmd.options.push(
+    {
+      type:        OPT.SUB_COMMAND,
+      name:        "create",
+      description: "Create or update a campaign target (SMS Ops, Tech Ops, or Owner)",
+      options: [
+        {
+          type:        OPT.STRING,
+          name:        "name",
+          description: "Human-readable campaign name",
+          required:    true,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "market",
+          description: "Market (e.g. Los Angeles, Miami)",
+          required:    true,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "asset",
+          description: "Asset type",
+          required:    true,
+          choices:     ASSET_CHOICES,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "strategy",
+          description: "Acquisition strategy",
+          required:    true,
+          choices:     STRATEGY_CHOICES,
+        },
+        {
+          type:        OPT.INTEGER,
+          name:        "daily_cap",
+          description: "Max messages per day (default 50)",
+          required:    false,
+          min_value:   1,
+          max_value:   10000,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "source_view_name",
+          description: "Podio view name override (auto-derived if omitted)",
+          required:    false,
+        },
+        {
+          type:        OPT.STRING,
+          name:        "language",
+          description: "Message language (default auto)",
+          required:    false,
+          choices: [
+            { name: "Auto",    value: "auto"    },
+            { name: "English", value: "English" },
+            { name: "Spanish", value: "Spanish" },
+          ],
+        },
+      ],
+    },
+    {
+      type:        OPT.SUB_COMMAND,
+      name:        "inspect",
+      description: "Inspect a campaign target — status, cap, last scan, last launch",
+      options: [
+        {
+          type:        OPT.STRING,
+          name:        "campaign",
+          description: "Campaign key (e.g. los_angeles_sfr_cash)",
+          required:    true,
+        },
+      ],
+    },
+    {
+      type:        OPT.SUB_COMMAND,
+      name:        "scale",
+      description: "Update the daily cap for a campaign (>100 requires Owner/Tech Ops approval for SMS Ops)",
+      options: [
+        {
+          type:        OPT.STRING,
+          name:        "campaign",
+          description: "Campaign key (e.g. los_angeles_sfr_cash)",
+          required:    true,
+        },
+        {
+          type:        OPT.INTEGER,
+          name:        "daily_cap",
+          description: "New daily message cap",
+          required:    true,
+          min_value:   1,
+          max_value:   10000,
+        },
+      ],
+    }
+  );
+}
+
+// Final command set = existing + targeting console additions.
+const ALL_COMMANDS = [...COMMANDS, ...TARGETING_COMMANDS];
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
 const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/guilds/${GUILD_ID}/commands`;
 
-console.log(`Registering ${COMMANDS.length} commands for guild ${GUILD_ID} …`);
+console.log(`Registering ${ALL_COMMANDS.length} commands for guild ${GUILD_ID} …`);
 
 let response;
 try {
@@ -406,7 +609,7 @@ try {
       "Authorization": `Bot ${BOT_TOKEN}`,
       "Content-Type":  "application/json",
     },
-    body: JSON.stringify(COMMANDS),
+    body: JSON.stringify(ALL_COMMANDS),
   });
 } catch (err) {
   console.error("Network error calling Discord API:", err.message);
