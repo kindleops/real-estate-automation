@@ -8,6 +8,7 @@ import {
   expandSelectorUseCases,
   isDealStrategyCompatible,
   isExplicitFirstTouch,
+  isStage1Template,
   normalizeSelectorText,
   readExplicitFirstTouchValue,
   normalizeTemplateDealStrategy,
@@ -37,6 +38,15 @@ function clean(value) {
 
 function uniq(values = []) {
   return [...new Set(values.filter(Boolean))];
+}
+
+/**
+ * Strip HTML tags and trim whitespace.  Used to detect whether a template text
+ * field is genuinely empty even when Podio returns HTML-wrapped values such as
+ * "<p></p>" or "<br/>".
+ */
+function stripHtmlForEmptyCheck(value) {
+  return clean(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function hashString(value) {
@@ -167,6 +177,11 @@ function buildRemoteFilterRequests({
         active: active_value,
       });
     }
+    // New-schema: is-ownership-check = Yes (replaces is-first-touch in newer Podio apps)
+    addRequest("touch_one_ownership_check_signal", {
+      "is-ownership-check": "Yes",
+      active: active_value,
+    });
     addRequest("touch_one_use_case_template", {
       "use-case-2": requested_use_case,
       active: active_value,
@@ -448,7 +463,7 @@ function evaluateTouchOnePrefetchCandidate(template = null, selector_input = nul
     prefetch_rejection_reasons.push("use_case_mismatch");
   }
 
-  if (!isExplicitFirstTouch(template)) {
+  if (!isExplicitFirstTouch(template) && !isStage1Template(template)) {
     prefetch_rejection_reasons.push("is_first_touch_mismatch");
   }
 
@@ -560,7 +575,7 @@ function evaluateTemplateCandidate(
     rejection_reasons.push("deal_strategy_mismatch");
   }
 
-  if (!clean(template?.text)) {
+  if (!stripHtmlForEmptyCheck(template?.text)) {
     operational_rejection_reasons.push("empty_text");
   }
 
@@ -1251,13 +1266,68 @@ export async function loadTemplateCandidates({
   };
 
   if (strict_touch_one_podio_only) {
+    // ── Rich Stage 1 diagnostics ─────────────────────────────────────────────
+    // When no valid Stage 1 template is found, attach per-template rejection
+    // reasons so production log triage can identify the exact mismatch without
+    // having to re-run the feeder.
+    const all_raw_candidates = Array.isArray(last_prefetch_audit_payload?.prefetch_candidates)
+      ? last_prefetch_audit_payload.prefetch_candidates
+      : [];
+    const all_evaluated = Array.isArray(last_audit_payload?.candidates)
+      ? last_audit_payload.candidates
+      : [];
+
+    const active_count = all_raw_candidates.filter(
+      (c) => String(c?.active ?? "").trim().toLowerCase() === "yes"
+    ).length;
+
+    const language_candidate_count = all_evaluated.filter((c) => {
+      const rej = Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [];
+      return !rej.includes("inactive") && !rej.includes("use_case_mismatch");
+    }).length;
+
+    const stage1_signal_count = all_evaluated.filter((c) => {
+      const is_stage1 = isStage1Template(c);
+      const rej = Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [];
+      return is_stage1 && !rej.includes("inactive");
+    }).length;
+
+    const ownership_check_count = all_evaluated.filter((c) => {
+      const rej = Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [];
+      const op_rej = Array.isArray(c?.operational_rejection_reasons)
+        ? c.operational_rejection_reasons
+        : [];
+      return rej.length === 0 && op_rej.length === 0;
+    }).length;
+
+    const first_10_ids = all_raw_candidates.slice(0, 10).map((c) => c?.template_id ?? null);
+
+    const first_10_rejection_reasons = all_evaluated.slice(0, 10).map((c) => ({
+      template_id: c?.template_id ?? null,
+      rejection_reasons: Array.isArray(c?.rejection_reasons) ? c.rejection_reasons : [],
+      operational_rejection_reasons: Array.isArray(c?.operational_rejection_reasons)
+        ? c.operational_rejection_reasons
+        : [],
+    }));
+
+    const stage1_extended_diagnostics = {
+      templates_loaded_count: all_raw_candidates.length,
+      active_templates_count: active_count,
+      language_candidate_count,
+      stage_1_signal_candidate_count: stage1_signal_count,
+      ownership_check_candidate_count: ownership_check_count,
+      first_10_template_ids: first_10_ids,
+      first_10_rejection_reasons,
+    };
+
     warn("template.touch_one_template_missing", {
       reason: "NO_STAGE_1_TEMPLATE_FOUND",
       ...failure_diagnostics,
+      stage1_extended_diagnostics,
     });
     const err = new Error("NO_STAGE_1_TEMPLATE_FOUND");
     err.code = "NO_STAGE_1_TEMPLATE_FOUND";
-    err.diagnostics = failure_diagnostics;
+    err.diagnostics = { ...failure_diagnostics, stage1_extended_diagnostics };
     throw err;
   }
 

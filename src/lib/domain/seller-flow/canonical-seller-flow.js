@@ -66,6 +66,12 @@ const FOLLOW_UP_STAGE_MAP = Object.freeze({
 });
 
 const LEGACY_USE_CASE_ALIASES = Object.freeze({
+  // ── Stage 1 / first-touch aliases ───────────────────────────────────────────
+  // The Podio Templates app uses "First Message" as the Use Case label for
+  // cold outbound Stage 1 ownership-check templates in some schema revisions.
+  // Map it directly so canonical resolution never depends on variant-group lookup.
+  "First Message": SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+  // ── Offer-reveal / closing aliases ──────────────────────────────────────────
   offer_reveal: SELLER_FLOW_STAGES.OFFER_REVEAL_CASH,
   close_ask_soft: SELLER_FLOW_STAGES.CLOSE_HANDOFF,
   can_you_do_better: SELLER_FLOW_STAGES.NARROW_RANGE,

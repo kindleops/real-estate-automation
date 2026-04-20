@@ -231,6 +231,9 @@ const FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS = new Set([
   "Stage 1 — Ownership Check",
   "Stage 1 Ownership Check",
   "Stage 1 Ownership Confirmation",
+  // "Stage 1 — Identity / Trust" templates are first-touch cold outbounds that
+  // use an introduction / identity framing rather than a direct ownership question.
+  "Stage 1 — Identity / Trust",
 ]);
 
 const TOUCH_ONE_STAGE = "Cold Outbound";
@@ -1216,11 +1219,26 @@ function isValidTouchOneTemplate(template = null) {
     clean(template?.variant_group) || clean(template?.stage_label) || null
   );
 
-  return (
-    safeCategoryEquals(template?.active, "Yes") &&
-    resolved_use_case === TOUCH_ONE_USE_CASE &&
-    safeCategoryEquals(resolved_is_first_touch, "Yes")
-  );
+  if (!safeCategoryEquals(template?.active, "Yes")) return false;
+  if (resolved_use_case !== TOUCH_ONE_USE_CASE) return false;
+
+  // Signal 1: legacy is-first-touch field explicitly = Yes
+  if (safeCategoryEquals(resolved_is_first_touch, "Yes")) return true;
+
+  // Signal 2: new-schema is-ownership-check field = Yes
+  const is_ownership_check_val =
+    clean(template?.is_ownership_check) ||
+    clean(getCategoryValue(template?.raw, "is-ownership-check", null)) ||
+    null;
+  if (safeCategoryEquals(is_ownership_check_val, "Yes")) return true;
+
+  // Signal 3: variant_group is a known Stage 1 ownership variant (set or contains "Stage 1")
+  const vg = clean(template?.variant_group || getCategoryValue(template?.raw, "stage", null));
+  if (FIRST_TOUCH_OWNERSHIP_VARIANT_GROUPS.has(vg)) return true;
+  const vg_normalized = lower(vg);
+  if (vg_normalized.includes("stage 1") && !vg_normalized.includes("follow")) return true;
+
+  return false;
 }
 
 function buildFeederValidationError(code, details = {}) {

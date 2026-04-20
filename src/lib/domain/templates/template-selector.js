@@ -329,6 +329,13 @@ export function normalizeTemplateTouchType(template = null) {
     return TEMPLATE_TOUCH_TYPES.FOLLOW_UP;
   }
 
+  // Stage 1 / first-touch signals: checked BEFORE is_follow_up so that
+  // ownership-check templates are correctly identified even when the legacy
+  // is-first-touch field is absent from the Podio app schema.  When the
+  // is_first_touch field is explicitly "No" the check above already returned
+  // FOLLOW_UP, so we only reach here when is_first_touch is unset/null.
+  if (isStage1Template(template)) return TEMPLATE_TOUCH_TYPES.FIRST_TOUCH;
+
   const is_follow_up = readTemplateValue(
     template,
     {
@@ -389,6 +396,118 @@ export function readExplicitFirstTouchValue(template = null) {
 
 export function isExplicitFirstTouch(template = null) {
   return isTruthyYes(readExplicitFirstTouchValue(template));
+}
+
+/**
+ * Returns true when a template carries any Stage 1 / first-touch ownership-check
+ * signal according to the live Podio Templates app schema.
+ *
+ * Checked signals (any one is sufficient):
+ *   1. is-ownership-check field = "Yes"
+ *   2. use-case / use-case-2 == "ownership_check"
+ *   3. use-case / use-case-2 == "First Message" (Podio label used in some schema versions)
+ *   4. canonical use_case resolves to "ownership_check"
+ *   5. variant_group / stage field contains "Stage 1" (and does NOT contain "follow")
+ *   6. variant_group / stage field contains "Ownership Confirmation" (no follow)
+ *   7. property-type or category field contains "Ownership Verification"
+ *   8. secondary category contains "Outbound Initial"
+ *
+ * HTML-wrapped Podio text values are tolerated — text is normalised before matching.
+ * Does NOT require stage_code or is_first_touch; absent fields are simply skipped.
+ * This check is ONLY applied to Stage 1 signals; later-stage logic is unchanged.
+ */
+export function isStage1Template(template = null) {
+  if (!template) return false;
+
+  // 1. Explicit is-ownership-check = Yes (new Podio schema field)
+  const is_ownership_check_val = readTemplateValue(
+    template,
+    {
+      direct_values: [template?.is_ownership_check],
+      raw_external_ids: ["is-ownership-check"],
+      raw_labels: ["Is Ownership Check"],
+    },
+    null
+  );
+  if (isTruthyYes(is_ownership_check_val)) return true;
+
+  // 2–3. use-case field is "ownership_check" or "First Message"
+  const raw_uc = normalizeSelectorText(
+    readTemplateValue(
+      template,
+      {
+        direct_values: [
+          template?.selector_use_case,
+          template?.use_case_label,
+          template?.use_case,
+          template?.canonical_routing_slug,
+        ],
+      },
+      null
+    ) ?? ""
+  );
+  if (raw_uc === normalizeSelectorText("ownership_check")) return true;
+  if (raw_uc === normalizeSelectorText("First Message")) return true;
+
+  // 4. canonical use_case resolves to "ownership_check"
+  const uc_for_canonical =
+    readTemplateValue(
+      template,
+      {
+        direct_values: [
+          template?.selector_use_case,
+          template?.use_case_label,
+          template?.use_case,
+          template?.canonical_routing_slug,
+        ],
+      },
+      null
+    ) ?? null;
+  const canonical = canonicalizeTemplateUseCase(
+    uc_for_canonical,
+    template?.variant_group || template?.stage_label || null
+  );
+  if (normalizeSelectorText(canonical ?? "") === normalizeSelectorText("ownership_check")) return true;
+
+  // 5–6. Variant group / stage label contains Stage 1 markers (exclude follow-ups)
+  const vg = normalizeSelectorText(
+    clean(template?.variant_group || template?.stage_label)
+  );
+  if (vg.includes("stage 1") && !vg.includes("follow")) return true;
+  if (vg.includes("ownership confirmation") && !vg.includes("follow")) return true;
+
+  // 7. property-type or category contains "Ownership Verification"
+  const pt_val = normalizeSelectorText(
+    readTemplateValue(
+      template,
+      {
+        direct_values: [template?.property_type_scope, template?.category_primary],
+        raw_external_ids: ["property-type", "category"],
+        raw_labels: ["Category", "Property Type"],
+      },
+      null
+    ) ?? ""
+  );
+  if (pt_val.includes("ownership verification")) return true;
+
+  // 8. Secondary category contains "Outbound Initial" or "Identity / Trust"
+  const sec_candidates = [];
+  if (template?.category_secondary) sec_candidates.push(template.category_secondary);
+  // Also check raw fields — Podio may store this in "category" or "category-2"
+  const raw_item = template?.raw || null;
+  if (raw_item) {
+    for (const ext_id of ["category", "category-2"]) {
+      const fv = getCategoryValue(raw_item, ext_id, null);
+      if (fv) sec_candidates.push(fv);
+    }
+  }
+  for (const val of sec_candidates) {
+    const nv = normalizeSelectorText(val);
+    if (nv.includes("outbound initial")) return true;
+    if (nv.includes("identity") && nv.includes("trust")) return true;
+  }
+
+  return false;
 }
 
 export function normalizePropertyTypeScope(value = null) {
