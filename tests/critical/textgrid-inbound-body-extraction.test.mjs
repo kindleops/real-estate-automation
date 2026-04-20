@@ -11,6 +11,8 @@
  *  5. Form-urlencoded payload with Body writes message_body
  *  6. Missing body sets body_missing = true in metadata and does not crash
  *  7. webhook_log is written before logInboundMessageEvent when from is missing
+ *  8. Production-realistic full Twilio/TextGrid form payload extracts body end-to-end
+ *  9. Production-realistic form payload: logInboundMessageEvent writes correct message_body
  */
 
 import test from "node:test";
@@ -195,4 +197,123 @@ test("webhook_log writes before logInboundMessageEvent even when from is missing
   assert.ok(call_order.includes("webhook_log"), "webhook_log must be written");
   assert.ok(!call_order.includes("message_event"), "message_event must NOT be written when from is missing");
   assert.equal(call_order[0], "webhook_log", "webhook_log must be first call");
+});
+
+// ── 8. Production-realistic full Twilio/TextGrid form payload ───────────────
+//   Uses the exact field set TextGrid sends in production (Twilio-compatible).
+//   Ensures the normalizer and end-to-end route both extract the body correctly.
+
+test("production-realistic full Twilio/TextGrid form payload extracts body end-to-end", async (t) => {
+  process.env.SUPABASE_URL = "https://fake.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+
+  let captured_event = null;
+
+  __setTextgridInboundRouteTestDeps({
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    maybeHandleBuyerTextgridInboundImpl: async () => ({ ok: true, matched: false }),
+    handleTextgridInboundImpl: async () => ({ ok: true }),
+    verifyTextgridWebhookRequestImpl: () => ({ ok: true, required: false }),
+    writeWebhookLogImpl: async () => {},
+    logSupabaseInboundMessageEventImpl: async (payload) => {
+      captured_event = payload;
+    },
+  });
+
+  t.after(() => {
+    __resetTextgridInboundRouteTestDeps();
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  });
+
+  // Exact Twilio/TextGrid production field set (form-urlencoded)
+  const response = await postTextgridInbound(
+    new Request(INBOUND_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        AccountSid: "ACtest123456789",
+        ApiVersion: "2010-04-01",
+        Body: "Yes I want to sell",
+        From: "+15550001111",
+        FromCity: "CHICAGO",
+        FromCountry: "US",
+        FromState: "IL",
+        FromZip: "60601",
+        MessageSid: "SM_PROD_001",
+        NumMedia: "0",
+        NumSegments: "1",
+        SmsMessageSid: "SM_PROD_001",
+        SmsSid: "SM_PROD_001",
+        SmsStatus: "received",
+        To: "+15559990000",
+        ToCity: "NEW YORK",
+        ToCountry: "US",
+        ToState: "NY",
+        ToZip: "10001",
+      }),
+    })
+  );
+
+  assert.equal(response.status, 200, "route should return 200 for valid production payload");
+  assert.ok(captured_event, "logSupabaseInboundMessageEventImpl should have been called");
+  assert.equal(
+    captured_event?.message_body,
+    "Yes I want to sell",
+    "message_body must be extracted from Body field"
+  );
+  assert.equal(captured_event?.body_source, "Body", "body_source must be 'Body'");
+  assert.equal(captured_event?.message, "Yes I want to sell", "message field must match");
+  assert.ok(
+    captured_event?.from?.includes("15550001111"),
+    "from phone must be normalized from From field"
+  );
+});
+
+// ── 9. logInboundMessageEvent with production-normalized payload ─────────────
+//   Simulates what the route passes to logInboundMessageEvent after normalization:
+//   payload has .message, .message_body, .body_source set by the normalizer.
+
+test("logInboundMessageEvent correctly stores body from normalizer output", async () => {
+  // Build the normalized payload exactly as the route does
+  const normalizer_output = normalizeTextgridInboundPayload(
+    {
+      AccountSid: "ACtest123456789",
+      ApiVersion: "2010-04-01",
+      Body: "Interested in selling",
+      From: "+15550001111",
+      FromCity: "CHICAGO",
+      FromCountry: "US",
+      FromState: "IL",
+      FromZip: "60601",
+      MessageSid: "SM_PROD_002",
+      NumMedia: "0",
+      NumSegments: "1",
+      SmsMessageSid: "SM_PROD_002",
+      SmsSid: "SM_PROD_002",
+      SmsStatus: "received",
+      To: "+15559990000",
+    },
+    new Headers()
+  );
+
+  // Verify normalizer output first
+  assert.equal(normalizer_output.message, "Interested in selling");
+  assert.equal(normalizer_output.message_body, "Interested in selling");
+  assert.equal(normalizer_output.body_source, "Body");
+
+  // Now verify logInboundMessageEvent produces the correct event
+  let built_event = null;
+  await logInboundMessageEvent(normalizer_output, {
+    logInboundMessageEvent: (event) => { built_event = event; return event; },
+    now: "2026-04-19T00:00:00.000Z",
+  });
+
+  assert.ok(built_event, "logInboundMessageEvent must call the injected callback");
+  assert.equal(built_event.message_body, "Interested in selling", "message_body stored correctly");
+  assert.equal(built_event.character_count, "Interested in selling".length);
+  assert.equal(built_event.metadata.body_source, "Body");
+  assert.equal(built_event.metadata.body_missing, undefined, "body_missing must not be set");
+  assert.equal(built_event.direction, "inbound");
+  assert.equal(built_event.event_type, "inbound_sms");
 });
