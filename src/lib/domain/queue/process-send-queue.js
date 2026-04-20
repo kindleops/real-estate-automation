@@ -34,6 +34,7 @@ import {
   writeOutboundSuccessMessageEvent,
 } from "@/lib/supabase/sms-engine.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
+import { syncOfferRecord } from "@/lib/domain/offers/sync-offer-record.js";
 
 const QUEUE_TABLE = "send_queue";
 
@@ -1225,6 +1226,32 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
         queue_row_id,
         textgrid_number_id: number_selection?.selected?.id || null,
         message: number_usage_error?.message || "Unknown number usage update error",
+      });
+    }
+
+    // Offer record sync — non-blocking bookkeeping step.
+    // syncOfferRecord decides whether to skip (Stage 1, underwriting routes,
+    // or messages that do not contain an actual snapshot-backed offer amount).
+    // It never throws and must never block the send pipeline.
+    try {
+      const sync_offer = deps.syncOfferRecord ?? syncOfferRecord;
+      const offer_sync = await sync_offer({
+        queue_row,
+        outbound_event_id: outbound_event?.item_id ?? null,
+        now,
+      });
+      if (offer_sync && !offer_sync.ok && !offer_sync.skipped) {
+        bookkeeping_errors.push(
+          `offer_record_sync_failed:${offer_sync.error || "unknown"}`
+        );
+      }
+    } catch (offer_sync_error) {
+      bookkeeping_errors.push(
+        `offer_record_sync_failed:${offer_sync_error?.message || "unknown_error"}`
+      );
+      warn("queue.offer_record_sync_failed", {
+        queue_row_id,
+        message: offer_sync_error?.message || "Unknown offer sync error",
       });
     }
 

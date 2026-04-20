@@ -159,6 +159,12 @@ export function normalizeSendQueueRow(row) {
     delivered_at: safe_row.delivered_at || null,
     failed_reason: safe_row.failed_reason || null,
     delivery_confirmed: safe_row.delivery_confirmed || null,
+    // Offer record sync tracking (added 2026-04-22)
+    cash_offer_snapshot_id:    safe_row.cash_offer_snapshot_id    || null,
+    offer_podio_item_id:       safe_row.offer_podio_item_id       || null,
+    offer_record_sync_status:  safe_row.offer_record_sync_status  || null,
+    offer_record_sync_error:   safe_row.offer_record_sync_error   || null,
+    offer_record_synced_at:    safe_row.offer_record_synced_at    || null,
   };
 }
 
