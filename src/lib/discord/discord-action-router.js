@@ -74,6 +74,8 @@ import {
   buildWireForecastEmbed,
   buildWireDealEmbed,
   buildWireReconcileEmbed,
+  buildWireSetupRequiredEmbed,
+  buildDailyBriefingEmbed,
 } from "./discord-embed-factory.js";
 import {
   missionButtons,
@@ -112,6 +114,7 @@ import {
 } from "../domain/wires/wire-forecast.js";
 import {
   deferredPublicResponse,
+  deferredEphemeralResponse,
   editOriginalInteractionResponse,
 } from "./discord-followups.js";
 import { info, warn, error as logError } from "../logging/logger.js";
@@ -120,11 +123,11 @@ import { info, warn, error as logError } from "../logging/logger.js";
 // Test dependency injection
 // ---------------------------------------------------------------------------
 
-let _router_deps = { supabase_override: null, callInternal_override: null };
+let _router_deps = { supabase_override: null, callInternal_override: null, editInteractionResponse_override: null };
 
 /**
  * Override internal dependencies for unit testing.
- * @param {{ supabase_override?: object, callInternal_override?: Function }} overrides
+ * @param {{ supabase_override?: object, callInternal_override?: Function, editInteractionResponse_override?: Function }} overrides
  */
 export function __setActionRouterDeps(overrides) {
   _router_deps = { ..._router_deps, ...overrides };
@@ -132,12 +135,20 @@ export function __setActionRouterDeps(overrides) {
 
 /** Reset injected dependencies to production defaults. */
 export function __resetActionRouterDeps() {
-  _router_deps = { supabase_override: null, callInternal_override: null };
+  _router_deps = { supabase_override: null, callInternal_override: null, editInteractionResponse_override: null };
 }
 
 /** Return the active Supabase client (real or injected mock). */
 function getDb() {
   return _router_deps.supabase_override ?? supabase;
+}
+
+/** Edit an interaction response, using override if injected (for testing). */
+async function doEditInteractionResponse(opts) {
+  if (_router_deps.editInteractionResponse_override) {
+    return _router_deps.editInteractionResponse_override(opts);
+  }
+  return editOriginalInteractionResponse(opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,8 +171,71 @@ const FEEDER_HARD_CAP = 200;
 const APPROVE_PREFIX = "discord_approve:";
 const REJECT_PREFIX  = "discord_reject:";
 
-// ---------------------------------------------------------------------------
-// Internal route caller
+/**
+ * Returns true when a Supabase/PostgREST error indicates the target table
+ * does not exist (migration not applied or schema cache stale).
+ * Never throws.
+ */
+function isTableMissingError(err) {
+  if (!err) return false;
+  const code = String(err.code ?? "");
+  const msg  = String(err.message ?? "").toLowerCase();
+  return (
+    code === "42P01"    ||  // PostgreSQL undefined_table
+    code === "PGRST116" ||  // PostgREST "not found"
+    code === "PGRST204" ||  // PostgREST column/schema miss
+    code === "PGRST205" ||  // PostgREST schema cache relationship miss
+    msg.includes("does not exist") ||
+    (msg.includes("relation") && msg.includes("not exist")) ||
+    msg.includes("schema cache")
+  );
+}
+
+/**
+ * Immediately returns a deferred ephemeral response (type 5 + flags:64).
+ * Fires the async work in a floating Promise, then edits the original
+ * interaction response with the result or a sanitised error embed.
+ * Never leaks raw Supabase errors, stack traces, or secrets.
+ *
+ * @param {object}   interaction - Raw Discord interaction object
+ * @param {Function} asyncFn    - Async work; must resolve to { embeds?, components?, content? }
+ * @param {string}   label      - Short name used for logging (cockpit/forecast/reconcile/deal)
+ * @returns {{ type: 5, data: { flags: 64 } }}
+ */
+function runDeferredWiresHandler(interaction, asyncFn, label) {
+  const app_id  = String(process.env.DISCORD_APPLICATION_ID ?? "");
+  const token   = interaction.token;
+  const user_id = interaction.member?.user?.id ?? "unknown";
+
+  info("discord.wires.deferred",         { label, user_id });
+  info(`discord.wires.${label}.started`, { user_id });
+
+  Promise.resolve()
+    .then(async () => {
+      let payload;
+      try {
+        payload = await asyncFn();
+        info(`discord.wires.${label}.completed`, { user_id });
+      } catch (err) {
+        logError(`discord.wires.${label}.failed`, {});
+        payload = isTableMissingError(err)
+          ? { embeds: [buildWireSetupRequiredEmbed()], components: wireCockpitButtons() }
+          : { content: `Wire ${label} unavailable. Check server logs.`, embeds: [] };
+      }
+      await doEditInteractionResponse({
+        applicationId:    app_id,
+        token,
+        content:          payload.content    ?? "",
+        embeds:           payload.embeds     ?? [],
+        components:       payload.components ?? [],
+        flags:            64,
+        allowed_mentions: { parse: [] },
+      }).catch(() => {});
+    })
+    .catch(() => {});
+
+  return deferredEphemeralResponse();
+}
 // ---------------------------------------------------------------------------
 
 /**
@@ -2080,21 +2154,14 @@ async function handleReplayBatch({ options_array, context }) {
 // ---------------------------------------------------------------------------
 
 /**
- * handleWiresCockpit — show wire command center summary
+ * handleWiresCockpit — show wire command center summary (deferred)
  */
-async function handleWiresCockpit({ options_array, context }) {
+function handleWiresCockpit({ options_array, context, interaction }) {
   const days = options_array?.find(o => o.name === "days")?.value ?? 7;
-
-  try {
+  return runDeferredWiresHandler(interaction, async () => {
     const summary = await getWireSummary({ days, db: getDb() });
-    const embed = buildWireCockpitEmbed({
-      ...summary,
-      days: String(days),
-    });
-    return cinematicMessage([embed], wireCockpitButtons());
-  } catch (err) {
-    return errorResponse(`Wire cockpit unavailable: ${err?.message ?? "error"}`);
-  }
+    return { embeds: [buildWireCockpitEmbed({ ...summary, days: String(days) })], components: wireCockpitButtons() };
+  }, "cockpit");
 }
 
 /**
@@ -2202,85 +2269,58 @@ async function handleWiresCleared({ options_array, context }) {
 }
 
 /**
- * handleWiresForecast — show forecast of expected wires
+ * handleWiresForecast — show forecast of expected wires (deferred)
  */
-async function handleWiresForecast({ options_array, context }) {
+function handleWiresForecast({ options_array, context, interaction }) {
   const days = options_array?.find(o => o.name === "days")?.value ?? 14;
-
-  try {
+  return runDeferredWiresHandler(interaction, async () => {
     const forecast = await buildWireForecast({ days, db: getDb() });
-    const embed = buildWireForecastEmbed(forecast);
-    return cinematicMessage([embed], wireCockpitButtons());
-  } catch (err) {
-    return errorResponse(`Wire forecast unavailable: ${err?.message ?? "error"}`);
-  }
+    return { embeds: [buildWireForecastEmbed(forecast)], components: wireCockpitButtons() };
+  }, "forecast");
 }
 
 /**
- * handleWiresDeal — show wires linked to deal/property/closing
+ * handleWiresDeal — show wires linked to deal/property/closing (deferred)
  */
-async function handleWiresDeal({ options_array, context }) {
+function handleWiresDeal({ options_array, context, interaction }) {
   const deal_key = options_array?.find(o => o.name === "deal_key")?.value ?? "";
+  if (!deal_key) return errorResponse("deal_key is required.");
 
-  if (!deal_key) {
-    return errorResponse("deal_key is required.");
-  }
-
-  try {
-    const wires = await listWireEvents({
-      db: getDb(),
-      limit: 100,
-    });
-
-    // Filter wires by deal_key or property_id
+  return runDeferredWiresHandler(interaction, async () => {
+    const wires = await listWireEvents({ db: getDb(), limit: 100 });
     const filtered_wires = wires.filter(w =>
-      w.deal_key === deal_key || String(w.property_id) === deal_key || String(w.closing_id) === deal_key
+      w.deal_key === deal_key ||
+      String(w.property_id) === deal_key ||
+      String(w.closing_id) === deal_key
     );
-
-    const embed = buildWireDealEmbed({
-      deal_key,
-      wires: filtered_wires,
-    });
-    return cinematicMessage([embed]);
-  } catch (err) {
-    return errorResponse(`Deal wire lookup failed: ${err?.message ?? "error"}`);
-  }
+    return { embeds: [buildWireDealEmbed({ deal_key, wires: filtered_wires })] };
+  }, "deal");
 }
 
 /**
- * handleWiresReconcile — show wire anomalies
+ * handleWiresReconcile — show wire anomalies (deferred)
  */
-async function handleWiresReconcile({ options_array, context }) {
+function handleWiresReconcile({ options_array, context, interaction }) {
   const days = options_array?.find(o => o.name === "days")?.value ?? 30;
-
-  try {
-    const wires = await listWireEvents({
-      db: getDb(),
-      days,
-      limit: 1000,
-    });
-
+  return runDeferredWiresHandler(interaction, async () => {
+    const wires = await listWireEvents({ db: getDb(), days, limit: 1000 });
     const missing_account_links = wires.filter(w => !w.account_key).length;
-    const missing_deal_links = wires.filter(w => !w.deal_key && !w.closing_id).length;
-    const stale_pending = wires.filter(w => {
+    const missing_deal_links    = wires.filter(w => !w.deal_key && !w.closing_id).length;
+    const stale_pending         = wires.filter(w => {
       if (w.status !== "pending") return false;
-      const created = new Date(w.created_at).getTime();
-      const now = Date.now();
-      const age_days = (now - created) / (1000 * 60 * 60 * 24);
-      return age_days > 7;
+      return (Date.now() - new Date(w.created_at).getTime()) / 86_400_000 > 7;
     }).length;
-
-    const embed = buildWireReconcileEmbed({
-      missing_account_links,
-      missing_deal_links,
-      stale_pending,
-      total_anomalies: missing_account_links + missing_deal_links + stale_pending,
-      scope_days: String(days),
-    });
-    return cinematicMessage([embed], wireCockpitButtons());
-  } catch (err) {
-    return errorResponse(`Wire reconciliation failed: ${err?.message ?? "error"}`);
-  }
+    return {
+      embeds: [buildWireReconcileEmbed({
+        missing_account_links,
+        missing_deal_links,
+        stale_pending,
+        total_anomalies: missing_account_links + missing_deal_links + stale_pending,
+        scope_days: String(days),
+      })],
+      components: wireCockpitButtons(),
+    };
+  }, "reconcile");
 }
 
 // ---------------------------------------------------------------------------
@@ -2917,7 +2957,7 @@ export async function routeDiscordInteraction(interaction) {
         if (!checkPermission(role_ids, ["owner", "closings", "tech_ops"])) {
           response = deniedResponse("Requires **Closings**, **Tech Ops**, or **Owner**.");
         } else {
-          response = await handleWiresCockpit({ options_array: sub_opts, context });
+          response = await handleWiresCockpit({ options_array: sub_opts, context, interaction });
         }
       } else if (sub_name === "expected") {
         if (!checkPermission(role_ids, ["owner", "closings"])) {
@@ -2941,19 +2981,19 @@ export async function routeDiscordInteraction(interaction) {
         if (!checkPermission(role_ids, ["owner", "closings", "tech_ops"])) {
           response = deniedResponse("Requires **Closings**, **Tech Ops**, or **Owner**.");
         } else {
-          response = await handleWiresForecast({ options_array: sub_opts, context });
+          response = await handleWiresForecast({ options_array: sub_opts, context, interaction });
         }
       } else if (sub_name === "deal") {
         if (!checkPermission(role_ids, ["owner", "closings", "tech_ops"])) {
           response = deniedResponse("Requires **Closings**, **Tech Ops**, or **Owner**.");
         } else {
-          response = await handleWiresDeal({ options_array: sub_opts, context });
+          response = await handleWiresDeal({ options_array: sub_opts, context, interaction });
         }
       } else if (sub_name === "reconcile") {
         if (!checkPermission(role_ids, ["owner", "closings"])) {
           response = deniedResponse("Requires **Closings** or **Owner**.");
         } else {
-          response = await handleWiresReconcile({ options_array: sub_opts, context });
+          response = await handleWiresReconcile({ options_array: sub_opts, context, interaction });
         }
       } else {
         response = errorResponse(`Unknown /wires subcommand: ${sub_name}`);

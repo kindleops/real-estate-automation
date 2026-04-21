@@ -1700,3 +1700,236 @@ export function buildWireReconcileEmbed(payload = {}) {
     footer:    { text: "Anomaly detection and reconciliation report" },
   };
 }
+
+// ---------------------------------------------------------------------------
+// buildWireSetupRequiredEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Shown when wire_events table is missing or schema cache is stale.
+ * No sensitive data is included.
+ *
+ * @returns {object}
+ */
+export function buildWireSetupRequiredEmbed() {
+  return {
+    title:       "⚠️ Wire Command Center Setup Required",
+    description: "Wire tables are not available yet. Apply the Supabase migration and reload schema cache.",
+    color:       COLOR.yellow,
+    timestamp:   now(),
+    fields: [
+      {
+        name:   "Step 1 — Apply Migration",
+        value:  "Run pending wire migrations:\n`create wire_accounts`\n`create wire_events`",
+        inline: false,
+      },
+      {
+        name:   "Step 2 — Reload Schema Cache",
+        value:  "Run in Supabase SQL editor:\n```sql\nselect pg_notify('pgrst', 'reload schema');\n```",
+        inline: false,
+      },
+      {
+        name:   "Step 3 — Retry",
+        value:  "Re-run the `/wires` command after the migration completes.",
+        inline: false,
+      },
+    ],
+    footer: { text: "Wire Command Center v1 • Setup required" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildDailyBriefingEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Cinematic Daily Empire Briefing embed.
+ *
+ * Accepts the metrics object returned by getDailyBriefing / normalizeBriefingMetrics.
+ * Displays all KPI sections concisely without raw DB errors or secrets.
+ *
+ * Color rules:
+ *   red    → critical failures or high send-queue errors
+ *   yellow → partial data / unavailable sections
+ *   purple → strong revenue day
+ *   green  → nominal operations
+ *
+ * @param {object} metrics
+ * @returns {object}  Discord embed object
+ */
+export function buildDailyBriefingEmbed(metrics = {}) {
+  const {
+    range         = "today",
+    timezone      = "America/Chicago",
+    window_start,
+    window_end,
+    outreach      = {},
+    email         = {},
+    acquisitions  = {},
+    dispo         = {},
+    revenue       = {},
+    system_health = {},
+    markets       = [],
+    agents        = [],
+    source_errors = [],
+    partial       = false,
+    health        = "green",
+    next_recommended_action = null,
+  } = metrics;
+
+  // ── Color ────────────────────────────────────────────────────────────────
+  const colorMap = {
+    red:    COLOR.red,
+    yellow: COLOR.yellow,
+    purple: COLOR.gold_purple,
+    green:  COLOR.teal_green,
+  };
+  const color = colorMap[health] ?? COLOR.teal_green;
+
+  // ── Description ──────────────────────────────────────────────────────────
+  const rangeLabel = {
+    today:     "Today",
+    yesterday: "Yesterday",
+    week:      "Last 7 Days",
+    month:     "This Month",
+  }[range] ?? range;
+
+  const scopeParts = [];
+  if (markets.length > 0) scopeParts.push(`Market: ${markets.join(", ")}`);
+  if (agents.length  > 0) scopeParts.push(`Agent: ${agents.join(", ")}`);
+  const scopeStr = scopeParts.length > 0 ? `  •  ${scopeParts.join("  •  ")}` : "";
+
+  const dateStr = window_start
+    ? new Date(window_start).toLocaleDateString("en-US", {
+        timeZone: timezone,
+        month: "short", day: "numeric", year: "numeric",
+      })
+    : "";
+  const description = `📅 ${rangeLabel}${dateStr ? `  •  ${dateStr}` : ""}  •  ${timezone}${scopeStr}`;
+
+  // ── Helper: compact number format ───────────────────────────────────────
+  const n = (v) => Number(v ?? 0).toLocaleString("en-US");
+  const pct = (v) => `${Number(v ?? 0)}%`;
+  const usd = (v) => {
+    const amt = Number(v ?? 0);
+    if (amt >= 1_000_000) return `$${(amt / 1_000_000).toFixed(2)}M`;
+    if (amt >= 1_000)     return `$${(amt / 1_000).toFixed(1)}K`;
+    return `$${amt.toLocaleString("en-US")}`;
+  };
+  const na = (v, fmt = n) => (v == null || Number(v) === 0 && !v) ? "—" : fmt(v);
+
+  // ── Fields ───────────────────────────────────────────────────────────────
+  const fields = [];
+
+  // 1. Outreach Engine
+  const o = outreach;
+  fields.push(f(
+    "📨 Outreach Engine",
+    [
+      `Sent: **${n(o.sent)}**  |  Delivered: **${n(o.delivered)}**  |  Failed: **${n(o.failed)}**`,
+      `Replies: **${n(o.replies)}**  |  Reply Rate: **${pct(o.reply_rate)}**  |  Delivery Rate: **${pct(o.delivery_rate)}**`,
+      o.opt_outs > 0 || o.wrong_numbers > 0
+        ? `Opt-outs: **${n(o.opt_outs)}**  |  Wrong #: **${n(o.wrong_numbers)}**`
+        : null,
+    ].filter(Boolean).join("\n"),
+    false,
+  ));
+
+  // 2. Email
+  const em = email;
+  const emailUnavailable = source_errors.some(e => e.source === "email_send_queue");
+  fields.push(f(
+    "✉️ Email",
+    emailUnavailable
+      ? "Unavailable — email_send_queue not configured"
+      : `Sent: **${n(em.sent)}**  |  Delivered: **${n(em.delivered)}**  |  Opened: **${n(em.opened)}**  |  Clicked: **${n(em.clicked)}**`,
+    false,
+  ));
+
+  // 3. Lead Flow / Hot Leads
+  const aq = acquisitions;
+  fields.push(f(
+    "🔥 Lead Flow",
+    [
+      `Hot Leads: **${n(aq.hot_leads)}**  |  Stage Advances: **${n(aq.stage_advances)}**`,
+      `Offers Created: **${n(aq.offers_created)}**  |  Offers Sent: **${n(aq.offers_sent)}**`,
+    ].join("\n"),
+    false,
+  ));
+
+  // 4. Acquisitions
+  fields.push(f(
+    "💵 Acquisitions",
+    [
+      `Contracts Sent: **${n(aq.contracts_sent)}**  |  Contracts Signed: **${n(aq.contracts_signed)}**`,
+      aq.underwriting_transfers > 0
+        ? `Underwriting Transfers: **${n(aq.underwriting_transfers)}**  |  Manual Reviews: **${n(aq.manual_reviews)}**`
+        : `Underwriting Transfers: **${n(aq.underwriting_transfers)}**`,
+    ].join("\n"),
+    false,
+  ));
+
+  // 5. Dispo / Buyers / JV
+  const dp = dispo;
+  fields.push(f(
+    "🤝 Dispo / Buyers / JV",
+    `Buyer Matches: **${n(dp.buyer_matches)}**  |  Buyer Replies: **${n(dp.buyer_replies)}**  |  JV Opportunities: **${n(dp.jv_opportunities)}**`,
+    false,
+  ));
+
+  // 6. Revenue / Wires
+  const rv = revenue;
+  const wireUnavailable = source_errors.some(e => e.source === "wire_events");
+  fields.push(f(
+    "🏦 Revenue / Wires",
+    wireUnavailable
+      ? "Unavailable — wire_events not configured or missing"
+      : [
+          `Cleared: **${n(rv.cleared_wires)}** (${usd(rv.cleared_wire_amount)})  |  Pending: **${n(rv.pending_wires)}** (${usd(rv.pending_wire_amount)})`,
+          `Pipeline: **${usd(rv.projected_pipeline_value)}**`,
+        ].join("\n"),
+    false,
+  ));
+
+  // 7. System Health
+  const sh = system_health;
+  const queueUnavailable = source_errors.some(e => e.source === "send_queue");
+  const queueLine = queueUnavailable
+    ? "Queue: Unavailable"
+    : `Queue: **${n(sh.queue_ready)}** ready  |  **${n(sh.queue_due)}** due  |  **${n(sh.queue_failed_recent)}** failed`;
+  fields.push(f(
+    "🧠 System Health",
+    [
+      queueLine,
+      `Supabase: **${sh.supabase_status}**  |  Podio: **${sh.podio_status}**`,
+      `TextGrid: **${sh.textgrid_status}**  |  Email: **${sh.email_status}**`,
+    ].join("\n"),
+    false,
+  ));
+
+  // 8. Next Move
+  fields.push(f(
+    "🎯 Next Move",
+    next_recommended_action ?? "✅ Operations nominal",
+    false,
+  ));
+
+  // 9. Partial warning (if any sources errored)
+  if (partial && source_errors.length > 0) {
+    const failed_sources = source_errors.map(e => e.source).join(", ");
+    fields.push(f(
+      "⚠️ Partial Data",
+      `Some data sources were unavailable: ${failed_sources}. Metrics may be incomplete.`,
+      false,
+    ));
+  }
+
+  return {
+    title:       "👑 Daily Empire Briefing",
+    description: description.slice(0, 256),
+    color,
+    timestamp:   now(),
+    fields,
+    footer: { text: "Empire Briefing • Real Estate Automation" },
+  };
+}

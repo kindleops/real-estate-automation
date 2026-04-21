@@ -82,7 +82,11 @@ export async function listWireEvents({
   query = query.order("created_at", { ascending: false }).limit(limit);
 
   const { data, error } = await query;
-  if (error) throw new Error(`Wire events query failed: ${error.message}`);
+  if (error) {
+    const e = new Error(`Wire events query failed: ${error.message}`);
+    e.code = error.code;
+    throw e;
+  }
   return data || [];
 }
 
@@ -106,7 +110,11 @@ export async function getWireSummary({ days = null, db = null } = {}) {
   }
 
   const { data, error } = await query;
-  if (error) throw new Error(`Wire summary query failed: ${error.message}`);
+  if (error) {
+    const e = new Error(`Wire summary query failed: ${error.message}`);
+    e.code = error.code;
+    throw e;
+  }
 
   const counts = {
     expected: 0,

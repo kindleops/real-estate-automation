@@ -297,3 +297,26 @@ export function wireEventButtons() {
     ]),
   ];
 }
+
+// ---------------------------------------------------------------------------
+// briefingActionRow — Daily Empire Briefing quick-actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Action buttons for the Daily Empire Briefing embed.
+ *
+ * custom_id prefix: briefing:
+ *
+ * @returns {object[]}
+ */
+export function briefingActionRow() {
+  return [
+    actionRow([
+      button({ label: "🔄 Refresh",        custom_id: "briefing:refresh",        style: STYLE.PRIMARY   }),
+      button({ label: "🔥 Hot Leads",       custom_id: "briefing:hot_leads",      style: STYLE.SUCCESS   }),
+      button({ label: "📈 Scale Campaign",  custom_id: "briefing:scale_campaign", style: STYLE.SECONDARY }),
+      button({ label: "📬 Queue Scan",      custom_id: "briefing:queue_scan",     style: STYLE.SECONDARY }),
+      button({ label: "📤 Export",          custom_id: "briefing:export",         style: STYLE.SECONDARY }),
+    ]),
+  ];
+}

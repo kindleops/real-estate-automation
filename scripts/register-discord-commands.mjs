@@ -1193,8 +1193,139 @@ const WIRES_COMMANDS = [
   },
 ];
 
-// Final command set = existing + targeting console additions + replay additions + wires additions.
-const ALL_COMMANDS = [...COMMANDS, ...TARGETING_COMMANDS, ...REPLAY_COMMANDS, ...WIRES_COMMANDS];
+// ── /briefing ─────────────────────────────────────────────────────────────
+const BRIEFING_COMMANDS = [
+  {
+    name:        "briefing",
+    description: "Daily Empire Briefing — KPI summary across SMS, wires, revenue, system health (Owner / Tech Ops / SMS Ops)",
+    options: [
+      // /briefing today
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "today",
+        description: "Empire briefing for today",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "timezone",
+            description: "IANA timezone (default America/Chicago)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "market",
+            description: "Filter by market",
+            required:    false,
+            choices:     MARKET_CHOICES,
+          },
+          {
+            type:        OPT.BOOLEAN,
+            name:        "include_system_health",
+            description: "Include system health section (default true)",
+            required:    false,
+          },
+        ],
+      },
+      // /briefing yesterday
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "yesterday",
+        description: "Empire briefing for yesterday",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "timezone",
+            description: "IANA timezone (default America/Chicago)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "market",
+            description: "Filter by market",
+            required:    false,
+            choices:     MARKET_CHOICES,
+          },
+        ],
+      },
+      // /briefing week
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "week",
+        description: "Empire briefing for the last 7 days",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "timezone",
+            description: "IANA timezone (default America/Chicago)",
+            required:    false,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "market",
+            description: "Filter by market",
+            required:    false,
+            choices:     MARKET_CHOICES,
+          },
+        ],
+      },
+      // /briefing market
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "market",
+        description: "Empire briefing scoped to a specific market",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "market",
+            description: "Market to scope the briefing to",
+            required:    true,
+            choices:     MARKET_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "range",
+            description: "Date range (default today)",
+            required:    false,
+            choices: [
+              { name: "Today",     value: "today"     },
+              { name: "Yesterday", value: "yesterday" },
+              { name: "Week",      value: "week"      },
+              { name: "Month",     value: "month"     },
+            ],
+          },
+        ],
+      },
+      // /briefing agent
+      {
+        type:        OPT.SUB_COMMAND,
+        name:        "agent",
+        description: "Empire briefing scoped to a specific agent",
+        options: [
+          {
+            type:        OPT.STRING,
+            name:        "agent",
+            description: "Agent name or ID",
+            required:    true,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "range",
+            description: "Date range (default today)",
+            required:    false,
+            choices: [
+              { name: "Today",     value: "today"     },
+              { name: "Yesterday", value: "yesterday" },
+              { name: "Week",      value: "week"      },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+];
+
+// Final command set = existing + targeting console additions + replay additions + wires additions + briefing.
+const ALL_COMMANDS = [...COMMANDS, ...TARGETING_COMMANDS, ...REPLAY_COMMANDS, ...WIRES_COMMANDS, ...BRIEFING_COMMANDS];
 
 // ---------------------------------------------------------------------------
 // Registration
