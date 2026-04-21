@@ -73,6 +73,24 @@ function pickFirst(...values) {
   return null;
 }
 
+function getQueueRowDestinationCandidates(row = null) {
+  const safe_row = ensureObject(row);
+  const metadata = ensureObject(safe_row.metadata);
+  const queue_context = ensureObject(metadata.queue_context);
+
+  return [
+    ["to_phone_number", safe_row.to_phone_number],
+    ["metadata.resolved_to_phone_number", metadata.resolved_to_phone_number],
+    ["metadata.canonical_e164", metadata.canonical_e164],
+    ["metadata.phone_hidden", metadata.phone_hidden],
+    ["metadata.raw_phone_number", metadata.raw_phone_number],
+    ["metadata.normalized_target", metadata.normalized_target],
+    ["metadata.queue_context.phone_e164", queue_context.phone_e164],
+    ["metadata.queue_context.canonical_e164", queue_context.canonical_e164],
+    ["metadata.queue_context.phone_hidden", queue_context.phone_hidden],
+  ];
+}
+
 function toTimestamp(value) {
   if (!value) return null;
   const parsed = new Date(value).getTime();
@@ -168,8 +186,28 @@ export function normalizeSendQueueRow(row) {
   };
 }
 
+export function resolveQueueDestinationPhone(row = null) {
+  for (const [source, candidate] of getQueueRowDestinationCandidates(row)) {
+    const normalized = normalizePhone(candidate);
+    if (normalized) {
+      return {
+        phone: normalized,
+        source,
+        raw: clean(candidate) || null,
+      };
+    }
+  }
+
+  return {
+    phone: "",
+    source: null,
+    raw: null,
+  };
+}
+
 export function shouldRunSendQueueRow(row, now = nowIso()) {
   const normalized = normalizeSendQueueRow(row);
+  const destination = resolveQueueDestinationPhone(normalized);
   const now_ts = toTimestamp(now) ?? Date.now();
   const scheduled_ts = toTimestamp(normalized.scheduled_for);
   const next_retry_ts = toTimestamp(normalized.next_retry_at);
@@ -223,7 +261,7 @@ export function shouldRunSendQueueRow(row, now = nowIso()) {
     };
   }
 
-  if (!clean(normalized.to_phone_number)) {
+  if (!clean(destination.phone)) {
     return {
       ok: false,
       reason: "missing_to_phone_number",
@@ -1298,7 +1336,7 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     next_retry_at: row.next_retry_at || null,
     message_body: row.message_body,
     message_text: row.message_text || row.message_body,
-    to_phone_number: normalizePhone(row.to_phone_number),
+    to_phone_number: resolveQueueDestinationPhone(row).phone || null,
     from_phone_number: normalizePhone(row.from_phone_number) || null,
     metadata: row.metadata,
     created_at: row.created_at || now,

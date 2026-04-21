@@ -25,6 +25,10 @@ import { normalizeAgentStyleFit } from "@/lib/sms/agent_style.js";
 import { normalizeLanguage } from "@/lib/sms/language_aliases.js";
 import { resolvePropertyTypeScope } from "@/lib/sms/property_scope.js";
 import { resolveDealStrategy } from "@/lib/sms/deal_strategy.js";
+import {
+  normalizeUsPhoneToE164,
+  prepareRenderedSmsForQueue,
+} from "@/lib/sms/sanitize.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -716,6 +720,39 @@ export async function queueOutboundMessage({
     rendered_placeholders = render.placeholders_used || [];
   }
 
+  const rendered_sms = prepareRenderedSmsForQueue({
+    rendered_message_text: final_message_text,
+    template_id: selected_template_id || null,
+    template_source:
+      resolution?.source ||
+      (message_override ? "message_override" : null),
+  });
+
+  if (!rendered_sms.ok) {
+    warn("outbound.queue_message_render_contains_html", {
+      inbound_from: resolved_inbound_from,
+      phone_item_id: context?.ids?.phone_item_id || null,
+      template_id: selected_template_id || null,
+      template_source:
+        resolution?.source || (message_override ? "message_override" : null),
+      diagnostics: rendered_sms.diagnostics,
+    });
+
+    return {
+      ok: false,
+      stage: "render",
+      reason: rendered_sms.reason,
+      diagnostics: rendered_sms.diagnostics,
+      inbound_from: normalized_inbound_from,
+      context,
+      classification,
+      route,
+      template_id: selected_template_id,
+    };
+  }
+
+  final_message_text = rendered_sms.text;
+
   if (!final_message_text) {
     warn("outbound.queue_message_render_failed", {
       inbound_from: resolved_inbound_from,
@@ -880,7 +917,14 @@ export async function queueOutboundMessage({
     is_follow_up: resolved_use_case?.includes("follow") || false,
     is_reengagement: resolved_use_case === "reengagement",
     is_opt_out_confirm: classification?.compliance_flag === "stop_texting",
-    phone_e164: normalized_inbound_from,
+    phone_e164:
+      normalizeUsPhoneToE164(
+        context?.summary?.canonical_e164 ||
+          context?.summary?.phone_hidden ||
+          normalized_inbound_from
+      ) || normalized_inbound_from,
+    canonical_e164: normalizeUsPhoneToE164(context?.summary?.canonical_e164 || ""),
+    phone_hidden: context?.summary?.phone_hidden || null,
     contact_window: base_contact_window,
     placeholders_used: rendered_placeholders,
     property_address: context?.summary?.property_address || null,

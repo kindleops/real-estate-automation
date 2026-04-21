@@ -3,6 +3,8 @@
 // Fail cleanly if required placeholders are missing —
 // never ship unreplaced {{...}} in an outbound message.
 
+import { sanitizeSmsTextMap, sanitizeSmsTextValue } from "@/lib/sms/sanitize.js";
+
 // ══════════════════════════════════════════════════════════════════════════
 // PLACEHOLDER DEFINITIONS
 // ══════════════════════════════════════════════════════════════════════════
@@ -29,7 +31,11 @@ const KNOWN_SET = new Set(KNOWN_PLACEHOLDERS);
 
 function formatCurrency(value) {
   if (value == null) return null;
-  const num = typeof value === "number" ? value : Number(String(value).replace(/[^0-9.-]/g, ""));
+  const safe_value = typeof value === "number" ? value : sanitizeSmsTextValue(value);
+  const num =
+    typeof safe_value === "number"
+      ? safe_value
+      : Number(String(safe_value).replace(/[^0-9.-]/g, ""));
   if (!Number.isFinite(num)) return null;
   // No decimals for round numbers, 2 decimals otherwise
   const formatted = num % 1 === 0
@@ -40,7 +46,8 @@ function formatCurrency(value) {
 
 function formatDate(value) {
   if (!value) return null;
-  const d = value instanceof Date ? value : new Date(value);
+  const safe_value = value instanceof Date ? value : sanitizeSmsTextValue(value);
+  const d = safe_value instanceof Date ? safe_value : new Date(safe_value);
   if (Number.isNaN(d.getTime())) return null;
   // MM/DD/YYYY local format
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
@@ -48,14 +55,15 @@ function formatDate(value) {
 
 function formatInteger(value) {
   if (value == null) return null;
-  const num = typeof value === "number" ? value : Number(value);
+  const safe_value = typeof value === "number" ? value : sanitizeSmsTextValue(value);
+  const num = typeof safe_value === "number" ? safe_value : Number(safe_value);
   if (!Number.isFinite(num)) return null;
   return String(Math.round(num));
 }
 
 function cleanText(value) {
   if (value == null || value === "") return null;
-  return String(value).trim() || null;
+  return sanitizeSmsTextValue(value) || null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -91,16 +99,23 @@ function normalizePunctuation(text) {
  * @returns {Map<string, string|null>}
  */
 function buildValueMap(context = {}) {
+  const safe_context = sanitizeSmsTextMap(context);
   const map = new Map();
-  map.set("seller_first_name", cleanText(context.seller_first_name));
-  map.set("agent_name", cleanText(context.agent_name));
-  map.set("property_address", cleanText(context.property_address));
-  map.set("property_city", cleanText(context.property_city) || cleanText(context.city));
-  map.set("city", cleanText(context.city) || cleanText(context.property_city));
-  map.set("offer_price", formatCurrency(context.offer_price));
-  map.set("repair_cost", formatCurrency(context.repair_cost));
+  map.set("seller_first_name", cleanText(safe_context.seller_first_name));
+  map.set("agent_name", cleanText(safe_context.agent_name));
+  map.set("property_address", cleanText(safe_context.property_address));
+  map.set(
+    "property_city",
+    cleanText(safe_context.property_city) || cleanText(safe_context.city)
+  );
+  map.set(
+    "city",
+    cleanText(safe_context.city) || cleanText(safe_context.property_city)
+  );
+  map.set("offer_price", formatCurrency(safe_context.offer_price));
+  map.set("repair_cost", formatCurrency(safe_context.repair_cost));
   map.set("closing_date", formatDate(context.closing_date));
-  map.set("unit_count", formatInteger(context.unit_count));
+  map.set("unit_count", formatInteger(safe_context.unit_count));
   return map;
 }
 

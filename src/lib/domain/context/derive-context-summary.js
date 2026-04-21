@@ -7,6 +7,10 @@ import {
   getTextValue,
 } from "@/lib/providers/podio.js";
 import { resolvePreferredContactLanguage } from "@/lib/domain/context/resolve-preferred-language.js";
+import {
+  normalizeUsPhoneToE164,
+  sanitizeSmsTextValue,
+} from "@/lib/sms/sanitize.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -57,6 +61,19 @@ function extractStreetAddress(property_item) {
   // Fall back to plain text value (text-type field, not location-type)
   if (typeof first.value === "string") return first.value;
   return "";
+}
+
+function extractPostalCode(property_item) {
+  const values = getFieldValues(property_item, "property-address");
+  const first = values[0];
+  if (!first) return "";
+  return (
+    first.postal_code ||
+    first.zip ||
+    first.value?.postal_code ||
+    first.value?.zip ||
+    ""
+  );
 }
 
 function firstNonNull(...values) {
@@ -112,6 +129,12 @@ export function deriveContextSummary({
       getTextValue(property_item, "title", "")
     ) || "";
   const raw_property_city = getTextValue(property_item, "city", "") || "";
+  const raw_phone_hidden = getTextValue(phone_item, "phone-hidden", "") || "";
+  const raw_canonical_e164 = getTextValue(phone_item, "canonical-e164", "") || "";
+  const resolved_phone_hidden = sanitizeSmsTextValue(raw_phone_hidden);
+  const resolved_canonical_e164 =
+    normalizeUsPhoneToE164(raw_canonical_e164) ||
+    normalizeUsPhoneToE164(raw_phone_hidden);
 
   try {
     const summary = {
@@ -124,8 +147,8 @@ export function deriveContextSummary({
       agent_item_id: agent_item?.item_id ?? null,
       market_item_id: market_item?.item_id ?? null,
 
-      phone_hidden: getTextValue(phone_item, "phone-hidden", ""),
-      canonical_e164: getTextValue(phone_item, "canonical-e164", ""),
+      phone_hidden: resolved_phone_hidden,
+      canonical_e164: resolved_canonical_e164,
       phone_activity_status: getCategoryValue(phone_item, "phone-activity-status", "Unknown"),
       phone_usage_2_months: getCategoryValue(phone_item, "phone-usage-2-months", null),
       phone_usage_12_months: getCategoryValue(phone_item, "phone-usage-12-months", null),
@@ -171,13 +194,14 @@ export function deriveContextSummary({
       last_inbound_message: getTextValue(brain_item, "last-inbound-message", ""),
       last_outbound_message: getTextValue(brain_item, "last-outbound-message", ""),
 
-      owner_name,
-      seller_first_name,
+      owner_name: sanitizeSmsTextValue(owner_name),
+      seller_first_name: sanitizeSmsTextValue(seller_first_name),
       contact_window: getCategoryValue(master_owner_item, "best-contact-window", null),
 
-      property_address: titleCaseIfShouting(raw_property_address),
-      property_city: titleCaseIfShouting(raw_property_city),
-      property_state: getTextValue(property_item, "state", "") || "",
+      property_address: sanitizeSmsTextValue(titleCaseIfShouting(raw_property_address)),
+      property_city: sanitizeSmsTextValue(titleCaseIfShouting(raw_property_city)),
+      property_state: sanitizeSmsTextValue(getTextValue(property_item, "state", "") || ""),
+      property_zip: sanitizeSmsTextValue(extractPostalCode(property_item)),
 
       agent_name:
         firstNonNull(
@@ -191,11 +215,14 @@ export function deriveContextSummary({
           clean(getTextValue(agent_item, "agent-name", "")).split(" ")[0]
         ) || "",
 
-      market_name: getTextValue(market_item, "title", ""),
-      market_state: getTextValue(market_item, "state", ""),
-      market_timezone: getTextValue(market_item, "timezone", ""),
-      market_area_code: getTextValue(market_item, "area-code", ""),
+      market_name: sanitizeSmsTextValue(getTextValue(market_item, "title", "")),
+      market_state: sanitizeSmsTextValue(getTextValue(market_item, "state", "")),
+      market_timezone: sanitizeSmsTextValue(getTextValue(market_item, "timezone", "")),
+      market_area_code: sanitizeSmsTextValue(getTextValue(market_item, "area-code", "")),
     };
+
+    summary.agent_name = sanitizeSmsTextValue(summary.agent_name);
+    summary.agent_first_name = sanitizeSmsTextValue(summary.agent_first_name);
 
     console.log("⬅️ exiting derive-context-summary", {
       owner_id: trace.owner_id,

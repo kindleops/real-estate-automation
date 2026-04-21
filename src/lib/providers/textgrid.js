@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import ENV from "@/lib/config/env.js";
 import { recordSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
 import { warn } from "@/lib/logging/logger.js";
+import { normalizeUsPhoneToE164 } from "@/lib/sms/sanitize.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // CONFIG & ENV VALIDATION
@@ -228,11 +229,7 @@ export function verifyTextgridWebhookSignature({
 // ══════════════════════════════════════════════════════════════════════════
 
 export function normalizePhone(value) {
-  if (!value) return "";
-  const digits = String(value).replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-  if (digits.length === 10) return `+1${digits}`;
-  return "";
+  return normalizeUsPhoneToE164(value);
 }
 
 export function normalizeInboundTextgridPhone(value) {

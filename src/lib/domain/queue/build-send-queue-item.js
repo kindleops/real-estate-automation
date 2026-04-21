@@ -6,6 +6,7 @@ import {
   getCategoryValue,
   getFieldValues,
   getFirstAppReferenceId,
+  getPhoneValue,
   getTextValue,
   updateItem,
   PodioError,
@@ -16,12 +17,16 @@ import {
   getAttachedFieldSchema,
   shouldAllowRawCategoryCompatibilityValue,
 } from "@/lib/podio/schema.js";
-import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { hasSupabaseConfig } from "@/lib/supabase/client.js";
 import { insertSupabaseSendQueueRow } from "@/lib/supabase/sms-engine.js";
 import { resolveTemplateFieldReference } from "@/lib/domain/templates/template-reference.js";
 import { deriveQueueCurrentStage } from "@/lib/domain/communications-engine/state-machine.js";
 import { warn } from "@/lib/logging/logger.js";
+import {
+  normalizeUsPhoneToE164,
+  prepareRenderedSmsForQueue,
+  sanitizeSmsTextValue,
+} from "@/lib/sms/sanitize.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // REAL SEND QUEUE FIELD IDS
@@ -85,23 +90,6 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
-// Strips HTML tags and converts common block-level elements to spaces so that
-// rich-text template content is reduced to plain SMS text before persistence.
-// <br>, </p>, </div>, </li> are treated as line separators → space.
-// Named/numeric HTML entities are decoded to their literal characters.
-function stripHtml(value) {
-  return String(value ?? "")
-    .replace(/<br\s*\/?>/gi, " ")
-    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, " ")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
 // Fix malformed punctuation spacing that can arise from template rendering:
 //   "Hi Jose ,"  → "Hi Jose,"
 //   "this is Ricky ."  → "this is Ricky."
@@ -127,12 +115,7 @@ export function normalizeTextForSms(value) {
 // 3. Collapse runs of whitespace and trim.
 // 4. Fix punctuation spacing ("Hi Jose ," → "Hi Jose,").
 export function normalizeForQueueText(value) {
-  return normalizeTextForSms(
-    stripHtml(String(value ?? ""))
-      .replace(/\r\n|\r|\n/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim()
-  );
+  return normalizeTextForSms(sanitizeSmsTextValue(value));
 }
 
 // Accepted contact-window time-range format: "HH:MM AM - HH:MM PM TZ"
@@ -610,7 +593,22 @@ export async function buildSendQueueItem({
     throw new Error("buildSendQueueItem: context not found");
   }
 
-  const message_text = normalizeForQueueText(rendered_message_text);
+  const template_source_for_guard = resolveTemplateSource(template_id, template_item);
+  const rendered_sms = prepareRenderedSmsForQueue({
+    rendered_message_text,
+    template_id,
+    template_source: template_source_for_guard,
+  });
+
+  if (!rendered_sms.ok) {
+    const error = new Error("rendered_sms_contains_html");
+    error.code = "RENDERED_SMS_CONTAINS_HTML";
+    error.reason = rendered_sms.reason;
+    error.diagnostics = rendered_sms.diagnostics;
+    throw error;
+  }
+
+  const message_text = normalizeForQueueText(rendered_sms.text);
   if (!defer_message_resolution && !message_text) {
     throw new Error("buildSendQueueItem: missing rendered_message_text");
   }
@@ -668,9 +666,14 @@ export async function buildSendQueueItem({
     throw new Error(`buildSendQueueItem: phone not active (${phone_activity_status})`);
   }
 
-  const phone_hidden = getTextValue(phone_item, "phone-hidden", "");
-  const canonical_e164 = getTextValue(phone_item, "canonical-e164", "");
-  const normalized_target = normalizePhone(canonical_e164 || phone_hidden);
+  const phone_hidden = sanitizeSmsTextValue(getTextValue(phone_item, "phone-hidden", ""));
+  const canonical_e164 = normalizeUsPhoneToE164(
+    getTextValue(phone_item, "canonical-e164", "")
+  );
+  const raw_phone_number = sanitizeSmsTextValue(getPhoneValue(phone_item, "phone", ""));
+  const normalized_target = normalizeUsPhoneToE164(
+    canonical_e164 || phone_hidden || raw_phone_number
+  );
 
   if (!normalized_target) {
     throw new Error("buildSendQueueItem: target phone is missing or invalid");
@@ -855,8 +858,7 @@ export async function buildSendQueueItem({
     template_item,
   });
   const selected_template_source =
-    template_reference.selected_template_source ||
-    resolveTemplateSource(template_id, template_item);
+    template_reference.selected_template_source || template_source_for_guard;
   const template_field_value = template_reference.field_value;
   const template_candidates = template_reference.attachment_candidates || [];
   const missing_relation_warnings = [];
@@ -1104,6 +1106,9 @@ export async function buildSendQueueItem({
           template_id ??
           null,
         normalized_target,
+        canonical_e164: canonical_e164 || normalized_target,
+        phone_hidden: phone_hidden || null,
+        raw_phone_number: raw_phone_number || null,
         property_address: property_address || null,
         selected_template_source: selected_template_source ?? null,
         selected_template_item_id: template_reference.selected_template_item_id ?? null,

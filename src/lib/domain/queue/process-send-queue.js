@@ -28,6 +28,7 @@ import {
   normalizeSendQueueRow,
   normalizeQueueRowId,
   releaseSkippedQueueRow,
+  resolveQueueDestinationPhone,
   reserveFromPhoneNumber,
   selectAvailableTextgridNumber,
   writeOutboundFailureMessageEvent,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/supabase/sms-engine.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { syncOfferRecord } from "@/lib/domain/offers/sync-offer-record.js";
+import { sanitizeSmsTextValue } from "@/lib/sms/sanitize.js";
 
 const QUEUE_TABLE = "send_queue";
 
@@ -276,12 +278,16 @@ function getConfirmedProviderMessageSid(send_result = {}) {
 
 function pickMessageFields(queue_row = {}) {
   return {
-    to: clean(
+    to: normalizePhone(
       getQueueRowValue(queue_row, [
         "to_phone_number",
         "to",
         "phone",
         "recipient_phone",
+        "canonical_e164",
+        "canonical-e164",
+        "phone_hidden",
+        "phone-hidden",
       ])
     ),
     from: clean(
@@ -292,7 +298,7 @@ function pickMessageFields(queue_row = {}) {
         "outbound_number_phone",
       ])
     ),
-    body: clean(
+    body: sanitizeSmsTextValue(
       getQueueRowValue(queue_row, [
         "message_body",
         "body",
@@ -891,6 +897,37 @@ async function processLegacyQueueItem(resolved_queue_row, deps = {}) {
     };
   }
 
+  if (!message_fields.to) {
+    try {
+      await failQueueItem(
+        {
+          ...resolved_queue_row,
+          retry_count: retry_count + 1,
+        },
+        {
+          failed_reason: "invalid_phone_number",
+          retry_count: retry_count + 1,
+        },
+        deps
+      );
+    } catch (update_error) {
+      warn("queue.send.invalid_phone_fail_update_failed", {
+        queue_row_id,
+        message: update_error?.message || "Unknown queue failure update error",
+      });
+    }
+
+    return {
+      ok: false,
+      sent: false,
+      queue_status: "failed",
+      reason: "invalid_phone_number",
+      failed_reason: "invalid_phone_number",
+      queue_row_id,
+      queue_item_id: queue_row_id,
+    };
+  }
+
   try {
     await markQueueRowSending(resolved_queue_row, deps);
 
@@ -1103,6 +1140,16 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       };
     }
 
+    const destination = resolveQueueDestinationPhone(queue_row);
+    if (!destination.phone) {
+      throw new Error("invalid_phone_number");
+    }
+
+    queue_row = normalizeSendQueueRow({
+      ...queue_row,
+      to_phone_number: destination.phone,
+    });
+
     const number_selection = await selectAvailableTextgridNumber(queue_row, deps);
     if (!number_selection?.ok) {
       throw new Error(number_selection?.reason || "missing_from_phone_number");
@@ -1121,14 +1168,14 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
     }
 
     const message_fields = {
-      to: normalizePhone(queue_row.to_phone_number),
+      to: destination.phone,
       from: normalizePhone(
         queue_row.from_phone_number || number_selection.from_phone_number
       ),
-      body: clean(queue_row.message_body || queue_row.message_text),
+      body: sanitizeSmsTextValue(queue_row.message_body || queue_row.message_text),
     };
 
-    if (!message_fields.to) throw new Error("missing_to_phone_number");
+    if (!message_fields.to) throw new Error("invalid_phone_number");
     if (!message_fields.from) throw new Error("missing_from_phone_number");
     if (!message_fields.body) throw new Error("missing_message_body");
 

@@ -10,6 +10,11 @@ import { countSegments } from "@/lib/sms/personalize_template.js";
 import { info, warn } from "@/lib/logging/logger.js";
 import { hasSupabaseConfig } from "@/lib/supabase/client.js";
 import { insertSupabaseSendQueueRow } from "@/lib/supabase/sms-engine.js";
+import {
+  normalizeUsPhoneToE164,
+  prepareRenderedSmsForQueue,
+  sanitizeSmsTextValue,
+} from "@/lib/sms/sanitize.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // QUEUE FIELD EXTERNAL IDS
@@ -191,11 +196,12 @@ export function buildQueueFields({
   links = {},
   context = {},
 } = {}) {
+  const safe_rendered_text = sanitizeSmsTextValue(rendered_text);
   const fields = {};
 
   // Text
-  fields[QUEUE_FIELDS.message_text] = rendered_text;
-  fields[QUEUE_FIELDS.character_count] = String(rendered_text ?? "").length;
+  fields[QUEUE_FIELDS.message_text] = safe_rendered_text;
+  fields[QUEUE_FIELDS.character_count] = safe_rendered_text.length;
 
   // Schedule
   if (schedule?.scheduled_local) {
@@ -286,7 +292,7 @@ export function buildQueueFields({
     stage_code: resolution?.stage_code,
     language: resolution?.language,
     agent_style_fit: resolution?.agent_style_fit,
-    rendered_text,
+    rendered_text: safe_rendered_text,
   }).slice(0, 16);
 
   return fields;
@@ -303,8 +309,40 @@ export function buildQueueFields({
  * @returns {{ ok: boolean, item_id?: number, reason?: string, fields?: object }}
  */
 export async function queueMessage(params = {}) {
-  const fields = buildQueueFields(params);
+  const rendered_sms = prepareRenderedSmsForQueue({
+    rendered_message_text: params?.rendered_text,
+    template_id:
+      params?.resolution?.template_id ||
+      params?.resolution?.attachable_template_ref?.item_id ||
+      null,
+    template_source: params?.resolution?.source || null,
+  });
+
+  if (!rendered_sms.ok) {
+    warn("queue_message.render_contains_html", {
+      reason: rendered_sms.reason,
+      diagnostics: rendered_sms.diagnostics,
+    });
+
+    return {
+      ok: false,
+      reason: rendered_sms.reason,
+      diagnostics: rendered_sms.diagnostics,
+      storage: null,
+    };
+  }
+
+  const safe_params = {
+    ...params,
+    rendered_text: rendered_sms.text,
+  };
+  const fields = buildQueueFields(safe_params);
   const queue_id = fields[QUEUE_FIELDS.queue_id];
+  const resolved_to_phone_number = normalizeUsPhoneToE164(
+    safe_params?.context?.phone_e164 ||
+      safe_params?.context?.canonical_e164 ||
+      safe_params?.context?.phone_hidden
+  );
 
   info("queue_message.building", {
     queue_id,
@@ -327,49 +365,70 @@ export async function queueMessage(params = {}) {
       queue_key: queue_id,
       queue_id,
       queue_status: "queued",
-      scheduled_for: params?.schedule?.scheduled_utc || params?.schedule?.scheduled_local || now,
+      scheduled_for:
+        safe_params?.schedule?.scheduled_utc ||
+        safe_params?.schedule?.scheduled_local ||
+        now,
       scheduled_for_utc:
-        params?.schedule?.scheduled_utc || params?.schedule?.scheduled_local || now,
+        safe_params?.schedule?.scheduled_utc ||
+        safe_params?.schedule?.scheduled_local ||
+        now,
       scheduled_for_local:
-        params?.schedule?.scheduled_local || params?.schedule?.scheduled_utc || now,
-      timezone: params?.schedule?.timezone || params?.context?.timezone || "America/Chicago",
-      contact_window: params?.context?.contact_window || null,
-      send_priority: mapSendPriorityToNumber(params?.context?.send_priority),
+        safe_params?.schedule?.scheduled_local ||
+        safe_params?.schedule?.scheduled_utc ||
+        now,
+      timezone:
+        safe_params?.schedule?.timezone ||
+        safe_params?.context?.timezone ||
+        "America/Chicago",
+      contact_window: safe_params?.context?.contact_window || null,
+      send_priority: mapSendPriorityToNumber(safe_params?.context?.send_priority),
       is_locked: false,
       retry_count: 0,
-      max_retries: params?.context?.max_retries ?? 3,
-      message_body: params?.rendered_text || "",
-      message_text: params?.rendered_text || "",
-      to_phone_number: params?.context?.phone_e164 || null,
-      from_phone_number: params?.context?.from_phone_number || null,
-      property_address: params?.context?.property_address || null,
-      property_type: params?.context?.property_type || null,
-      owner_type: params?.context?.owner_type || null,
-      master_owner_id: params?.links?.master_owner_id || null,
-      prospect_id: params?.links?.prospect_id || null,
-      property_id: params?.links?.property_id || null,
-      market_id: params?.links?.market_id || null,
-      sms_agent_id: params?.links?.agent_id || null,
-      textgrid_number_id: params?.links?.textgrid_number_id || null,
+      max_retries: safe_params?.context?.max_retries ?? 3,
+      message_body: safe_params?.rendered_text || "",
+      message_text: safe_params?.rendered_text || "",
+      to_phone_number: resolved_to_phone_number || null,
+      from_phone_number: safe_params?.context?.from_phone_number || null,
+      property_address: safe_params?.context?.property_address || null,
+      property_type: safe_params?.context?.property_type || null,
+      owner_type: safe_params?.context?.owner_type || null,
+      master_owner_id: safe_params?.links?.master_owner_id || null,
+      prospect_id: safe_params?.links?.prospect_id || null,
+      property_id: safe_params?.links?.property_id || null,
+      market_id: safe_params?.links?.market_id || null,
+      sms_agent_id: safe_params?.links?.agent_id || null,
+      textgrid_number_id: safe_params?.links?.textgrid_number_id || null,
       template_id:
-        params?.resolution?.template_id ||
-        params?.resolution?.attachable_template_ref?.item_id ||
+        safe_params?.resolution?.template_id ||
+        safe_params?.resolution?.attachable_template_ref?.item_id ||
         null,
-      touch_number: params?.context?.touch_number ?? null,
-      dnc_check: params?.context?.dnc_check || null,
-      current_stage: params?.resolution?.stage_code || null,
+      touch_number: safe_params?.context?.touch_number ?? null,
+      dnc_check: safe_params?.context?.dnc_check || null,
+      current_stage: safe_params?.resolution?.stage_code || null,
       message_type: fields[QUEUE_FIELDS.message_type] || null,
-      use_case_template: params?.resolution?.use_case || null,
-      personalization_tags_used: params?.context?.placeholders_used || null,
-      character_count: String(params?.rendered_text || "").length,
+      use_case_template: safe_params?.resolution?.use_case || null,
+      personalization_tags_used: safe_params?.context?.placeholders_used || null,
+      character_count: String(safe_params?.rendered_text || "").length,
       metadata: {
         source: "queue_message",
-        schedule: params?.schedule || null,
-        resolution_source: params?.resolution?.source || null,
+        schedule: safe_params?.schedule || null,
+        resolution_source: safe_params?.resolution?.source || null,
         queue_fields: fields,
-        queue_context: params?.context || null,
+        queue_context: safe_params?.context || null,
+        canonical_e164:
+          normalizeUsPhoneToE164(safe_params?.context?.canonical_e164 || "") || null,
+        phone_hidden: sanitizeSmsTextValue(safe_params?.context?.phone_hidden || ""),
+        raw_destination_phone:
+          sanitizeSmsTextValue(
+            safe_params?.context?.phone_hidden ||
+              safe_params?.context?.canonical_e164 ||
+              safe_params?.context?.phone_e164 ||
+              ""
+          ) || null,
+        resolved_to_phone_number: resolved_to_phone_number || null,
       },
-      cash_offer_snapshot_id: params?.cash_offer_snapshot_id || null,
+      cash_offer_snapshot_id: safe_params?.cash_offer_snapshot_id || null,
     });
 
     info("queue_message.created", {

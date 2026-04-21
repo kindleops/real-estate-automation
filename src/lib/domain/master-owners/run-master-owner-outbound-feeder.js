@@ -29,6 +29,11 @@ import { resolvePropertyTypeScope } from "@/lib/sms/property_scope.js";
 import {
   renderTemplate,
 } from "@/lib/domain/templates/render-template.js";
+import {
+  normalizeUsPhoneToE164,
+  prepareRenderedSmsForQueue,
+  sanitizeSmsTextValue,
+} from "@/lib/sms/sanitize.js";
 import { validateActivePhone } from "@/lib/domain/compliance/validate-active-phone.js";
 import {
   deriveOutreachSuppressionSignals,
@@ -1340,12 +1345,16 @@ function summarizePhone(phone_item, slot = null) {
   const signals = deriveOutreachSuppressionSignals({
     phone_item,
   });
+  const raw_phone_hidden = getTextValue(phone_item, PHONE_FIELDS.phone_hidden, "");
+  const raw_canonical_e164 = getTextValue(phone_item, PHONE_FIELDS.canonical_e164, "");
 
   return {
     slot,
     item_id: phone_item?.item_id ?? null,
-    phone_hidden: getTextValue(phone_item, PHONE_FIELDS.phone_hidden, ""),
-    canonical_e164: getTextValue(phone_item, PHONE_FIELDS.canonical_e164, ""),
+    phone_hidden: sanitizeSmsTextValue(raw_phone_hidden),
+    canonical_e164:
+      normalizeUsPhoneToE164(raw_canonical_e164) ||
+      normalizeUsPhoneToE164(raw_phone_hidden),
     activity_status: getCategoryValue(phone_item, PHONE_FIELDS.phone_activity_status, null),
     do_not_call: getCategoryValue(phone_item, PHONE_FIELDS.do_not_call, null),
     dnc_source: signals.dnc_source || null,
@@ -4070,7 +4079,27 @@ async function evaluateOwner({
     }
   }
 
-  const rendered_message_text = clean(render_result?.rendered_text || "");
+  const rendered_sms = prepareRenderedSmsForQueue({
+    rendered_message_text: render_result?.rendered_text || "",
+    template_id: selected_template?.item_id ?? null,
+    template_source: selected_template?.source ?? null,
+  });
+
+  if (!rendered_sms.ok) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: rendered_sms.reason,
+      owner: owner_summary,
+      phone: selected_phone_record.summary,
+      property: summarizeProperty(property_item, owner_item),
+      template_id: selected_template.item_id,
+      template_source: selected_template.source || null,
+      diagnostics: rendered_sms.diagnostics,
+    };
+  }
+
+  const rendered_message_text = clean(rendered_sms.text || "");
 
   // FIX 4: Touch 1 enforces a minimum message length — empty or trivially short
   // messages (< 10 characters) are rejected outright.  This catches templates

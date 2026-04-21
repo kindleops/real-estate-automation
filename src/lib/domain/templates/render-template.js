@@ -1,4 +1,5 @@
 import { normalizeSellerFlowUseCase } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import { sanitizeSmsTextMap } from "@/lib/sms/sanitize.js";
 
 export const ALLOWED_TEMPLATE_PLACEHOLDERS = Object.freeze(
   new Set([
@@ -72,81 +73,113 @@ function firstNonEmpty(...values) {
 }
 
 export function buildVariableMap(context = {}, overrides = {}) {
-  const summary = context?.summary || {};
+  const summary = sanitizeSmsTextMap(context?.summary || {});
+  const safe_overrides = sanitizeSmsTextMap(overrides);
 
   const seller_first_name = firstNonEmpty(
-    overrides.seller_first_name,
+    safe_overrides.seller_first_name,
     summary.seller_first_name,
     summary.owner_name ? String(summary.owner_name).trim().split(" ")[0] : ""
   );
 
+  const seller_last_name = firstNonEmpty(
+    safe_overrides.seller_last_name,
+    summary.seller_last_name,
+    summary.owner_name
+      ? String(summary.owner_name)
+          .trim()
+          .split(/\s+/)
+          .slice(1)
+          .join(" ")
+      : ""
+  );
+
   const property_address = firstNonEmpty(
-    overrides.property_address,
+    safe_overrides.property_address,
     summary.property_address
   );
 
+  const property_state = firstNonEmpty(
+    safe_overrides.property_state,
+    summary.property_state
+  );
+
+  const property_zip = firstNonEmpty(
+    safe_overrides.property_zip,
+    summary.property_zip
+  );
+
   const agent_name = firstNonEmpty(
-    overrides.agent_name,
+    safe_overrides.agent_name,
     summary.agent_name
   );
 
   const agent_first_name = firstNonEmpty(
-    overrides.agent_first_name,
+    safe_overrides.agent_first_name,
     summary.agent_first_name,
     agent_name ? agent_name.split(" ")[0] : ""
   );
 
   const property_city = firstNonEmpty(
-    overrides.property_city,
+    safe_overrides.property_city,
     summary.property_city
   );
 
   const offer_price = firstNonEmpty(
-    overrides.offer_price,
-    overrides.smart_cash_offer_display,
+    safe_overrides.offer_price,
+    safe_overrides.smart_cash_offer_display,
     summary.offer_price,
     summary.smart_cash_offer_display
   );
 
   const repair_cost = firstNonEmpty(
-    overrides.repair_cost,
-    overrides.estimated_repair_cost,
+    safe_overrides.repair_cost,
+    safe_overrides.estimated_repair_cost,
     summary.repair_cost,
     summary.estimated_repair_cost
   );
 
   const unit_count = firstNonEmpty(
-    overrides.unit_count,
-    overrides.units,
+    safe_overrides.unit_count,
+    safe_overrides.units,
     summary.unit_count,
     summary.units
   );
 
   const occupied_units = firstNonEmpty(
-    overrides.occupied_units,
+    safe_overrides.occupied_units,
     summary.occupied_units
   );
 
   const monthly_rents = firstNonEmpty(
-    overrides.monthly_rents,
-    overrides.current_gross_rents,
+    safe_overrides.monthly_rents,
+    safe_overrides.current_gross_rents,
     summary.monthly_rents,
     summary.current_gross_rents,
     summary.avg_rent
   );
 
   const monthly_expenses = firstNonEmpty(
-    overrides.monthly_expenses,
-    overrides.estimated_expenses,
+    safe_overrides.monthly_expenses,
+    safe_overrides.estimated_expenses,
     summary.monthly_expenses,
     summary.estimated_expenses
   );
 
+  const owner_name = firstNonEmpty(
+    safe_overrides.owner_name,
+    summary.owner_name,
+    [seller_first_name, seller_last_name].filter(Boolean).join(" ")
+  );
+
   return {
     seller_first_name,
+    seller_last_name,
     agent_first_name,
     property_address,
     property_city,
+    property_state,
+    property_zip,
     offer_price,
     repair_cost,
     unit_count,
@@ -155,7 +188,7 @@ export function buildVariableMap(context = {}, overrides = {}) {
     monthly_expenses,
 
     // Legacy aliases stay render-compatible but are not valid for new inventory selection.
-    owner_name: seller_first_name,
+    owner_name: owner_name || seller_first_name,
     seller_name: seller_first_name,
     agent_name: agent_first_name,
     street_address: property_address,
