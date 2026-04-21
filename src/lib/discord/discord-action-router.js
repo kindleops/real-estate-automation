@@ -90,6 +90,7 @@ import {
   emailActionRow,
   wireCockpitButtons,
   wireEventButtons,
+  briefingActionRow,
 } from "./discord-components.js";
 import {
   buildCampaignKey,
@@ -112,6 +113,9 @@ import {
 import {
   buildWireForecast,
 } from "../domain/wires/wire-forecast.js";
+import {
+  getDailyBriefing,
+} from "../domain/kpis/daily-briefing.js";
 import {
   deferredPublicResponse,
   deferredEphemeralResponse,
@@ -202,6 +206,58 @@ function isTableMissingError(err) {
  * @param {string}   label      - Short name used for logging (cockpit/forecast/reconcile/deal)
  * @returns {{ type: 5, data: { flags: 64 } }}
  */
+/**
+ * General-purpose deferred ephemeral handler.
+ * Returns type 5 immediately; fires asyncFn as a floating Promise and always
+ * calls doEditInteractionResponse with the result or a sanitised error embed.
+ *
+ * @param {object}   interaction
+ * @param {Function} asyncFn       - Must resolve to { embeds?, components?, content? }
+ * @param {string}   domain        - e.g. "command", "email", "replay"
+ * @param {string}   label         - e.g. "audit", "cockpit", "inbound"
+ * @param {{ fallback_content?: string, fallback_embeds?: Function }} [opts]
+ */
+function runDeferredDiscordHandler(interaction, asyncFn, domain, label, opts = {}) {
+  const app_id  = String(process.env.DISCORD_APPLICATION_ID ?? "");
+  const token   = interaction.token;
+  const user_id = interaction.member?.user?.id ?? "unknown";
+
+  info(`discord.${domain}.deferred`,             { label, user_id });
+  info(`discord.${domain}.${label}.started`,      { user_id });
+
+  Promise.resolve()
+    .then(async () => {
+      let payload;
+      try {
+        payload = await asyncFn();
+        info(`discord.${domain}.${label}.completed`, { user_id });
+      } catch (err) {
+        logError(`discord.${domain}.${label}.failed`, {});
+        const fallback_embeds_fn = opts.fallback_embeds;
+        if (fallback_embeds_fn) {
+          payload = fallback_embeds_fn(err);
+        } else {
+          payload = {
+            content: opts.fallback_content ?? `${label} unavailable. Check server logs.`,
+            embeds:  [],
+          };
+        }
+      }
+      await doEditInteractionResponse({
+        applicationId:    app_id,
+        token,
+        content:          payload.content    ?? "",
+        embeds:           payload.embeds     ?? [],
+        components:       payload.components ?? [],
+        flags:            64,
+        allowed_mentions: { parse: [] },
+      }).catch(() => {});
+    })
+    .catch(() => {});
+
+  return deferredEphemeralResponse();
+}
+
 function runDeferredWiresHandler(interaction, asyncFn, label) {
   const app_id  = String(process.env.DISCORD_APPLICATION_ID ?? "");
   const token   = interaction.token;
@@ -962,10 +1018,27 @@ async function handleTemplatesAudit(context) {
   const db = getDb();
 
   try {
-    const { data, error } = await db.from("sms_templates").select("*");
-    if (error) throw error;
+    // Paginate to load all rows (Supabase default page size is 1000).
+    const PAGE_SIZE = 1000;
+    const all_rows = [];
+    let page = 0;
 
-    const rows = data ?? [];
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const from = page * PAGE_SIZE;
+      const to   = from + PAGE_SIZE - 1;
+      const { data: page_data, error: page_error } = await db
+        .from("sms_templates")
+        .select("*")
+        .range(from, to);
+      if (page_error) throw page_error;
+      const chunk = page_data ?? [];
+      all_rows.push(...chunk);
+      if (chunk.length < PAGE_SIZE) break;
+      page++;
+    }
+
+    const rows = all_rows;
     const total    = rows.length;
     const active   = rows.filter((r) => r.is_active).length;
     const inactive = total - active;
@@ -1088,52 +1161,37 @@ async function handleTemplatesStage1(context) {
 async function handleFeederScan({ options_array, context, interaction }) {
   const limit      = Math.min(Math.max(1, Number(getOption(options_array, "limit")) || 50), 200);
   const scan_limit = Math.max(1, Number(getOption(options_array, "scan_limit")) || 500);
-  const app_id     = String(process.env.DISCORD_APPLICATION_ID ?? "");
-  const token      = interaction.token;
 
-  // Fire real work as floating promise so Discord receives the deferred
-  // acknowledgement immediately.  Failure is silently swallowed so a crash
-  // in the background path cannot interrupt the deferred echo.
-  Promise.resolve()
-    .then(async () => {
-      let content;
-      let embeds;
+  return runDeferredDiscordHandler(interaction, async () => {
+    const result = await callInternal("/api/internal/outbound/feed-master-owners", {
+      method:     "POST",
+      body:       { limit, scan_limit, dry_run: true },
+      timeout_ms: 25_000,
+    });
 
-      try {
-        const result = await callInternal("/api/internal/outbound/feed-master-owners", {
-          method:     "POST",
-          body:       { limit, scan_limit, dry_run: true },
-          timeout_ms: 25_000,
-        });
-
-        if (result.timed_out) {
-          content = `Feeder scan (limit=${limit}) is still running — check alerts channel.`;
-        } else if (!result.ok) {
-          content = `Feeder scan error: ${result.error ?? "unknown"}.`;
-        } else {
-          const d = safeResultSummary(result.data, [
-            "eligible_count", "skipped_count", "loaded_count",
-            "total_scanned", "error_count",
-          ]);
-          embeds = [buildSuccessEmbed({
-            title:       `Feeder Scan — dry_run (limit=${limit})`,
-            description: [
-              `Eligible:  **${d.eligible_count  ?? "—"}**`,
-              `Skipped:   **${d.skipped_count   ?? "—"}**`,
-              `Scanned:   **${d.total_scanned ?? d.loaded_count ?? "—"}**`,
-            ].join("  |  "),
-          })];
-        }
-      } catch {
-        content = "Feeder scan encountered an error. Check server logs.";
-      }
-
-      await editOriginalInteractionResponse({ applicationId: app_id, token, content, embeds })
-        .catch(() => {});
-    })
-    .catch(() => {});
-
-  return deferredPublicResponse();
+    if (result.timed_out) {
+      return { content: `Feeder scan (limit=${limit}) is still running — check alerts channel.` };
+    }
+    if (!result.ok) {
+      return { content: `Feeder scan error: ${result.error ?? "unknown"}.` };
+    }
+    const d = safeResultSummary(result.data, [
+      "eligible_count", "skipped_count", "loaded_count",
+      "total_scanned", "error_count",
+    ]);
+    return {
+      embeds: [buildSuccessEmbed({
+        title:       `Feeder Scan — dry_run (limit=${limit})`,
+        description: [
+          `Eligible:  **${d.eligible_count  ?? "—"}**`,
+          `Skipped:   **${d.skipped_count   ?? "—"}**`,
+          `Scanned:   **${d.total_scanned ?? d.loaded_count ?? "—"}**`,
+        ].join("  |  "),
+      })],
+    };
+  }, "command", "feeder_scan", {
+    fallback_content: `Feeder scan encountered an error. Check server logs.`,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,50 +1242,37 @@ async function handleFeederLaunch({ options_array, context, interaction }) {
   }
 
   // Owner or limit ≤ 25 — execute with deferred response.
-  const app_id = String(process.env.DISCORD_APPLICATION_ID ?? "");
-  const token  = interaction.token;
+  return runDeferredDiscordHandler(interaction, async () => {
+    const result = await callInternal("/api/internal/outbound/feed-master-owners", {
+      method:     "POST",
+      body:       { limit, scan_limit, dry_run: false },
+      timeout_ms: 30_000,
+    });
 
-  Promise.resolve()
-    .then(async () => {
-      let content;
-      let embeds;
-
-      try {
-        const result = await callInternal("/api/internal/outbound/feed-master-owners", {
-          method:     "POST",
-          body:       { limit, scan_limit, dry_run: false },
-          timeout_ms: 30_000,
-        });
-
-        if (result.timed_out) {
-          content = `Feeder launch (limit=${limit}) is running — check alerts channel.`;
-        } else if (!result.ok) {
-          content = `Feeder launch error: ${result.error ?? "unknown"}.`;
-        } else {
-          const d = safeResultSummary(result.data, [
-            "eligible_count", "inserted_count",
-            "duplicate_count", "skipped_count", "loaded_count",
-          ]);
-          embeds = [buildSuccessEmbed({
-            title:       `Feeder Launch — Complete (limit=${limit})`,
-            description: [
-              `Inserted:  **${d.inserted_count  ?? "—"}**`,
-              `Eligible:  **${d.eligible_count  ?? "—"}**`,
-              `Skipped:   **${d.skipped_count   ?? "—"}**`,
-              `Dupes:     **${d.duplicate_count ?? "—"}**`,
-            ].join("  |  "),
-          })];
-        }
-      } catch {
-        content = "Feeder launch encountered an error. Check server logs.";
-      }
-
-      await editOriginalInteractionResponse({ applicationId: app_id, token, content, embeds })
-        .catch(() => {});
-    })
-    .catch(() => {});
-
-  return deferredPublicResponse();
+    if (result.timed_out) {
+      return { content: `Feeder launch (limit=${limit}) is running — check alerts channel.` };
+    }
+    if (!result.ok) {
+      return { content: `Feeder launch error: ${result.error ?? "unknown"}.` };
+    }
+    const d = safeResultSummary(result.data, [
+      "eligible_count", "inserted_count",
+      "duplicate_count", "skipped_count", "loaded_count",
+    ]);
+    return {
+      embeds: [buildSuccessEmbed({
+        title:       `Feeder Launch — Complete (limit=${limit})`,
+        description: [
+          `Inserted:  **${d.inserted_count  ?? "—"}**`,
+          `Eligible:  **${d.eligible_count  ?? "—"}**`,
+          `Skipped:   **${d.skipped_count   ?? "—"}**`,
+          `Dupes:     **${d.duplicate_count ?? "—"}**`,
+        ].join("  |  "),
+      })],
+    };
+  }, "command", "feeder_launch", {
+    fallback_content: `Feeder launch encountered an error. Check server logs.`,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1452,103 +1497,87 @@ async function handleTargetScan({ options_array, context, interaction }) {
     user_id: context.user_id,
   });
 
-  Promise.resolve()
-    .then(async () => {
-      let embeds;
-      let content;
+  return runDeferredDiscordHandler(interaction, async () => {
+    const result = await callInternal("/api/internal/outbound/feed-master-owners", {
+      method: "POST",
+      body: {
+        dry_run:          true,
+        limit,
+        scan_limit,
+        source_view_name,
+        targeting_filters: Object.keys(targeting.filters).length > 0 ? targeting.filters : undefined,
+        property_tags:     targeting.tags.length > 0
+          ? targeting.tags.map((t) => t.slug)
+          : undefined,
+      },
+      timeout_ms: 30_000,
+    });
 
-      try {
-        const result = await callInternal("/api/internal/outbound/feed-master-owners", {
-          method: "POST",
-          body: {
-            dry_run:          true,
-            limit,
-            scan_limit,
-            source_view_name,
-            targeting_filters: Object.keys(targeting.filters).length > 0 ? targeting.filters : undefined,
-            property_tags:     targeting.tags.length > 0
-              ? targeting.tags.map((t) => t.slug)
-              : undefined,
-          },
-          timeout_ms: 30_000,
-        });
+    if (result.timed_out) {
+      return { content: "Target scan is still running — check alerts channel." };
+    }
+    if (!result.ok) {
+      return { content: `Target scan error: ${result.error ?? "unknown"}.` };
+    }
 
-        if (result.timed_out) {
-          content = "Target scan is still running — check alerts channel.";
-        } else if (!result.ok) {
-          content = `Target scan error: ${result.error ?? "unknown"}.`;
-        } else {
-          const payload = result.data ?? {};
-          const feeder  = payload.result ?? {};
-          const scan_summary = {
-            scanned:    feeder.loaded_count   ?? 0,
-            eligible:   feeder.eligible_count ?? 0,
-            would_queue: feeder.inserted_count ?? 0,
-            skipped:    feeder.skipped_count  ?? 0,
-          };
+    const payload = result.data ?? {};
+    const feeder  = payload.result ?? {};
+    const scan_summary = {
+      scanned:    feeder.loaded_count   ?? 0,
+      eligible:   feeder.eligible_count ?? 0,
+      would_queue: feeder.inserted_count ?? 0,
+      skipped:    feeder.skipped_count  ?? 0,
+    };
 
-          try {
-            const db = getDb();
-            const { data: existing } = await db
-              .from("campaign_targets")
-              .select("id")
-              .eq("campaign_key", campaign_key)
-              .maybeSingle();
-            if (existing) {
-              await db
-                .from("campaign_targets")
-                .update({
-                  last_scan_summary: scan_summary,
-                  last_scan_at:  new Date().toISOString(),
-                  updated_at:    new Date().toISOString(),
-                })
-                .eq("campaign_key", campaign_key);
-            }
-          } catch {
-            // Non-fatal
-          }
-
-          info("discord.target.scan.completed", {
-            market:     targeting.market_slug,
-            asset:      targeting.asset_slug,
-            strategy:   targeting.strategy_slug,
-            ...scan_summary,
-            user_id: context.user_id,
-          });
-
-          embeds = [buildTargetScanEmbed({
-            market:          targeting.market_slug,
-            asset:           targeting.asset_slug,
-            strategy:        targeting.strategy_slug,
-            market_label:    targeting.market_label,
-            asset_label:     targeting.asset_label,
-            strategy_label:  targeting.strategy_label,
-            theme:           targeting.theme,
-            tags:            targeting.tags,
-            filters:         targeting.filters,
-            source_view_name,
-            scanned:     scan_summary.scanned,
-            eligible:    scan_summary.eligible,
-            would_queue: scan_summary.would_queue,
-            skipped:     scan_summary.skipped,
-          })];
-        }
-      } catch (err) {
-        logError("discord.target.command.failed", { command: "target.scan", user_id: context.user_id });
-        content = "Target scan encountered an error. Check server logs.";
+    try {
+      const db = getDb();
+      const { data: existing } = await db
+        .from("campaign_targets")
+        .select("id")
+        .eq("campaign_key", campaign_key)
+        .maybeSingle();
+      if (existing) {
+        await db
+          .from("campaign_targets")
+          .update({
+            last_scan_summary: scan_summary,
+            last_scan_at:  new Date().toISOString(),
+            updated_at:    new Date().toISOString(),
+          })
+          .eq("campaign_key", campaign_key);
       }
+    } catch {
+      // Non-fatal
+    }
 
-      await editOriginalInteractionResponse({
-        applicationId: app_id,
-        token,
-        content,
-        embeds,
-        components: embeds ? targetActionRow({ campaignKey: campaign_key }) : undefined,
-      }).catch(() => {});
-    })
-    .catch(() => {});
+    info("discord.target.scan.completed", {
+      market:     targeting.market_slug,
+      asset:      targeting.asset_slug,
+      strategy:   targeting.strategy_slug,
+      ...scan_summary,
+      user_id: context.user_id,
+    });
 
-  return deferredPublicResponse();
+    const embeds = [buildTargetScanEmbed({
+      market:          targeting.market_slug,
+      asset:           targeting.asset_slug,
+      strategy:        targeting.strategy_slug,
+      market_label:    targeting.market_label,
+      asset_label:     targeting.asset_label,
+      strategy_label:  targeting.strategy_label,
+      theme:           targeting.theme,
+      tags:            targeting.tags,
+      filters:         targeting.filters,
+      source_view_name,
+      scanned:     scan_summary.scanned,
+      eligible:    scan_summary.eligible,
+      would_queue: scan_summary.would_queue,
+      skipped:     scan_summary.skipped,
+    })];
+    return { embeds, components: targetActionRow({ campaignKey: campaign_key }) };
+  }, "command", "target_scan", {
+    fallback_content: "Target scan encountered an error. Check server logs.",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1834,116 +1863,119 @@ async function handleTerritoryMap(context) {
 // Command: /email
 // ---------------------------------------------------------------------------
 
-async function handleEmailCockpit(context) {
-  try {
+async function handleEmailCockpit({ context, interaction }) {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/email/cockpit", { method: "GET" });
-    if (!result?.ok) {
-      return cinematicMessage([buildEmailCockpitEmbed({})], emailActionRow());
-    }
-    const embed = buildEmailCockpitEmbed(result);
-    return cinematicMessage([embed], emailActionRow());
-  } catch {
-    return errorResponse("Email cockpit unavailable.");
-  }
+    const embed = buildEmailCockpitEmbed(result?.ok ? result : {});
+    return { embeds: [embed], components: emailActionRow() };
+  }, "command", "email_cockpit", {
+    fallback_content: "Email cockpit unavailable. Check server logs.",
+  });
 }
 
-async function handleEmailPreview({ options_array, context }) {
+async function handleEmailPreview({ options_array, context, interaction }) {
   const template_key = options_array?.find(o => o.name === "template_key")?.value ?? "";
   const owner_id     = options_array?.find(o => o.name === "owner_id")?.value     ?? null;
   if (!template_key) return errorResponse("template_key is required.");
-  try {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/email/preview", {
       method: "POST",
       body: { template_key, context: { owner_id } },
     });
-    if (!result?.ok) return errorResponse("Preview failed.");
+    if (!result?.ok) {
+      return { content: "Preview failed." };
+    }
     const { preview = {} } = result;
     const embed = buildEmailPreviewEmbed({ template_key, ...preview });
-    return cinematicMessage([embed]);
-  } catch {
-    return errorResponse("Email preview unavailable.");
-  }
+    return { embeds: [embed] };
+  }, "command", "email_preview", {
+    fallback_content: "Email preview unavailable. Check server logs.",
+  });
 }
 
-async function handleEmailSendTest({ options_array, context }) {
+async function handleEmailSendTest({ options_array, context, interaction }) {
   const email_address = options_array?.find(o => o.name === "email_address")?.value ?? "";
   const template_key  = options_array?.find(o => o.name === "template_key")?.value  ?? "";
   if (!email_address || !template_key) return errorResponse("email_address and template_key are required.");
-  try {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/email/send-test", {
       method: "POST",
       body: { email_address, template_key, context: {} },
     });
     if (!result?.ok) {
       const embed = buildEmailSendTestEmbed({ sent: false, email_address, template_key, error: result?.error ?? "Send failed" });
-      return cinematicMessage([embed]);
+      return { embeds: [embed] };
     }
     const embed = buildEmailSendTestEmbed({ sent: true, email_address, template_key, brevo_message_id: result.brevo_message_id });
-    return cinematicMessage([embed]);
-  } catch {
-    return errorResponse("Email send-test unavailable.");
-  }
+    return { embeds: [embed] };
+  }, "command", "email_send_test", {
+    fallback_content: "Email send-test unavailable. Check server logs.",
+  });
 }
 
-async function handleEmailQueueStatus({ options_array, context }) {
+async function handleEmailQueueStatus({ options_array, context, interaction }) {
   const limit   = options_array?.find(o => o.name === "limit")?.value   ?? 20;
   const dry_run = options_array?.find(o => o.name === "dry_run")?.value  ?? true;
-  try {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/email/queue/run", {
       method: "POST",
       body: { limit, dry_run },
     });
-    if (!result?.ok) return errorResponse("Email queue run failed.");
+    if (!result?.ok) {
+      return { content: "Email queue run failed." };
+    }
     const embed = buildEmailStatsEmbed({
-      event_type_counts:  { attempted: result.attempted_count ?? 0, sent: result.sent_count ?? 0, failed: result.failed_count ?? 0, skipped: result.skipped_count ?? 0 },
-      suppression_total:  0,
-      latest_event_at:    null,
+      event_type_counts: { attempted: result.attempted_count ?? 0, sent: result.sent_count ?? 0, failed: result.failed_count ?? 0, skipped: result.skipped_count ?? 0 },
+      suppression_total: 0,
+      latest_event_at:   null,
     });
-    return cinematicMessage([embed], emailActionRow());
-  } catch {
-    return errorResponse("Email queue status unavailable.");
-  }
+    return { embeds: [embed], components: emailActionRow() };
+  }, "command", "email_queue", {
+    fallback_content: "Email queue status unavailable. Check server logs.",
+  });
 }
 
-async function handleEmailSuppression(context) {
-  try {
+async function handleEmailSuppression({ context, interaction }) {
+  return runDeferredDiscordHandler(interaction, async () => {
     const db = getDb();
     const { count, data, error } = await db
       .from("email_suppression")
       .select("email_address, reason, suppressed_at", { count: "exact" })
       .order("suppressed_at", { ascending: false })
       .limit(10);
-    if (error) return errorResponse("Failed to load suppression list.");
+    if (error) throw error;
     const embed = buildEmailSuppressionEmbed({
       suppression_total:   count ?? 0,
       recent_suppressions: data  ?? [],
     });
-    return cinematicMessage([embed]);
-  } catch {
-    return errorResponse("Email suppression unavailable.");
-  }
+    return { embeds: [embed] };
+  }, "command", "email_suppression", {
+    fallback_content: "Email suppression unavailable. Check server logs.",
+  });
 }
 
-async function handleEmailStats(context) {
-  try {
+async function handleEmailStats({ context, interaction }) {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/email/cockpit", { method: "GET" });
-    if (!result?.ok) return errorResponse("Email stats unavailable.");
+    if (!result?.ok) {
+      return { content: "Email stats unavailable." };
+    }
     const embed = buildEmailStatsEmbed({
       event_type_counts: result.event_type_counts  ?? {},
       latest_event_at:   result.latest_event_at    ?? null,
       suppression_total: result.suppression_total  ?? 0,
     });
-    return cinematicMessage([embed], emailActionRow());
-  } catch {
-    return errorResponse("Email stats unavailable.");
-  }
+    return { embeds: [embed], components: emailActionRow() };
+  }, "command", "email_stats", {
+    fallback_content: "Email stats unavailable. Check server logs.",
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Command: /replay
 // ---------------------------------------------------------------------------
 
-async function handleReplayInbound({ options_array, context }) {
+async function handleReplayInbound({ options_array, context, interaction }) {
   const text       = options_array?.find(o => o.name === "text")?.value       ?? "";
   const language   = options_array?.find(o => o.name === "language")?.value   ?? "English";
   const stage      = options_array?.find(o => o.name === "stage")?.value      ?? null;
@@ -1952,7 +1984,7 @@ async function handleReplayInbound({ options_array, context }) {
 
   if (!text) return errorResponse("text is required.");
 
-  try {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/testing/replay-inbound", {
       method: "POST",
       body: {
@@ -1966,7 +1998,7 @@ async function handleReplayInbound({ options_array, context }) {
     });
 
     if (!result?.ok) {
-      return errorResponse(`Replay failed: ${result?.error ?? "unknown error"}`);
+      return { content: `Replay failed: ${result?.error ?? "unknown error"}` };
     }
 
     const embed = buildReplayInboundEmbed({
@@ -1982,19 +2014,19 @@ async function handleReplayInbound({ options_array, context }) {
       alignment_passed:        result.alignment_passed ?? true,
     });
 
-    return cinematicMessage([embed]);
-  } catch (err) {
-    return errorResponse("Replay inbound unavailable.");
-  }
+    return { embeds: [embed] };
+  }, "command", "replay_inbound", {
+    fallback_content: "Replay inbound unavailable. Check server logs.",
+  });
 }
 
-async function handleReplayOwner({ options_array, context }) {
+async function handleReplayOwner({ options_array, context, interaction }) {
   const owner_id = options_array?.find(o => o.name === "owner_id")?.value ?? "";
   const text     = options_array?.find(o => o.name === "text")?.value     ?? "";
 
   if (!owner_id || !text) return errorResponse("owner_id and text are required.");
 
-  try {
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/testing/replay-inbound", {
       method: "POST",
       body: {
@@ -2005,7 +2037,7 @@ async function handleReplayOwner({ options_array, context }) {
     });
 
     if (!result?.ok) {
-      return errorResponse(`Replay failed: ${result?.error ?? "unknown error"}`);
+      return { content: `Replay failed: ${result?.error ?? "unknown error"}` };
     }
 
     const embed = buildReplayOwnerEmbed({
@@ -2024,21 +2056,20 @@ async function handleReplayOwner({ options_array, context }) {
       would_queue:          result.would_queue_reply ?? false,
     });
 
-    return cinematicMessage([embed]);
-  } catch (err) {
-    return errorResponse("Replay owner unavailable.");
-  }
+    return { embeds: [embed] };
+  }, "command", "replay_owner", {
+    fallback_content: "Replay owner unavailable. Check server logs.",
+  });
 }
 
-async function handleReplayTemplate({ options_array, context }) {
+async function handleReplayTemplate({ options_array, context, interaction }) {
   const use_case      = options_array?.find(o => o.name === "use_case")?.value ?? "";
   const language      = options_array?.find(o => o.name === "language")?.value ?? "English";
   const property_type = options_array?.find(o => o.name === "property_type")?.value ?? "Single Family";
 
   if (!use_case) return errorResponse("use_case is required.");
 
-  try {
-    // Call replay with empty message to trigger template resolution only
+  return runDeferredDiscordHandler(interaction, async () => {
     const result = await callInternal("/api/internal/testing/replay-inbound", {
       method: "POST",
       body: {
@@ -2050,7 +2081,7 @@ async function handleReplayTemplate({ options_array, context }) {
     });
 
     if (!result?.ok || !result.selected_template_id) {
-      return errorResponse("Template resolution failed");
+      return { content: "Template resolution failed" };
     }
 
     const embed = buildReplayTemplateEmbed({
@@ -2063,13 +2094,13 @@ async function handleReplayTemplate({ options_array, context }) {
       property_type_resolved: property_type,
     });
 
-    return cinematicMessage([embed]);
-  } catch (err) {
-    return errorResponse("Template resolution unavailable.");
-  }
+    return { embeds: [embed] };
+  }, "command", "replay_template", {
+    fallback_content: "Template resolution unavailable. Check server logs.",
+  });
 }
 
-async function handleReplayBatch({ options_array, context }) {
+async function handleReplayBatch({ options_array, context, interaction }) {
   const scenario = options_array?.find(o => o.name === "scenario")?.value ?? "all";
 
   const scenarios_map = {
@@ -2105,48 +2136,175 @@ async function handleReplayBatch({ options_array, context }) {
     test_cases = scenarios_map[scenario] ?? [];
   }
 
-  const results = [];
-  let passed = 0;
-  let warnings = 0;
-  let failed = 0;
+  return runDeferredDiscordHandler(interaction, async () => {
+    const results = [];
+    let passed = 0;
+    let warnings = 0;
+    let failed = 0;
 
-  for (const test_case of test_cases) {
-    try {
-      const result = await callInternal("/api/internal/testing/replay-inbound", {
-        method: "POST",
-        body: {
-          message_body: test_case.text,
-          prior_stage:  test_case.stage,
-          dry_run:      true,
-        },
-      });
+    for (const test_case of test_cases) {
+      try {
+        const result = await callInternal("/api/internal/testing/replay-inbound", {
+          method: "POST",
+          body: {
+            message_body: test_case.text,
+            prior_stage:  test_case.stage,
+            dry_run:      true,
+          },
+        });
 
-      if (result?.ok && result?.alignment_passed) {
-        results.push({ name: test_case.text, status: "pass", note: result.selected_use_case });
-        passed++;
-      } else if (result?.ok) {
-        results.push({ name: test_case.text, status: "warn", note: "alignment warning" });
-        warnings++;
-      } else {
-        results.push({ name: test_case.text, status: "fail", note: result?.error });
+        if (result?.ok && result?.alignment_passed) {
+          results.push({ name: test_case.text, status: "pass", note: result.selected_use_case });
+          passed++;
+        } else if (result?.ok) {
+          results.push({ name: test_case.text, status: "warn", note: "alignment warning" });
+          warnings++;
+        } else {
+          results.push({ name: test_case.text, status: "fail", note: result?.error });
+          failed++;
+        }
+      } catch {
+        results.push({ name: test_case.text, status: "fail", note: "error" });
         failed++;
       }
-    } catch (err) {
-      results.push({ name: test_case.text, status: "fail", note: "error" });
-      failed++;
     }
-  }
 
-  const embed = buildReplayBatchEmbed({
-    scenario,
-    tested:   test_cases.length,
-    passed,
-    warnings,
-    failed,
-    results,
+    const embed = buildReplayBatchEmbed({
+      scenario,
+      tested:   test_cases.length,
+      passed,
+      warnings,
+      failed,
+      results,
+    });
+
+    return { embeds: [embed] };
+  }, "command", "replay_batch", {
+    fallback_content: "Replay batch unavailable. Check server logs.",
   });
+}
 
-  return cinematicMessage([embed]);
+// ---------------------------------------------------------------------------
+// /briefing handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Deferred handler for all /briefing subcommands.
+ * Immediately returns type:5 ephemeral deferred, then edits with the full embed.
+ *
+ * @param {object}   interaction
+ * @param {Function} asyncFn     - Async fn resolving to { embeds, components }
+ * @param {string}   label       - short log tag (today/yesterday/week/market/agent)
+ * @param {object}   meta        - Extra info for logging (range, market, agent)
+ */
+function runDeferredBriefingHandler(interaction, asyncFn, label, meta = {}) {
+  const app_id  = String(process.env.DISCORD_APPLICATION_ID ?? "");
+  const token   = interaction.token;
+  const user_id = interaction.member?.user?.id ?? "unknown";
+  const started = Date.now();
+
+  info("discord.briefing.started", { label, user_id, ...meta });
+
+  Promise.resolve()
+    .then(async () => {
+      let payload;
+      try {
+        payload = await asyncFn();
+        const duration_ms = Date.now() - started;
+        info("discord.briefing.completed", {
+          label, user_id, duration_ms,
+          partial: payload?.partial ?? false,
+          ...meta,
+        });
+      } catch (err) {
+        const duration_ms = Date.now() - started;
+        logError("discord.briefing.failed", { label, user_id, duration_ms, ...meta });
+        payload = {
+          embeds: [{
+            title:       "⚠️ Briefing Unavailable",
+            description: "The briefing could not be generated. Check server logs.",
+            color:       0xF1C40F,
+          }],
+          components: [],
+        };
+      }
+      await doEditInteractionResponse({
+        applicationId:    app_id,
+        token,
+        content:          "",
+        embeds:           payload.embeds     ?? [],
+        components:       payload.components ?? [],
+        flags:            64,
+        allowed_mentions: { parse: [] },
+      }).catch(() => {});
+    })
+    .catch(() => {});
+
+  return deferredEphemeralResponse();
+}
+
+/**
+ * handleBriefingToday
+ */
+function handleBriefingToday({ options_array, context, interaction }) {
+  const timezone = String(options_array?.find(o => o.name === "timezone")?.value ?? "America/Chicago");
+  const market   = options_array?.find(o => o.name === "market")?.value ?? null;
+  return runDeferredBriefingHandler(interaction, async () => {
+    const metrics = await getDailyBriefing({ range: "today", timezone, market, supabase: getDb() });
+    return { embeds: [buildDailyBriefingEmbed(metrics)], components: briefingActionRow(), partial: metrics.partial };
+  }, "today", { timezone, market });
+}
+
+/**
+ * handleBriefingYesterday
+ */
+function handleBriefingYesterday({ options_array, context, interaction }) {
+  const timezone = String(options_array?.find(o => o.name === "timezone")?.value ?? "America/Chicago");
+  const market   = options_array?.find(o => o.name === "market")?.value ?? null;
+  return runDeferredBriefingHandler(interaction, async () => {
+    const metrics = await getDailyBriefing({ range: "yesterday", timezone, market, supabase: getDb() });
+    return { embeds: [buildDailyBriefingEmbed(metrics)], components: briefingActionRow(), partial: metrics.partial };
+  }, "yesterday", { timezone, market });
+}
+
+/**
+ * handleBriefingWeek
+ */
+function handleBriefingWeek({ options_array, context, interaction }) {
+  const timezone = String(options_array?.find(o => o.name === "timezone")?.value ?? "America/Chicago");
+  const market   = options_array?.find(o => o.name === "market")?.value ?? null;
+  return runDeferredBriefingHandler(interaction, async () => {
+    const metrics = await getDailyBriefing({ range: "week", timezone, market, supabase: getDb() });
+    return { embeds: [buildDailyBriefingEmbed(metrics)], components: briefingActionRow(), partial: metrics.partial };
+  }, "week", { timezone, market });
+}
+
+/**
+ * handleBriefingMarket
+ */
+function handleBriefingMarket({ options_array, context, interaction }) {
+  const market   = String(options_array?.find(o => o.name === "market")?.value ?? "");
+  const range    = String(options_array?.find(o => o.name === "range")?.value ?? "today");
+  if (!market) return errorResponse("market is required for /briefing market.");
+  const timezone = "America/Chicago";
+  return runDeferredBriefingHandler(interaction, async () => {
+    const metrics = await getDailyBriefing({ range, timezone, market, supabase: getDb() });
+    return { embeds: [buildDailyBriefingEmbed(metrics)], components: briefingActionRow(), partial: metrics.partial };
+  }, "market", { market, range });
+}
+
+/**
+ * handleBriefingAgent
+ */
+function handleBriefingAgent({ options_array, context, interaction }) {
+  const agent  = String(options_array?.find(o => o.name === "agent")?.value ?? "").trim();
+  const range  = String(options_array?.find(o => o.name === "range")?.value ?? "today");
+  if (!agent) return errorResponse("agent is required for /briefing agent.");
+  const timezone = "America/Chicago";
+  return runDeferredBriefingHandler(interaction, async () => {
+    const metrics = await getDailyBriefing({ range, timezone, agent, supabase: getDb() });
+    return { embeds: [buildDailyBriefingEmbed(metrics)], components: briefingActionRow(), partial: metrics.partial };
+  }, "agent", { agent, range });
 }
 
 // ---------------------------------------------------------------------------
@@ -2669,6 +2827,28 @@ export async function routeDiscordInteraction(interaction) {
       return handleQueueRun({ options_array: [{ name: "limit", value: run_limit }], context: ctx });
     }
 
+    // Briefing quick-action buttons
+    if (custom_id === "briefing:refresh") {
+      return handleBriefingToday({ options_array: [], context: ctx, interaction });
+    }
+    if (custom_id === "briefing:hot_leads") {
+      return handleHotleads({ options_array: [], context: ctx });
+    }
+    if (custom_id === "briefing:queue_scan") {
+      return handleQueueCockpit(ctx);
+    }
+    if (custom_id === "briefing:scale_campaign" || custom_id === "briefing:export") {
+      return cinematicMessage({
+        embeds: [buildSuccessEmbed({
+          title:       custom_id === "briefing:scale_campaign" ? "Scale Campaign" : "Export Summary",
+          description: custom_id === "briefing:scale_campaign"
+            ? "Use `/campaign scale` with a campaign key to update the daily cap."
+            : "Export is not yet implemented. Use `/briefing today` to regenerate.",
+        })],
+        ephemeral: true,
+      });
+    }
+
     return updateMessage("⚠️ Unknown button interaction.");
   }
 
@@ -2682,6 +2862,13 @@ export async function routeDiscordInteraction(interaction) {
   const sub            = getSubcommand(top_options);
   const sub_name       = sub?.name ?? null;
   const sub_opts       = sub?.options ?? top_options;
+
+  const cmd_label = sub_name ? `${command_name}.${sub_name}` : command_name;
+  const user_last4 = String(context.user_id ?? "").slice(-4) || "unknown";
+  const guild_last4 = String(context.guild_id ?? "").slice(-4) || "unknown";
+  const cmd_started = Date.now();
+
+  info("discord.command.started", { command: cmd_label, user_last4, guild_last4 });
 
   let response;
 
@@ -2906,17 +3093,17 @@ export async function routeDiscordInteraction(interaction) {
       if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
         response = deniedResponse("Requires **Tech Ops** or **Owner**.");
       } else if (sub_name === "cockpit") {
-        response = await handleEmailCockpit(context);
+        response = await handleEmailCockpit({ context, interaction });
       } else if (sub_name === "preview") {
-        response = await handleEmailPreview({ options_array: sub_opts, context });
+        response = await handleEmailPreview({ options_array: sub_opts, context, interaction });
       } else if (sub_name === "send-test") {
-        response = await handleEmailSendTest({ options_array: sub_opts, context });
+        response = await handleEmailSendTest({ options_array: sub_opts, context, interaction });
       } else if (sub_name === "queue") {
-        response = await handleEmailQueueStatus({ options_array: sub_opts, context });
+        response = await handleEmailQueueStatus({ options_array: sub_opts, context, interaction });
       } else if (sub_name === "suppression") {
-        response = await handleEmailSuppression(context);
+        response = await handleEmailSuppression({ context, interaction });
       } else if (sub_name === "stats") {
-        response = await handleEmailStats(context);
+        response = await handleEmailStats({ context, interaction });
       } else {
         response = errorResponse(`Unknown /email subcommand: ${sub_name}`);
       }
@@ -2927,25 +3114,25 @@ export async function routeDiscordInteraction(interaction) {
         if (!checkPermission(role_ids, ["sms_ops", "tech_ops", "owner"])) {
           response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
         } else {
-          response = await handleReplayInbound({ options_array: sub_opts, context });
+          response = await handleReplayInbound({ options_array: sub_opts, context, interaction });
         }
       } else if (sub_name === "owner") {
         if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
           response = deniedResponse("Requires **Tech Ops** or **Owner**.");
         } else {
-          response = await handleReplayOwner({ options_array: sub_opts, context });
+          response = await handleReplayOwner({ options_array: sub_opts, context, interaction });
         }
       } else if (sub_name === "template") {
         if (!checkPermission(role_ids, ["sms_ops", "tech_ops", "owner"])) {
           response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
         } else {
-          response = await handleReplayTemplate({ options_array: sub_opts, context });
+          response = await handleReplayTemplate({ options_array: sub_opts, context, interaction });
         }
       } else if (sub_name === "batch") {
         if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
           response = deniedResponse("Requires **Tech Ops** or **Owner**.");
         } else {
-          response = await handleReplayBatch({ options_array: sub_opts, context });
+          response = await handleReplayBatch({ options_array: sub_opts, context, interaction });
         }
       } else {
         response = errorResponse(`Unknown /replay subcommand: ${sub_name}`);
@@ -2999,13 +3186,39 @@ export async function routeDiscordInteraction(interaction) {
         response = errorResponse(`Unknown /wires subcommand: ${sub_name}`);
       }
 
+    // ── /briefing ─────────────────────────────────────────────────────────────
+    } else if (command_name === "briefing") {
+      if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops", "closings", "acquisitions"])) {
+        response = deniedResponse("Requires **Owner**, **Tech Ops**, **SMS Ops**, **Closings**, or **Acquisitions**.");
+      } else if (sub_name === "today") {
+        response = handleBriefingToday({ options_array: sub_opts, context, interaction });
+      } else if (sub_name === "yesterday") {
+        response = handleBriefingYesterday({ options_array: sub_opts, context, interaction });
+      } else if (sub_name === "week") {
+        response = handleBriefingWeek({ options_array: sub_opts, context, interaction });
+      } else if (sub_name === "market") {
+        response = handleBriefingMarket({ options_array: sub_opts, context, interaction });
+      } else if (sub_name === "agent") {
+        response = handleBriefingAgent({ options_array: sub_opts, context, interaction });
+      } else {
+        response = errorResponse(`Unknown /briefing subcommand: ${sub_name}`);
+      }
+
     } else {
       response = errorResponse(`Unknown command: /${command_name}`);
     }
   } catch {
+    logError("discord.command.failed", { command: cmd_label, user_last4, guild_last4 });
     response = errorResponse("Unexpected error processing your command.");
   }
 
+  info("discord.command.completed", {
+    command:    cmd_label,
+    user_last4,
+    guild_last4,
+    duration_ms: Date.now() - cmd_started,
+    response_type: response?.type ?? null,
+  });
   // ── Audit every slash command ─────────────────────────────────────────────
   // (Button approvals are audited within handleApproval itself.)
   if (interaction.type === 2) {

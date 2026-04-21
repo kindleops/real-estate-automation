@@ -1841,7 +1841,7 @@ export function buildDailyBriefingEmbed(metrics = {}) {
   fields.push(f(
     "✉️ Email",
     emailUnavailable
-      ? "Unavailable — email_send_queue not configured"
+      ? "Unavailable — email data not configured"
       : `Sent: **${n(em.sent)}**  |  Delivered: **${n(em.delivered)}**  |  Opened: **${n(em.opened)}**  |  Clicked: **${n(em.clicked)}**`,
     false,
   ));
@@ -1883,7 +1883,7 @@ export function buildDailyBriefingEmbed(metrics = {}) {
   fields.push(f(
     "🏦 Revenue / Wires",
     wireUnavailable
-      ? "Unavailable — wire_events not configured or missing"
+      ? "Unavailable — wire data not configured or migration pending"
       : [
           `Cleared: **${n(rv.cleared_wires)}** (${usd(rv.cleared_wire_amount)})  |  Pending: **${n(rv.pending_wires)}** (${usd(rv.pending_wire_amount)})`,
           `Pipeline: **${usd(rv.projected_pipeline_value)}**`,
@@ -1916,10 +1916,20 @@ export function buildDailyBriefingEmbed(metrics = {}) {
 
   // 9. Partial warning (if any sources errored)
   if (partial && source_errors.length > 0) {
-    const failed_sources = source_errors.map(e => e.source).join(", ");
+    // Map internal source IDs to user-friendly labels — never expose raw table names.
+    const SOURCE_LABELS = {
+      message_events:  "SMS events",
+      email_send_queue: "Email queue",
+      wire_events:     "Wire data",
+      send_queue:      "Send queue",
+      campaign_targets: "Campaign targets",
+    };
+    const friendly = [...new Set(
+      source_errors.map(e => SOURCE_LABELS[e.source] ?? "one or more data sources")
+    )].join(", ");
     fields.push(f(
       "⚠️ Partial Data",
-      `Some data sources were unavailable: ${failed_sources}. Metrics may be incomplete.`,
+      `Some data was unavailable: ${friendly}. Metrics may be incomplete.`,
       false,
     ));
   }

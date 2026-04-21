@@ -121,6 +121,7 @@ function makeSupabaseMock(tableMap = {}) {
         limit:       () => chain,
         order:       () => chain,
         not:         () => chain,
+        range:       () => chain,
         in:          (...a) => chain,
         upsert:      () => Promise.resolve({ error: spec.error ?? null }),
         insert:      () => Promise.resolve({ error: spec.error ?? null }),
@@ -618,6 +619,212 @@ test("/queue cockpit returns a queue cockpit embed", async () => {
     assert.ok(response.data?.embeds?.length > 0, "has embed");
     const embed = response.data.embeds[0];
     assert.ok(embed.title?.toLowerCase().includes("cockpit"), "title references cockpit");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 13. Template audit paginates across multiple pages
+// ---------------------------------------------------------------------------
+
+test("/templates audit paginates and reports full 2500-row inventory", async () => {
+  // Simulate 3 pages: 1000 + 1000 + 500 = 2500 rows total
+  const page1 = Array.from({ length: 1000 }, (_, i) => ({
+    id: i + 1, is_active: true, language: "en",
+    use_case: "ownership_check", stage_code: "S1",
+    is_first_touch: true, template_body: "Hello",
+  }));
+  const page2 = Array.from({ length: 1000 }, (_, i) => ({
+    id: i + 1001, is_active: true, language: "es",
+    use_case: "follow_up", stage_code: "S2",
+    is_first_touch: false, template_body: "Hola",
+  }));
+  const page3 = Array.from({ length: 500 }, (_, i) => ({
+    id: i + 2001, is_active: false, language: "en",
+    use_case: "offer_reveal_cash", stage_code: "S3",
+    is_first_touch: false, template_body: "",
+  }));
+
+  let page_call = 0;
+  const mock = {
+    from(table) {
+      const chain = {
+        select:      () => chain,
+        eq:          () => chain,
+        or:          () => chain,
+        limit:       () => chain,
+        order:       () => chain,
+        range(from, to) {
+          // Return next page each call
+          const pages = [page1, page2, page3];
+          const p = page_call++;
+          chain._page_data = pages[p] ?? [];
+          return chain;
+        },
+        insert:      () => Promise.resolve({ error: null }),
+        upsert:      () => Promise.resolve({ error: null }),
+        update:      () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        then(resolve, reject) {
+          return Promise.resolve({ data: chain._page_data ?? [], error: null }).then(resolve, reject);
+        },
+        _page_data: [],
+      };
+      return chain;
+    },
+  };
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "templates",
+      subcommand: "audit",
+      role_ids:   ["owner_role"],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+
+    assert.ok(response, "got a response");
+    assert.equal(response.type, 4, "type 4 synchronous response");
+    assert.ok(response.data?.embeds?.length > 0, "has embed");
+
+    const embed = response.data.embeds[0];
+    const inventoryField = embed.fields.find(f => f.name?.includes("Inventory"));
+    assert.ok(inventoryField, "has Inventory field");
+    // The inventory count should reflect all 2500 rows
+    assert.ok(inventoryField.value.includes("2500") || inventoryField.value.includes("2,500"),
+      "inventory should show full total of 2500 rows across all pages");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 14. /email cockpit is deferred (type 5)
+// ---------------------------------------------------------------------------
+
+test("/email cockpit returns deferred response type 5", async () => {
+  const mock = makeSupabaseMock({
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "email",
+      subcommand: "cockpit",
+      role_ids:   ["owner_role"],
+      token:      "email_cockpit_token",
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+
+    assert.ok(response, "got a response");
+    assert.equal(response.type, 5, "type 5 = deferred (email cockpit must defer immediately)");
+    assert.ok(response.data?.flags & 64, "deferred response is ephemeral");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 15. /replay inbound is deferred (type 5)
+// ---------------------------------------------------------------------------
+
+test("/replay inbound returns deferred response type 5", async () => {
+  const mock = makeSupabaseMock({
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "replay",
+      subcommand: "inbound",
+      options:    [{ name: "text", value: "What is your offer?" }],
+      role_ids:   ["owner_role"],
+      token:      "replay_inbound_token",
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+
+    assert.ok(response, "got a response");
+    assert.equal(response.type, 5, "type 5 = deferred (replay inbound must defer immediately)");
+    assert.ok(response.data?.flags & 64, "deferred response is ephemeral");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 16. Deferred handlers always call editInteractionResponse (never silent-fail)
+// ---------------------------------------------------------------------------
+
+test("/feeder scan deferred handler calls editInteractionResponse on callInternal failure", async () => {
+  let edit_called = false;
+
+  const mock = makeSupabaseMock({
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({
+    supabase_override: mock,
+    callInternal_override: async () => ({ ok: false, error: "HTTP 400" }),
+    editInteractionResponse_override: async (opts) => {
+      edit_called = true;
+      assert.ok(opts.content?.includes("400") || opts.content?.includes("error"),
+        "edit should surface the error message");
+    },
+  });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "feeder",
+      subcommand: "scan",
+      options:    [{ name: "limit", value: 10 }],
+      role_ids:   ["owner_role"],
+      token:      "feeder_fail_token",
+    });
+
+    await routeDiscordInteraction(interaction);
+
+    // Wait for the floating Promise to settle
+    await new Promise(r => setTimeout(r, 50));
+    assert.ok(edit_called, "editInteractionResponse must be called even on callInternal failure");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/replay inbound deferred handler calls editInteractionResponse on callInternal failure", async () => {
+  let edit_called = false;
+
+  const mock = makeSupabaseMock({
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({
+    supabase_override: mock,
+    callInternal_override: async () => ({ ok: false, status: 401, error: "HTTP 401" }),
+    editInteractionResponse_override: async (opts) => {
+      edit_called = true;
+      // Should not expose the raw HTTP status as a confusing error
+      const full = JSON.stringify(opts);
+      assert.ok(!full.includes("undefined"), "content must not contain 'undefined'");
+    },
+  });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "replay",
+      subcommand: "inbound",
+      options:    [{ name: "text", value: "Test message" }],
+      role_ids:   ["owner_role"],
+      token:      "replay_fail_token",
+    });
+
+    await routeDiscordInteraction(interaction);
+    await new Promise(r => setTimeout(r, 50));
+    assert.ok(edit_called, "editInteractionResponse must be called on 401 from replay-inbound route");
   } finally {
     __resetActionRouterDeps();
   }
