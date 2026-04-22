@@ -527,6 +527,7 @@ export function buildTargetScanEmbed(payload = {}) {
     tags              = [],
     filters           = {},
     source_view_name  = "",
+    scan_source       = "Master Owner",
     scanned           = null,
     eligible          = null,
     would_queue       = null,
@@ -577,15 +578,15 @@ export function buildTargetScanEmbed(payload = {}) {
     f("Territory",   `${theme_emoji}  ${String(display_market).slice(0, 80)}`, true),
     f("Asset Class", String(display_asset).slice(0, 60),                       true),
     f("Strategy",    String(display_strategy).slice(0, 60),                    true),
-    ...(source_view_name ? [f("Source View", String(source_view_name).slice(0, 100), false)] : []),
+    ...(source_view_name ? [f("Source View", `${scan_source} • ${String(source_view_name).slice(0, 80)}`, false)] : [f("Source", scan_source, true)]),
     ...(tags_value   ? [f("Property Tags", tags_value.slice(0, 512),  false)] : []),
     ...(filters_value ? [f("Active Filters", filters_value.slice(0, 512), false)] : []),
     f("Scanned",           scanned     != null ? String(scanned)     : "—", true),
     f("Eligible",          eligible    != null ? String(eligible)    : "—", true),
     f("Would Queue",       would_queue != null ? String(would_queue) : "—", true),
     f("Skipped",           skipped     != null ? String(skipped)     : "—", true),
-    f("No Phone",          no_phone    != null ? String(no_phone)    : "—", true),
-    f("DNC",               dnc         != null ? String(dnc)         : "—", true),
+    ...(no_phone != null ? [f("No Phone", String(no_phone), true)] : []),
+    ...(dnc != null ? [f("DNC", String(dnc), true)] : []),
     ...(template_source  != null ? [f("Template Source",  String(template_source),  true)] : []),
     ...(stage1_errors    != null ? [f("Stage 1 Errors",   String(stage1_errors),    true)] : []),
     f("Recommended Batch", String(rc),              true),
@@ -595,11 +596,11 @@ export function buildTargetScanEmbed(payload = {}) {
   ].slice(0, 25);
 
   return {
-    title:     `🎯 Target Scan — ${String(display_market).slice(0, 60)}`,
+    title:     `🎯 Target Scan — ${String(display_market).slice(0, 60)} (${scan_source} Path)`,
     color:     base_color,
     timestamp: now(),
     fields,
-    footer:    { text: "Targeting Console v2 • Dry-run safe" },
+    footer:    { text: "Targeting Console v3 • Property Filters • Dry-run safe" },
   };
 }
 

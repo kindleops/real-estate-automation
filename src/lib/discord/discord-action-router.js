@@ -104,6 +104,18 @@ import {
   resolveTargetSourceViewName,
   buildNormalizedTargeting,
   isKnownMarketSlug,
+  isPropertyFirstTargeting,
+  normalizeSqFtRange,
+  normalizeUnitsRange,
+  normalizeOwnershipYearsRange,
+  normalizeEstimatedValueRange,
+  normalizeEquityPercentRange,
+  normalizeRepairCostRange,
+  normalizeBuildingCondition,
+  normalizeOfferVsLoan,
+  normalizeOfferVsLastPurchasePrice,
+  normalizeYearBuiltRange,
+  scanPropertiesForTargeting,
 } from "../domain/campaigns/targeting-console.js";
 import {
   listWireEvents,
@@ -1476,12 +1488,38 @@ async function handleTargetScan({ options_array, context, interaction }) {
   const language      = getOption(options_array, "language")       ?? null;
   const motivation_min = getOption(options_array, "motivation_min") ?? null;
 
+  // Property-first filter options — Advanced v3
+  const sq_ft_range                    = getOption(options_array, "sq_ft_range") ?? null;
+  const units_range                    = getOption(options_array, "units_range") ?? null;
+  const ownership_years_range          = getOption(options_array, "ownership_years_range") ?? null;
+  const estimated_value_range          = getOption(options_array, "estimated_value_range") ?? null;
+  const equity_percent_range           = getOption(options_array, "equity_percent_range") ?? null;
+  const repair_cost_range              = getOption(options_array, "repair_cost_range") ?? null;
+  const building_condition             = getOption(options_array, "building_condition") ?? null;
+  const offer_vs_loan                  = getOption(options_array, "offer_vs_loan") ?? null;
+  const offer_vs_last_purchase_price   = getOption(options_array, "offer_vs_last_purchase_price") ?? null;
+  const year_built_range               = getOption(options_array, "year_built_range") ?? null;
+  const min_property_score             = getOption(options_array, "min_property_score") ?? null;
+
   const targeting = buildNormalizedTargeting({
     market: market_raw, asset: asset_raw, strategy: strategy_raw,
     tag_1, tag_2, tag_3,
     zip, county, min_equity, max_year_built,
     owner_type, phone_status, language, motivation_min,
   });
+
+  // Normalize and attach property filters to targeting object
+  if (sq_ft_range) targeting.sq_ft_range = normalizeSqFtRange(sq_ft_range);
+  if (units_range) targeting.units_range = normalizeUnitsRange(units_range);
+  if (ownership_years_range) targeting.ownership_years_range = normalizeOwnershipYearsRange(ownership_years_range);
+  if (estimated_value_range) targeting.estimated_value_range = normalizeEstimatedValueRange(estimated_value_range);
+  if (equity_percent_range) targeting.equity_percent_range = normalizeEquityPercentRange(equity_percent_range);
+  if (repair_cost_range) targeting.repair_cost_range = normalizeRepairCostRange(repair_cost_range);
+  if (building_condition) targeting.building_condition = normalizeBuildingCondition(building_condition);
+  if (offer_vs_loan) targeting.offer_vs_loan = normalizeOfferVsLoan(offer_vs_loan);
+  if (offer_vs_last_purchase_price) targeting.offer_vs_last_purchase_price = normalizeOfferVsLastPurchasePrice(offer_vs_last_purchase_price);
+  if (year_built_range) targeting.year_built_range = normalizeYearBuiltRange(year_built_range);
+  if (min_property_score != null) targeting.min_property_score = Number(min_property_score);
 
   const source_view_name = resolveTargetSourceViewName({
     market:     targeting.market_label,
@@ -1495,6 +1533,9 @@ async function handleTargetScan({ options_array, context, interaction }) {
   const app_id = String(process.env.DISCORD_APPLICATION_ID ?? "");
   const token  = interaction.token;
 
+  // Detect path: use property-first scan if any property filters selected
+  const use_property_first = isPropertyFirstTargeting(targeting);
+
   info("discord.target.scan.started", {
     market: targeting.market_slug,
     asset:  targeting.asset_slug,
@@ -1503,40 +1544,84 @@ async function handleTargetScan({ options_array, context, interaction }) {
     scan_limit,
     tag_count:    targeting.tags.length,
     filter_count: Object.keys(targeting.filters).length,
+    property_filter_count: Object.keys({
+      sq_ft_range,
+      units_range,
+      ownership_years_range,
+      estimated_value_range,
+      equity_percent_range,
+      repair_cost_range,
+      building_condition,
+      offer_vs_loan,
+      offer_vs_last_purchase_price,
+      year_built_range,
+      min_property_score,
+    }).filter(k => arguments[0][k] != null).length,
+    use_property_first,
     user_id: context.user_id,
   });
 
   return runDeferredDiscordHandler(interaction, async () => {
-    const result = await callInternal("/api/internal/outbound/feed-master-owners", {
-      method: "POST",
-      body: {
-        dry_run:          true,
-        limit,
-        scan_limit,
-        source_view_name,
-        targeting_filters: Object.keys(targeting.filters).length > 0 ? targeting.filters : undefined,
-        property_tags:     targeting.tags.length > 0
-          ? targeting.tags.map((t) => t.slug)
-          : undefined,
-      },
-      timeout_ms: 30_000,
-    });
+    let scan_summary = {};
+    let source_label = "Master Owner";
+    let property_samples = [];
+    
+    if (use_property_first) {
+      // Property-first targeting path
+      const property_result = await scanPropertiesForTargeting({
+        targeting,
+        dry_run: true,
+      });
+      
+      if (!property_result.ok) {
+        return { content: `Property scan error: ${property_result.error ?? "unknown"}.` };
+      }
+      
+      source_label = "Property";
+      property_samples = property_result.eligible_samples || [];
+      scan_summary = {
+        scanned:     property_result.scanned_property_count ?? 0,
+        eligible:    property_result.final_eligible_count ?? 0,
+        would_queue: 0,  // Property path doesn't create Send Queue
+        skipped:    property_result.skipped_count ?? 0,
+        property_samples,
+        stopped_reason: property_result.stopped_reason,
+        api_estimate: property_result.api_request_estimate,
+      };
+    } else {
+      // Master Owner first path (existing v2 behavior)
+      const result = await callInternal("/api/internal/outbound/feed-master-owners", {
+        method: "POST",
+        body: {
+          dry_run:          true,
+          limit,
+          scan_limit,
+          source_view_name,
+          targeting_filters: Object.keys(targeting.filters).length > 0 ? targeting.filters : undefined,
+          property_tags:     targeting.tags.length > 0
+            ? targeting.tags.map((t) => t.slug)
+            : undefined,
+        },
+        timeout_ms: 30_000,
+      });
 
-    if (result.timed_out) {
-      return { content: "Target scan is still running — check alerts channel." };
-    }
-    if (!result.ok) {
-      return { content: `Target scan error: ${result.error ?? "unknown"}.` };
-    }
+      if (result.timed_out) {
+        return { content: "Target scan is still running — check alerts channel." };
+      }
+      if (!result.ok) {
+        return { content: `Target scan error: ${result.error ?? "unknown"}.` };
+      }
 
-    const payload = result.data ?? {};
-    const feeder  = payload.result ?? {};
-    const scan_summary = {
-      scanned:    feeder.loaded_count   ?? 0,
-      eligible:   feeder.eligible_count ?? 0,
-      would_queue: feeder.inserted_count ?? 0,
-      skipped:    feeder.skipped_count  ?? 0,
-    };
+      const payload = result.data ?? {};
+      const feeder  = payload.result ?? {};
+      source_label = "Master Owner";
+      scan_summary = {
+        scanned:    feeder.loaded_count   ?? 0,
+        eligible:   feeder.eligible_count ?? 0,
+        would_queue: feeder.inserted_count ?? 0,
+        skipped:    feeder.skipped_count  ?? 0,
+      };
+    }
 
     try {
       const db = getDb();
@@ -1563,6 +1648,7 @@ async function handleTargetScan({ options_array, context, interaction }) {
       market:     targeting.market_slug,
       asset:      targeting.asset_slug,
       strategy:   targeting.strategy_slug,
+      source:     source_label,
       ...scan_summary,
       user_id: context.user_id,
     });
@@ -1578,10 +1664,14 @@ async function handleTargetScan({ options_array, context, interaction }) {
       tags:            targeting.tags,
       filters:         targeting.filters,
       source_view_name,
+      scan_source:     source_label,
       scanned:     scan_summary.scanned,
       eligible:    scan_summary.eligible,
-      would_queue: scan_summary.would_queue,
-      skipped:     scan_summary.skipped,
+      would_queue: scan_summary.would_queue ?? 0,
+      skipped:     scan_summary.skipped ?? 0,
+      property_samples: use_property_first ? property_samples : undefined,
+      stopped_reason: scan_summary.stopped_reason,
+      api_estimate: scan_summary.api_estimate,
     })];
     return { embeds, components: targetActionRow({ campaignKey: campaign_key }) };
   }, "command", "target_scan", {

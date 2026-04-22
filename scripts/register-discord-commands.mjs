@@ -486,6 +486,99 @@ const LANGUAGE_CHOICES = [
   { name: "Spanish", value: "spanish" },
 ];
 
+// ───────────────────────────────────────────────────────────────────────────
+// Property Filter Choices — v3
+// ───────────────────────────────────────────────────────────────────────────
+
+const SQ_FT_RANGE_CHOICES = [
+  { name: "0–1,000 sq ft",        value: "0_1000"      },
+  { name: "1,000–1,250 sq ft",    value: "1000_1250"   },
+  { name: "1,250–1,500 sq ft",    value: "1250_1500"   },
+  { name: "1,500–1,750 sq ft",    value: "1500_1750"   },
+  { name: "1,750–2,000 sq ft",    value: "1750_2000"   },
+  { name: "2,000–2,500 sq ft",    value: "2000_2500"   },
+  { name: "2,500–3,000 sq ft",    value: "2500_3000"   },
+  { name: "3,000+ sq ft",          value: "3000_plus"   },
+  { name: "Non-SFR",              value: "non_sfr"     },
+];
+
+const UNITS_RANGE_CHOICES = [
+  { name: "1 unit",     value: "1"       },
+  { name: "2 units",    value: "2"       },
+  { name: "3–4 units",  value: "3_4"     },
+  { name: "5–10 units", value: "5_10"    },
+  { name: "11–25 units", value: "11_25"  },
+  { name: "26–50 units", value: "26_50"  },
+  { name: "51+ units",  value: "51_plus" },
+];
+
+const OWNERSHIP_YEARS_RANGE_CHOICES = [
+  { name: "0–2 years",   value: "0_2"   },
+  { name: "3–5 years",   value: "3_5"   },
+  { name: "6–10 years",  value: "6_10"  },
+  { name: "11–20 years", value: "11_20" },
+  { name: "21+ years",   value: "21_plus" },
+];
+
+const ESTIMATED_VALUE_RANGE_CHOICES = [
+  { name: "$0–$100k",      value: "0_100k"      },
+  { name: "$100k–$200k",   value: "100k_200k"   },
+  { name: "$200k–$350k",   value: "200k_350k"   },
+  { name: "$350k–$500k",   value: "350k_500k"   },
+  { name: "$500k–$1M",     value: "500k_1m"     },
+  { name: "$1M+",          value: "1m_plus"     },
+];
+
+const EQUITY_PERCENT_RANGE_CHOICES = [
+  { name: "0–25%",   value: "0_25"   },
+  { name: "25–50%",  value: "25_50"  },
+  { name: "50–70%",  value: "50_70"  },
+  { name: "70–90%",  value: "70_90"  },
+  { name: "90–100%", value: "90_100" },
+];
+
+const REPAIR_COST_RANGE_CHOICES = [
+  { name: "$0–$10k",    value: "0_10k"    },
+  { name: "$10k–$25k",  value: "10k_25k"  },
+  { name: "$25k–$50k",  value: "25k_50k"  },
+  { name: "$50k–$100k", value: "50k_100k" },
+  { name: "$100k+",     value: "100k_plus" },
+];
+
+const BUILDING_CONDITION_CHOICES = [
+  { name: "Excellent", value: "Excellent" },
+  { name: "Very Good", value: "Very Good" },
+  { name: "Good",      value: "Good"      },
+  { name: "Average",   value: "Average"   },
+  { name: "Fair",      value: "Fair"      },
+  { name: "Poor",      value: "Poor"      },
+  { name: "Unsound",   value: "Unsound"   },
+  { name: "Unknown",   value: "Unknown"   },
+];
+
+const OFFER_VS_LOAN_CHOICES = [
+  { name: "Free and Clear",       value: "free_and_clear"    },
+  { name: "Offer < Loan",          value: "offer_less_loan"   },
+  { name: "Offer > Loan (Clear)",  value: "offer_greater_loan" },
+  { name: "Offer ≈ Loan",          value: "offer_equal_loan"  },
+  { name: "No Purchase Data",      value: "no_purchase_data"  },
+];
+
+const OFFER_VS_PURCHASE_PRICE_CHOICES = [
+  { name: "No Purchase Data",        value: "no_purchase_data"        },
+  { name: "Offer < Purchase",        value: "offer_less_purchase"     },
+  { name: "Offer > Purchase (Win)",  value: "offer_greater_purchase"  },
+  { name: "Offer ≈ Purchase",        value: "offer_equal_purchase"    },
+];
+
+const YEAR_BUILT_RANGE_CHOICES = [
+  { name: "Pre-1940",         value: "pre_1940"   },
+  { name: "1940–1960",        value: "1940_1960"  },
+  { name: "1960–1980",        value: "1960_1980"  },
+  { name: "1980–2000",        value: "1980_2000"  },
+  { name: "2000+",            value: "2000_plus"  },
+];
+
 const TARGETING_COMMANDS = [
   // ── /target ────────────────────────────────────────────────────────────
   {
@@ -618,6 +711,86 @@ const TARGETING_COMMANDS = [
             required:    false,
             min_value:   1,
             max_value:   5000,
+          },
+          // — Advanced property filters (optional) —
+          // When any of these are selected, use property-first targeting path
+          {
+            type:        OPT.STRING,
+            name:        "sq_ft_range",
+            description: "Square footage range (property-first filter)",
+            required:    false,
+            choices:     SQ_FT_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "units_range",
+            description: "Number of units range (property-first filter)",
+            required:    false,
+            choices:     UNITS_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "ownership_years_range",
+            description: "Ownership tenure range (property-first filter)",
+            required:    false,
+            choices:     OWNERSHIP_YEARS_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "estimated_value_range",
+            description: "Current estimated property value (property-first filter)",
+            required:    false,
+            choices:     ESTIMATED_VALUE_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "equity_percent_range",
+            description: "Equity percentage range (property-first filter)",
+            required:    false,
+            choices:     EQUITY_PERCENT_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "repair_cost_range",
+            description: "Estimated repair cost range (property-first filter)",
+            required:    false,
+            choices:     REPAIR_COST_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "building_condition",
+            description: "Building condition assessment (property-first filter)",
+            required:    false,
+            choices:     BUILDING_CONDITION_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "offer_vs_loan",
+            description: "Smart offer vs mortgage balance (property-first filter)",
+            required:    false,
+            choices:     OFFER_VS_LOAN_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "offer_vs_last_purchase_price",
+            description: "Smart offer vs last purchase price (property-first filter)",
+            required:    false,
+            choices:     OFFER_VS_PURCHASE_PRICE_CHOICES,
+          },
+          {
+            type:        OPT.STRING,
+            name:        "year_built_range",
+            description: "Property year-built range (property-first filter)",
+            required:    false,
+            choices:     YEAR_BUILT_RANGE_CHOICES,
+          },
+          {
+            type:        OPT.INTEGER,
+            name:        "min_property_score",
+            description: "Minimum FINAL Aquisition Score (0–100)",
+            required:    false,
+            min_value:   0,
+            max_value:   100,
           },
         ],
       },
