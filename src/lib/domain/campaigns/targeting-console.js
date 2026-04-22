@@ -150,6 +150,165 @@ const TAG_LABEL_MAP = {
 
 const KNOWN_MARKET_SLUGS = new Set(Object.keys(MARKET_LABEL_MAP));
 
+const MARKET_REGION_MAP = {
+  texas: [
+    "Dallas, TX",
+    "Fort Worth, TX",
+    "Houston, TX",
+    "Austin, TX",
+    "San Antonio, TX",
+    "El Paso, TX",
+  ],
+  florida: [
+    "Miami, FL",
+    "Fort Lauderdale, FL",
+    "West Palm Beach, FL",
+    "Tampa, FL",
+    "Orlando, FL",
+    "Jacksonville, FL",
+  ],
+  california: [
+    "Los Angeles, CA",
+    "Riverside, CA",
+    "San Bernardino, CA",
+    "Sacramento, CA",
+    "Fresno, CA",
+    "Bakersfield, CA",
+    "Stockton, CA",
+    "Palm Springs, CA",
+    "Inland Empire, CA",
+  ],
+  southeast: [
+    "Atlanta, GA",
+    "Charlotte, NC",
+    "Birmingham, AL",
+    "New Orleans, LA",
+    "Memphis, TN",
+    "Durham, NC",
+    "Fayetteville, NC",
+    "Rocky Mount, NC",
+    "Richmond, VA",
+    "Hampton Roads, VA",
+  ],
+  midwest: [
+    "Chicago, IL",
+    "Minneapolis, MN",
+    "Milwaukee, WI",
+    "Indianapolis, IN",
+    "Columbus, OH",
+    "Cleveland, OH",
+    "Cincinnati, OH",
+    "Detroit, MI",
+    "St. Louis, MO",
+    "Kansas City, MO",
+    "Louisville, KY",
+    "Pittsburgh, PA",
+  ],
+  northeast: [
+    "Philadelphia, PA",
+    "Baltimore, MD",
+    "Providence, RI",
+    "Hartford, CT",
+    "Rochester, NY",
+  ],
+  west_mountain: [
+    "Phoenix, AZ",
+    "Las Vegas, NV",
+    "Tucson, AZ",
+    "Salt Lake City, UT",
+    "Colorado Springs, CO",
+    "Albuquerque, NM",
+    "Omaha, NE",
+    "Des Moines, IA",
+    "Wichita, KS",
+    "Tulsa, OK",
+    "Oklahoma City, OK",
+    "Spokane, WA",
+  ],
+  other: ["Unmapped"],
+};
+
+const MARKET_REGION_LABELS = {
+  texas: "Texas",
+  florida: "Florida",
+  california: "California",
+  southeast: "Southeast",
+  midwest: "Midwest",
+  northeast: "Northeast",
+  west_mountain: "West / Mountain",
+  other: "Other",
+};
+
+const MARKET_LABEL_CANONICAL_MAP = (() => {
+  const map = new Map();
+  for (const markets of Object.values(MARKET_REGION_MAP)) {
+    for (const label of markets) {
+      map.set(normalizeMarketSlug(label), label);
+    }
+  }
+  return map;
+})();
+
+const MARKET_LABEL_TO_SYSTEM_MARKET = {
+  "miami, fl": "miami",
+  "orlando, fl": "orlando",
+  "tampa, fl": "tampa",
+  "jacksonville, fl": "jacksonville",
+  "los angeles, ca": "los_angeles",
+  "new orleans, la": "new_orleans",
+  "houston, tx": "houston",
+  "atlanta, ga": "atlanta",
+  "phoenix, az": "phoenix",
+  "las vegas, nv": "las_vegas",
+  "chicago, il": "chicago",
+  "detroit, mi": "detroit",
+  "cleveland, oh": "cleveland",
+  "memphis, tn": "memphis",
+  "birmingham, al": "birmingham",
+  "indianapolis, in": "indianapolis",
+  "charlotte, nc": "charlotte",
+  "san antonio, tx": "san_antonio",
+  "austin, tx": "austin",
+  "st. louis, mo": "st_louis",
+  "kansas city, mo": "kansas_city",
+  "minneapolis, mn": "minneapolis",
+  "nashville, tn": "nashville",
+  "philadelphia, pa": "philadelphia",
+  "dallas, tx": "dallas_fort_worth",
+  "fort worth, tx": "dallas_fort_worth",
+};
+
+export function normalizeMarketRegion(value) {
+  const slug = normalizeMarketSlug(value);
+  if (slug === "west" || slug === "mountain" || slug === "west_mountain") {
+    return "west_mountain";
+  }
+  if (slug in MARKET_REGION_MAP) return slug;
+  return "other";
+}
+
+export function getMarketRegions() {
+  return Object.keys(MARKET_REGION_MAP).map((value) => ({
+    value,
+    label: MARKET_REGION_LABELS[value] ?? value,
+  }));
+}
+
+export function getMarketsForRegion(region) {
+  return MARKET_REGION_MAP[normalizeMarketRegion(region)] ?? MARKET_REGION_MAP.other;
+}
+
+export function normalizeMarketLabel(value) {
+  const slug = normalizeMarketSlug(value);
+  const canonical = MARKET_LABEL_CANONICAL_MAP.get(slug);
+  return canonical ?? String(value ?? "").trim();
+}
+
+export function resolveBuilderMarketToSystemSlug(value) {
+  const key = String(normalizeMarketLabel(value)).trim().toLowerCase();
+  return MARKET_LABEL_TO_SYSTEM_MARKET[key] ?? normalizeMarketSlug(value);
+}
+
 // ---------------------------------------------------------------------------
 // V2 — Normalisation helpers
 // ---------------------------------------------------------------------------

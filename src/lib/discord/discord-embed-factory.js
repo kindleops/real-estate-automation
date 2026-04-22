@@ -604,6 +604,69 @@ export function buildTargetScanEmbed(payload = {}) {
   };
 }
 
+/**
+ * Target Builder v1 embed.
+ * @param {object} state
+ * @param {object} diagnostics
+ * @returns {object}
+ */
+export function buildTargetBuilderEmbed(state = {}, diagnostics = {}) {
+  const scan_mode = state.scan_mode ?? "property_first";
+  const market_region = state.market_region ?? "—";
+  const market = state.market ?? "—";
+  const asset_class = state.asset_class ?? "—";
+  const strategy = state.strategy ?? "—";
+  const tags = Array.isArray(state.property_tags) ? state.property_tags : [];
+  const filters = state.filters ?? {};
+  const limits = state.limits ?? {};
+
+  const has_market = market && market !== "—";
+  const has_core = Boolean(has_market && asset_class && strategy && asset_class !== "—" && strategy !== "—");
+  const has_filters = Object.keys(filters).length > 0;
+  const ready = has_core;
+
+  const next_action = !has_market
+    ? "Choose a market to start"
+    : !has_core
+      ? "Select asset and strategy"
+      : "Run scan when ready";
+
+  const color = ready
+    ? (has_filters ? COLOR.teal_green : COLOR.gold_purple)
+    : COLOR.amber;
+
+  const filter_text = Object.entries(filters)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\n") || "—";
+
+  const tag_text = tags.length > 0 ? tags.map((t) => `\`${t}\``).join("  ·  ") : "—";
+
+  return {
+    title: "🎯 Campaign Target Builder",
+    color,
+    timestamp: now(),
+    fields: [
+      f("Market Region", String(market_region).replace(/_/g, " "), true),
+      f("Market", market, true),
+      f("Scan Mode", scan_mode, true),
+      f("Asset", asset_class, true),
+      f("Strategy", strategy, true),
+      f("Tags", tag_text, false),
+      f("Filters", filter_text.slice(0, 1024), false),
+      f(
+        "Limits",
+        `max_scan_count: ${limits.max_scan_count ?? 100}  |  target_eligible_count: ${limits.target_eligible_count ?? 10}`,
+        false
+      ),
+      f("Next Action", next_action, false),
+      ...(diagnostics?.last_result
+        ? [f("Last Result", String(diagnostics.last_result).slice(0, 1024), false)]
+        : []),
+    ].slice(0, 25),
+    footer: { text: "Target Builder v1 • Quick-select • No manual typing" },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // buildCampaignCreatedEmbed
 // ---------------------------------------------------------------------------

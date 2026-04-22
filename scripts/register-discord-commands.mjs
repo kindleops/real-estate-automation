@@ -885,6 +885,11 @@ const TARGETING_COMMANDS = [
     ],
   },
 
+  {
+    name:        "target-build",
+    description: "Open the campaign target builder",
+  },
+
   // ── /territory ─────────────────────────────────────────────────────────
   {
     name:        "territory",

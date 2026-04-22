@@ -59,6 +59,27 @@ function actionRow(buttons) {
   return { type: 1, components: buttons.slice(0, 5) };
 }
 
+function stringSelect({ custom_id, placeholder, options = [], min_values = 1, max_values = 1 }) {
+  return {
+    type: 1,
+    components: [
+      {
+        type: 3,
+        custom_id: String(custom_id).slice(0, 100),
+        placeholder: String(placeholder ?? "Choose an option").slice(0, 150),
+        min_values,
+        max_values,
+        options: options.slice(0, 25).map((opt) => ({
+          label: String(opt.label ?? opt.name ?? opt.value ?? "Option").slice(0, 100),
+          value: String(opt.value ?? opt.label ?? "option").slice(0, 100),
+          description: opt.description ? String(opt.description).slice(0, 100) : undefined,
+          emoji: opt.emoji,
+        })),
+      },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public button builders
 // ---------------------------------------------------------------------------
@@ -357,4 +378,195 @@ export function opsApprovalActionRow({ requestKey = "", type = "scale" } = {}) {
       button({ label: "🔍 Inspect",    custom_id: `approval:inspect:${safe_key}`, style: STYLE.SECONDARY }),
     ]),
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Target Builder v1 components
+// ---------------------------------------------------------------------------
+
+export function targetBuilderMainActionRow(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return actionRow([
+    button({ label: "🌎 Market",   custom_id: `target_builder:open_market:${sk}`,   style: STYLE.PRIMARY }),
+    button({ label: "🏠 Asset",    custom_id: `target_builder:open_asset:${sk}`,    style: STYLE.SECONDARY }),
+    button({ label: "⚡ Strategy", custom_id: `target_builder:open_strategy:${sk}`, style: STYLE.SECONDARY }),
+    button({ label: "🏷️ Tags",     custom_id: `target_builder:open_tags:${sk}`,     style: STYLE.SECONDARY }),
+    button({ label: "⚙️ Filters",  custom_id: `target_builder:open_filters:${sk}`,  style: STYLE.SECONDARY }),
+  ]);
+}
+
+export function targetBuilderRunActionRow(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return actionRow([
+    button({ label: "🧪 Run Scan",        custom_id: `target_builder:run_scan:${sk}`,        style: STYLE.PRIMARY }),
+    button({ label: "🚀 Create Campaign", custom_id: `target_builder:create_campaign:${sk}`, style: STYLE.SUCCESS }),
+    button({ label: "🔄 Reset",           custom_id: `target_builder:reset:${sk}`,           style: STYLE.SECONDARY }),
+    button({ label: "❌ Close",            custom_id: `target_builder:close:${sk}`,           style: STYLE.DANGER }),
+  ]);
+}
+
+export function marketRegionSelect(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return stringSelect({
+    custom_id: `target_builder:region:${sk}`,
+    placeholder: "Choose a market region",
+    options: [
+      { label: "Texas",           value: "texas" },
+      { label: "Florida",         value: "florida" },
+      { label: "California",      value: "california" },
+      { label: "Southeast",       value: "southeast" },
+      { label: "Midwest",         value: "midwest" },
+      { label: "Northeast",       value: "northeast" },
+      { label: "West / Mountain", value: "west_mountain" },
+      { label: "Other",           value: "other" },
+    ],
+  });
+}
+
+export function marketSelect(session_key = "", region = "other", markets = []) {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  const list = Array.isArray(markets) ? markets : [];
+  return stringSelect({
+    custom_id: `target_builder:market:${sk}`,
+    placeholder: `Choose market (${String(region).replace(/_/g, " ")})`,
+    options: list.map((m) => ({ label: m, value: m })),
+  });
+}
+
+export function assetClassSelect(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return stringSelect({
+    custom_id: `target_builder:asset:${sk}`,
+    placeholder: "Choose asset class",
+    options: [
+      { label: "🏠 Single Family",           value: "sfr" },
+      { label: "🏘️ Multifamily",             value: "multifamily" },
+      { label: "🏚️ Duplex / Small MF",       value: "duplex" },
+      { label: "🌾 Land",                    value: "vacant_land" },
+      { label: "🏢 Commercial",              value: "commercial" },
+      { label: "🏨 Hotel / Motel",           value: "hotel_motel" },
+      { label: "📦 Self Storage",            value: "self_storage" },
+      { label: "🔥 Distressed Residential",  value: "distressed_residential" },
+    ],
+  });
+}
+
+export function strategySelect(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return stringSelect({
+    custom_id: `target_builder:strategy:${sk}`,
+    placeholder: "Choose strategy",
+    options: [
+      { label: "💰 High Equity",             value: "high_equity" },
+      { label: "🏚️ Distress Stack",         value: "distress_stack" },
+      { label: "🧓 Tired Landlord",          value: "tired_landlord" },
+      { label: "🏛️ Probate",                value: "probate" },
+      { label: "⚠️ Pre-Foreclosure",         value: "pre_foreclosure" },
+      { label: "🏚️ Vacant",                 value: "vacant" },
+      { label: "🧾 Tax Delinquent",          value: "tax_delinquent" },
+      { label: "🔓 Free And Clear",          value: "free_and_clear" },
+      { label: "🎯 Acquisition Score",       value: "acquisition_score" },
+      { label: "🇪🇸 Spanish Seller",         value: "spanish_seller" },
+      { label: "🤝 Creative Finance",        value: "creative" },
+      { label: "🏢 Multifamily Underwrite",  value: "multifamily_underwrite" },
+    ],
+  });
+}
+
+export function propertyTagMultiSelect(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return stringSelect({
+    custom_id: `target_builder:tags:${sk}`,
+    placeholder: "Choose up to 3 property tags",
+    min_values: 0,
+    max_values: 3,
+    options: [
+      { label: "Absentee Owner",      value: "absentee_owner" },
+      { label: "High Equity",         value: "high_equity" },
+      { label: "Tired Landlord",      value: "tired_landlord" },
+      { label: "Vacant Home",         value: "vacant_home" },
+      { label: "Tax Delinquent",      value: "tax_delinquent" },
+      { label: "Probate",             value: "probate" },
+      { label: "Active Lien",         value: "active_lien" },
+      { label: "Preforeclosure",      value: "pre_foreclosure" },
+      { label: "Free And Clear",      value: "free_and_clear" },
+      { label: "Senior Owner",        value: "senior_owner" },
+      { label: "Out Of State Owner",  value: "out_of_state_owner" },
+      { label: "Long Term Owner",     value: "long_term_owner" },
+      { label: "Major Repairs Needed",value: "major_repairs_needed" },
+      { label: "Moderate Repairs",    value: "moderate_repairs" },
+      { label: "Corporate Owner",     value: "corporate_owner" },
+      { label: "Likely To Move",      value: "likely_to_move" },
+    ],
+  });
+}
+
+export function propertyFilterCategorySelect(session_key = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  return stringSelect({
+    custom_id: `target_builder:filter_category:${sk}`,
+    placeholder: "Choose property filter category",
+    options: [
+      { label: "📐 Size / Units",        value: "size_units" },
+      { label: "💎 Value / Equity",       value: "value_equity" },
+      { label: "🛠️ Condition / Repairs",  value: "condition_repairs" },
+      { label: "⏳ Ownership / Purchase", value: "ownership_purchase" },
+      { label: "🎯 Score",               value: "score" },
+    ],
+  });
+}
+
+export function propertyFilterValueSelect(session_key = "", category = "") {
+  const sk = String(session_key).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+  const catalog = {
+    size_units: [
+      { label: "Sq Ft 0-1000", value: "sq_ft_range:0_1000" },
+      { label: "Sq Ft 1000-1500", value: "sq_ft_range:1000_1500" },
+      { label: "Sq Ft 1500+", value: "sq_ft_range:1500_plus" },
+      { label: "Units 1", value: "units_range:1" },
+      { label: "Units 2", value: "units_range:2" },
+      { label: "Units 3-4", value: "units_range:3_4" },
+      { label: "Units 5+", value: "units_range:5_plus" },
+    ],
+    value_equity: [
+      { label: "Value $0-$200k", value: "estimated_value_range:0_200k" },
+      { label: "Value $200k-$500k", value: "estimated_value_range:200k_500k" },
+      { label: "Value $500k+", value: "estimated_value_range:500k_plus" },
+      { label: "Equity 0-50%", value: "equity_percent_range:0_50" },
+      { label: "Equity 50-90%", value: "equity_percent_range:50_90" },
+      { label: "Equity 90-100%", value: "equity_percent_range:90_100" },
+    ],
+    condition_repairs: [
+      { label: "Repairs $0-$25k", value: "repair_cost_range:0_25k" },
+      { label: "Repairs $25k-$50k", value: "repair_cost_range:25k_50k" },
+      { label: "Repairs $50k+", value: "repair_cost_range:50k_plus" },
+      { label: "Condition Good", value: "building_condition:Good" },
+      { label: "Condition Fair", value: "building_condition:Fair" },
+      { label: "Condition Poor", value: "building_condition:Poor" },
+    ],
+    ownership_purchase: [
+      { label: "Ownership 0-5y", value: "ownership_years_range:0_5" },
+      { label: "Ownership 5-15y", value: "ownership_years_range:5_15" },
+      { label: "Ownership 15y+", value: "ownership_years_range:15_plus" },
+      { label: "Offer < Loan", value: "offer_vs_loan:offer_less_loan" },
+      { label: "Offer > Loan", value: "offer_vs_loan:offer_greater_loan" },
+      { label: "Offer ≈ Loan", value: "offer_vs_loan:offer_equal_loan" },
+      { label: "Year Built pre-1940", value: "year_built_range:pre_1940" },
+      { label: "Year Built 1940-1980", value: "year_built_range:1940_1980" },
+      { label: "Year Built 1980+", value: "year_built_range:1980_plus" },
+    ],
+    score: [
+      { label: "Score 40+", value: "min_property_score:40" },
+      { label: "Score 50+", value: "min_property_score:50" },
+      { label: "Score 60+", value: "min_property_score:60" },
+      { label: "Score 70+", value: "min_property_score:70" },
+      { label: "Score 80+", value: "min_property_score:80" },
+    ],
+  };
+
+  return stringSelect({
+    custom_id: `target_builder:filter:${sk}`,
+    placeholder: "Choose a filter preset",
+    options: catalog[String(category)] ?? catalog.score,
+  });
 }

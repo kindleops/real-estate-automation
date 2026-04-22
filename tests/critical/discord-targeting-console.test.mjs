@@ -39,6 +39,8 @@ import {
   isKnownMarketSlug,
   resolveTargetSourceViewName,
   buildTargetScanUrl,
+  getMarketRegions,
+  getMarketsForRegion,
 } from "@/lib/domain/campaigns/targeting-console.js";
 
 import {
@@ -54,6 +56,15 @@ import {
   targetActionRow,
   campaignActionRow,
   territoryActionRow,
+  targetBuilderMainActionRow,
+  targetBuilderRunActionRow,
+  marketRegionSelect,
+  marketSelect,
+  assetClassSelect,
+  strategySelect,
+  propertyTagMultiSelect,
+  propertyFilterCategorySelect,
+  propertyFilterValueSelect,
 } from "@/lib/discord/discord-components.js";
 
 import {
@@ -109,6 +120,111 @@ function makeSlashInteraction({
     },
     data: { name: command, options: top_options },
   };
+}
+
+function makeComponentInteraction({
+  custom_id,
+  values = [],
+  role_ids = ["owner_role"],
+  member_id = "user_1",
+  guild_id = "guild_test",
+  token = "tok_component",
+} = {}) {
+  return {
+    id: "iid_component",
+    type: 3,
+    token,
+    guild_id,
+    member: {
+      user: { id: member_id, username: "Tester" },
+      roles: role_ids,
+    },
+    data: {
+      custom_id,
+      values,
+    },
+  };
+}
+
+function makeBuilderDbMock() {
+  const sessions = new Map();
+  const campaign_upserts = [];
+  const send_queue_mutations = [];
+
+  const mock = {
+    _sessions: sessions,
+    _campaign_upserts: campaign_upserts,
+    _send_queue_mutations: send_queue_mutations,
+    from(table) {
+      let op = "select";
+      let payload = null;
+      const filters = {};
+
+      const chain = {
+        select: () => chain,
+        eq(col, val) { filters[col] = val; return chain; },
+        maybeSingle() {
+          if (table === "discord_targeting_sessions") {
+            if (op === "insert") {
+              const row = { ...payload, id: payload.id ?? "session-id-1" };
+              sessions.set(row.session_key, row);
+              return Promise.resolve({ data: row, error: null });
+            }
+            if (op === "update") {
+              const key = filters.session_key;
+              const current = sessions.get(key);
+              if (!current) return Promise.resolve({ data: null, error: null });
+              const next = { ...current, ...payload };
+              sessions.set(key, next);
+              return Promise.resolve({ data: next, error: null });
+            }
+            const key = filters.session_key;
+            return Promise.resolve({ data: key ? (sessions.get(key) ?? null) : null, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+        insert(row) {
+          op = "insert";
+          payload = Array.isArray(row) ? row[0] : row;
+          if (table === "send_queue") send_queue_mutations.push({ op: "insert", row: payload });
+          return chain;
+        },
+        update(row) {
+          op = "update";
+          payload = row;
+          if (table === "send_queue") send_queue_mutations.push({ op: "update", row });
+          return chain;
+        },
+        upsert(row) {
+          if (table === "campaign_targets") {
+            campaign_upserts.push(Array.isArray(row) ? row[0] : row);
+          }
+          if (table === "send_queue") {
+            send_queue_mutations.push({ op: "upsert", row: Array.isArray(row) ? row[0] : row });
+          }
+          return chain;
+        },
+        then(resolve, reject) {
+          return Promise.resolve({ data: [], error: null }).then(resolve, reject);
+        },
+      };
+      return chain;
+    },
+  };
+
+  return mock;
+}
+
+function extractBuilderSessionKeyFromComponents(components = []) {
+  for (const row of components) {
+    const controls = Array.isArray(row?.components) ? row.components : [];
+    for (const control of controls) {
+      const cid = String(control?.custom_id ?? "");
+      const match = cid.match(/^target_builder:[a-z_]+:([a-zA-Z0-9_-]+)$/);
+      if (match?.[1]) return match[1];
+    }
+  }
+  return null;
 }
 
 /**
@@ -808,7 +924,7 @@ test("routing handles /target, /territory, /conquest and campaign create/inspect
   }
 });
 
-test("command registration includes target-scan, target-property, territory, conquest and campaign create/inspect/scale", () => {
+test("command registration includes target-build, target-scan, target-property, territory, conquest and campaign create/inspect/scale", () => {
   const source = fs.readFileSync(
     "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
     "utf8"
@@ -816,6 +932,7 @@ test("command registration includes target-scan, target-property, territory, con
 
   assert.ok(source.includes('name:        "target-scan"'), "registers /target-scan");
   assert.ok(source.includes('name:        "target-property"'), "registers /target-property");
+  assert.ok(source.includes('name:        "target-build"'), "registers /target-build");
   assert.ok(!source.includes('name:        "target"'), "does not register oversized /target wrapper");
   assert.ok(source.includes('name:        "territory"'), "registers /territory");
   assert.ok(source.includes('name:        "conquest"'), "registers /conquest");
@@ -1037,17 +1154,21 @@ test("v3: top-level target-property route forces property_first scan path", asyn
   }
 });
 
-test("v3: target-scan and target-property command payloads are under 8000 bytes", () => {
+test("v3: target-build, target-scan and target-property command payloads are under 8000 bytes", () => {
   const registered = loadRegisteredCommandsPayload();
+  const target_build = registered.find((cmd) => cmd?.name === "target-build");
   const target_scan = registered.find((cmd) => cmd?.name === "target-scan");
   const target_property = registered.find((cmd) => cmd?.name === "target-property");
 
+  assert.ok(target_build, "target-build command exists in registration payload");
   assert.ok(target_scan, "target-scan command exists in registration payload");
   assert.ok(target_property, "target-property command exists in registration payload");
 
+  const build_len = JSON.stringify(target_build).length;
   const scan_len = JSON.stringify(target_scan).length;
   const property_len = JSON.stringify(target_property).length;
 
+  assert.ok(build_len < 8000, `target-build payload must be < 8000 bytes, got ${build_len}`);
   assert.ok(scan_len < 8000, `target-scan payload must be < 8000 bytes, got ${scan_len}`);
   assert.ok(property_len < 8000, `target-property payload must be < 8000 bytes, got ${property_len}`);
 });
@@ -1090,6 +1211,273 @@ test("v3: command registration validation catches payload >= 8000 bytes", () => 
     () => validateCommandPayloadSizes(too_large, 8000),
     /command:\s*target-property[\s\S]*json_length:\s*\d+[\s\S]*max_allowed:\s*8000/i
   );
+});
+
+test("v4: /target-build command payload is lightweight and has <= 25 options", () => {
+  const registered = loadRegisteredCommandsPayload();
+  const target_build = registered.find((cmd) => cmd?.name === "target-build");
+
+  assert.ok(target_build, "target-build command exists");
+  const payload_len = JSON.stringify(target_build).length;
+  assert.ok(payload_len < 8000, `target-build payload must be < 8000 bytes, got ${payload_len}`);
+
+  const options_count = Array.isArray(target_build.options) ? target_build.options.length : 0;
+  assert.ok(options_count <= 25, `target-build options should be <= 25, got ${options_count}`);
+});
+
+test("v4: builder menus are bounded and categorized", () => {
+  const regions = getMarketRegions();
+  assert.ok(Array.isArray(regions) && regions.length > 0, "regions catalog is available");
+  assert.ok(regions.length <= 25, `regions should be <= 25, got ${regions.length}`);
+
+  const region_menu = marketRegionSelect("tb_test");
+  const region_options = region_menu?.components?.[0]?.options ?? [];
+  assert.ok(region_options.length > 0, "region menu has options");
+  assert.ok(region_options.length <= 25, `region menu options should be <= 25, got ${region_options.length}`);
+
+  const texas_markets = getMarketsForRegion("texas");
+  const market_menu = marketSelect("tb_test", "texas", texas_markets);
+  const market_options = market_menu?.components?.[0]?.options ?? [];
+  assert.ok(market_options.length > 0, "market menu has options for texas");
+  assert.ok(market_options.length <= 25, `market menu options should be <= 25, got ${market_options.length}`);
+
+  const tag_menu = propertyTagMultiSelect("tb_test");
+  const tag_options = tag_menu?.components?.[0]?.options ?? [];
+  assert.ok(tag_options.length > 0, "tag menu has options");
+  assert.ok(tag_options.length <= 25, `tag menu options should be <= 25, got ${tag_options.length}`);
+
+  const categories = ["size_units", "value_equity", "condition_repairs", "ownership_purchase", "score"];
+  for (const category of categories) {
+    const filter_menu = propertyFilterValueSelect("tb_test", category);
+    const filter_options = filter_menu?.components?.[0]?.options ?? [];
+    assert.ok(filter_options.length > 0, `filter category ${category} has options`);
+    assert.ok(filter_options.length <= 25, `filter menu options should be <= 25 for ${category}, got ${filter_options.length}`);
+  }
+});
+
+test("v4: /target-build creates an active session and returns interactive components", async () => {
+  const mock = makeBuilderDbMock();
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command: "target-build",
+      role_ids: ["owner_role"],
+      token: "tok_target_build_create",
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 4, "target-build responds immediately");
+    assert.ok(Array.isArray(response.data?.embeds) && response.data.embeds.length > 0, "builder embed is present");
+    assert.ok(Array.isArray(response.data?.components) && response.data.components.length >= 2, "builder controls are present");
+
+    const session_key = extractBuilderSessionKeyFromComponents(response.data.components);
+    assert.ok(session_key, "session key is encoded in component custom ids");
+
+    const session = mock._sessions.get(session_key);
+    assert.ok(session, "session persisted in discord_targeting_sessions");
+    assert.equal(session.status, "active", "new session is active");
+    assert.equal(session.state.scan_mode, "property_first", "default scan mode is property_first");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v4: selecting market region updates session and opens market selector", async () => {
+  const mock = makeBuilderDbMock();
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const init = await routeDiscordInteraction(makeSlashInteraction({
+      command: "target-build",
+      role_ids: ["owner_role"],
+      token: "tok_target_build_region_init",
+    }));
+
+    const session_key = extractBuilderSessionKeyFromComponents(init.data.components);
+    assert.ok(session_key, "session key extracted");
+
+    const update = await routeDiscordInteraction(makeComponentInteraction({
+      custom_id: `target_builder:region:${session_key}`,
+      values: ["texas"],
+      role_ids: ["owner_role"],
+      token: "tok_target_build_region_update",
+    }));
+
+    assert.equal(update.type, 7, "component interaction updates the message");
+    assert.equal(mock._sessions.get(session_key)?.state?.market_region, "texas", "market region persisted");
+
+    const flattened = JSON.stringify(update.data?.components ?? []);
+    assert.ok(flattened.includes(`target_builder:market:${session_key}`), "market selector is shown after region selection");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v4: selecting tags stores up to three values", async () => {
+  const mock = makeBuilderDbMock();
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const init = await routeDiscordInteraction(makeSlashInteraction({
+      command: "target-build",
+      role_ids: ["owner_role"],
+      token: "tok_target_build_tags_init",
+    }));
+
+    const session_key = extractBuilderSessionKeyFromComponents(init.data.components);
+    assert.ok(session_key, "session key extracted");
+
+    const update = await routeDiscordInteraction(makeComponentInteraction({
+      custom_id: `target_builder:tags:${session_key}`,
+      values: ["absentee_owner", "high_equity", "probate", "tax_delinquent"],
+      role_ids: ["owner_role"],
+      token: "tok_target_build_tags_update",
+    }));
+
+    assert.equal(update.type, 7, "component interaction updates the message");
+    assert.deepEqual(
+      mock._sessions.get(session_key)?.state?.property_tags,
+      ["absentee_owner", "high_equity", "probate"],
+      "tags are capped to three values"
+    );
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v4: run scan action keeps property-first behavior and does not call owner feeder", async () => {
+  const calls = [];
+  const callInternal_override = async (path, options) => {
+    calls.push({ path, options });
+    return { ok: true, data: { result: {} } };
+  };
+
+  const mock = makeBuilderDbMock();
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  try {
+    const init = await routeDiscordInteraction(makeSlashInteraction({
+      command: "target-build",
+      role_ids: ["owner_role"],
+      token: "tok_target_build_run_scan_init",
+    }));
+
+    const session_key = extractBuilderSessionKeyFromComponents(init.data.components);
+    assert.ok(session_key, "session key extracted");
+
+    const seeded = mock._sessions.get(session_key);
+    seeded.state = {
+      ...seeded.state,
+      market: "Miami, FL",
+      asset_class: "sfr",
+      strategy: "high_equity",
+    };
+    mock._sessions.set(session_key, seeded);
+
+    const update = await routeDiscordInteraction(makeComponentInteraction({
+      custom_id: `target_builder:run_scan:${session_key}`,
+      role_ids: ["owner_role"],
+      token: "tok_target_build_run_scan_exec",
+    }));
+
+    assert.equal(update.type, 7, "component interaction updates the message");
+    assert.equal(calls.length, 0, "property-first run_scan path should not call owner feeder internal route");
+    assert.equal(mock._sessions.get(session_key)?.state?.scan_mode, "property_first", "scan mode remains property_first");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v4: create campaign action writes campaign_targets and does not mutate send_queue", async () => {
+  const mock = makeBuilderDbMock();
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const init = await routeDiscordInteraction(makeSlashInteraction({
+      command: "target-build",
+      role_ids: ["owner_role"],
+      token: "tok_target_build_create_campaign_init",
+    }));
+
+    const session_key = extractBuilderSessionKeyFromComponents(init.data.components);
+    assert.ok(session_key, "session key extracted");
+
+    const seeded = mock._sessions.get(session_key);
+    seeded.state = {
+      ...seeded.state,
+      market: "Miami, FL",
+      asset_class: "sfr",
+      strategy: "high_equity",
+      property_tags: ["absentee_owner"],
+    };
+    mock._sessions.set(session_key, seeded);
+
+    const update = await routeDiscordInteraction(makeComponentInteraction({
+      custom_id: `target_builder:create_campaign:${session_key}`,
+      role_ids: ["owner_role"],
+      token: "tok_target_build_create_campaign_exec",
+    }));
+
+    assert.equal(update.type, 7, "component interaction updates the message");
+    assert.equal(mock._campaign_upserts.length, 1, "campaign_targets upsert was performed");
+    assert.equal(mock._send_queue_mutations.length, 0, "send_queue was not mutated by create_campaign");
+
+    const upserted = mock._campaign_upserts[0];
+    assert.equal(upserted.market, "miami", "campaign market normalized from builder market label");
+    assert.equal(upserted.metadata?.source, "target_builder_v1", "campaign metadata marks target_builder source");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v4: builder action failures do not leak secrets", async () => {
+  const base = makeBuilderDbMock();
+  const original_from = base.from.bind(base);
+  base.from = (table) => {
+    if (table === "campaign_targets") {
+      return {
+        upsert() {
+          throw new Error(`campaign insert failed ${process.env.INTERNAL_API_SECRET}`);
+        },
+      };
+    }
+    return original_from(table);
+  };
+
+  __setActionRouterDeps({ supabase_override: base });
+
+  try {
+    const init = await routeDiscordInteraction(makeSlashInteraction({
+      command: "target-build",
+      role_ids: ["owner_role"],
+      token: "tok_target_build_secret_init",
+    }));
+
+    const session_key = extractBuilderSessionKeyFromComponents(init.data.components);
+    assert.ok(session_key, "session key extracted");
+
+    const seeded = base._sessions.get(session_key);
+    seeded.state = {
+      ...seeded.state,
+      market: "Miami, FL",
+      asset_class: "sfr",
+      strategy: "high_equity",
+    };
+    base._sessions.set(session_key, seeded);
+
+    const update = await routeDiscordInteraction(makeComponentInteraction({
+      custom_id: `target_builder:create_campaign:${session_key}`,
+      role_ids: ["owner_role"],
+      token: "tok_target_build_secret_exec",
+    }));
+
+    const serialized = JSON.stringify(update);
+    assert.ok(!serialized.includes(process.env.INTERNAL_API_SECRET), "secret is never included in builder responses");
+    assert.ok(serialized.includes("Action failed"), "response contains sanitized generic failure text");
+  } finally {
+    __resetActionRouterDeps();
+  }
 });
 
 // ===========================================================================
