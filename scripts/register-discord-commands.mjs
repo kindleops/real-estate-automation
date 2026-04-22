@@ -1197,7 +1197,7 @@ const WIRES_COMMANDS = [
 const BRIEFING_COMMANDS = [
   {
     name:        "briefing",
-    description: "Daily Empire Briefing — KPI summary across SMS, wires, revenue, system health (Owner / Tech Ops / SMS Ops)",
+    description: "Daily KPI briefing for outreach, offers, contracts, wires, and system health.",    
     options: [
       // /briefing today
       {
