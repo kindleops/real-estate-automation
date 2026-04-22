@@ -654,6 +654,68 @@ function variantGroupForUseCase(use_case = null) {
   }
 }
 
+function hasVerifiedOwnershipContext(previous_stage = null) {
+  return ![
+    SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+    SELLER_FLOW_STAGES.OWNERSHIP_CHECK_FOLLOW_UP,
+    SELLER_FLOW_STAGES.WRONG_PERSON,
+    SELLER_FLOW_STAGES.WHO_IS_THIS,
+    SELLER_FLOW_STAGES.HOW_GOT_NUMBER,
+    SELLER_FLOW_STAGES.NOT_INTERESTED,
+    SELLER_FLOW_STAGES.STOP_OR_OPT_OUT,
+    SELLER_FLOW_STAGES.REENGAGEMENT,
+    SELLER_FLOW_STAGES.TERMINAL,
+  ].includes(clean(previous_stage));
+}
+
+function selectPropertyInfoFollowUpUseCase({
+  previous_stage = null,
+  signals = {},
+  multifamily_like = false,
+} = {}) {
+  if (multifamily_like) {
+    if (!signals.occupancy_status) return SELLER_FLOW_STAGES.MF_OCCUPANCY;
+    if (!signals.rents_present) return SELLER_FLOW_STAGES.MF_RENTS;
+    if (!signals.expenses_present) return SELLER_FLOW_STAGES.MF_EXPENSES;
+    return SELLER_FLOW_STAGES.MF_UNDERWRITING_ACK;
+  }
+
+  if (
+    [
+      SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE,
+      SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS,
+      SELLER_FLOW_STAGES.CREATIVE_PROBE,
+    ].includes(clean(previous_stage)) &&
+    hasEnoughPropertyFactsForNegotiation(signals)
+  ) {
+    return previous_stage === SELLER_FLOW_STAGES.CREATIVE_PROBE
+      ? determineOfferRevealUseCase({ signals })
+      : SELLER_FLOW_STAGES.OFFER_REVEAL_CASH;
+  }
+
+  return SELLER_FLOW_STAGES.ASK_CONDITION_CLARIFIER;
+}
+
+function propertyInfoReasoningSummary(use_case = null) {
+  switch (clean(use_case)) {
+    case SELLER_FLOW_STAGES.MF_OCCUPANCY:
+      return "Seller provided partial multifamily context, so the next text confirms occupancy before underwriting continues.";
+    case SELLER_FLOW_STAGES.MF_RENTS:
+      return "Seller confirmed the asset is occupied, so the next text asks about rents and lease terms before moving to pricing.";
+    case SELLER_FLOW_STAGES.MF_EXPENSES:
+      return "Seller gave occupancy and rent context, so the next text asks for expense detail before underwriting finishes.";
+    case SELLER_FLOW_STAGES.MF_UNDERWRITING_ACK:
+      return "Seller supplied the core multifamily underwriting facts, so the next text acknowledges receipt and keeps the deal in underwriting.";
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_CASH:
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_LEASE_OPTION:
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_SUBJECT_TO:
+    case SELLER_FLOW_STAGES.OFFER_REVEAL_NOVATION:
+      return "Seller answered the missing property questions, so the flow now has enough context to reveal the number.";
+    default:
+      return "Seller added occupancy or condition detail, so the next text should continue underwriting instead of skipping straight to an offer.";
+  }
+}
+
 function buildPlan({
   detected_language,
   current_stage,
@@ -669,6 +731,7 @@ function buildPlan({
   handled = true,
   response_tier = "neutral",
   offer_price_display = null,
+  suppression_reason = null,
 } = {}) {
   const resolved_template_lookup_use_case =
     template_lookup_use_case !== undefined
@@ -690,6 +753,7 @@ function buildPlan({
     handled,
     response_tier,
     offer_price_display,
+    suppression_reason,
     paired_with_agent_type: preferredAgentTypeForSellerFlow({
       tone: selected_tone,
       template_use_case,
@@ -924,12 +988,15 @@ export function routeSellerConversation({
       current_stage: previous_stage,
       detected_intent,
       selected_use_case: "wrong_person",
-      template_use_case: "wrong_person",
+      template_use_case: null,
+      template_lookup_use_case: null,
       selected_variant_group: "Stage 1 — Ownership Check",
       selected_tone: "Neutral",
-      next_expected_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
-      reasoning_summary: "Seller denied ownership, so the flow closes out politely instead of advancing.",
+      next_expected_stage: SELLER_FLOW_STAGES.TERMINAL,
+      reasoning_summary: "Seller denied ownership, so the safe default is to suppress automatic replies and close the flow instead of guessing at a template.",
+      should_queue_reply: false,
       response_tier: "cold",
+      suppression_reason: "wrong_number",
     });
   }
 
@@ -1076,6 +1143,25 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "No Asking Price / Reverse Offer Request") {
+    if (!hasVerifiedOwnershipContext(previous_stage)) {
+      return buildPlan({
+        detected_language,
+        current_stage: previous_stage,
+        detected_intent,
+        selected_use_case: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+        template_use_case: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+        selected_variant_group: variantGroupForUseCase(SELLER_FLOW_STAGES.OWNERSHIP_CHECK),
+        selected_tone: chooseConversationalTone({
+          classification,
+          previous_tone,
+          selected_use_case: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+        }),
+        next_expected_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+        reasoning_summary: "Seller asked for a number before ownership was confirmed, so the next text must gate back to ownership confirmation instead of revealing an offer.",
+        response_tier: "neutral",
+      });
+    }
+
     const reveal_use_case = determineOfferRevealUseCase({ signals });
 
     return buildPlan({
@@ -1098,37 +1184,54 @@ export function routeSellerConversation({
   }
 
   if (detected_intent === "Property Info Provided") {
-    if (
-      [
-        SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE,
-        SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS,
-        SELLER_FLOW_STAGES.CREATIVE_PROBE,
-      ].includes(previous_stage)
-    ) {
-      const reveal_use_case =
-        previous_stage === SELLER_FLOW_STAGES.CREATIVE_PROBE
-          ? determineOfferRevealUseCase({ signals })
-          : SELLER_FLOW_STAGES.OFFER_REVEAL_CASH;
-
+    if (!hasVerifiedOwnershipContext(previous_stage)) {
       return buildPlan({
         detected_language,
         current_stage: previous_stage,
         detected_intent,
-        selected_use_case: reveal_use_case,
-        template_use_case: reveal_use_case,
-        selected_variant_group: variantGroupForUseCase(reveal_use_case),
+        selected_use_case: null,
+        template_use_case: null,
+        template_lookup_use_case: null,
+        selected_variant_group: null,
+        selected_tone: null,
+        next_expected_stage: previous_stage,
+        reasoning_summary: "Seller supplied property detail before ownership was confirmed, so the safe default is to avoid an automatic follow-up.",
+        should_queue_reply: false,
+        handled: false,
+        response_tier: "neutral",
+        suppression_reason: "seller_flow_not_handled",
+      });
+    }
+
+    const follow_up_use_case = selectPropertyInfoFollowUpUseCase({
+      previous_stage,
+      signals,
+      multifamily_like,
+    });
+
+    if (follow_up_use_case) {
+      return buildPlan({
+        detected_language,
+        current_stage: previous_stage,
+        detected_intent,
+        selected_use_case: follow_up_use_case,
+        template_use_case: follow_up_use_case,
+        selected_variant_group: variantGroupForUseCase(follow_up_use_case),
         selected_tone: chooseConversationalTone({
           classification,
           previous_tone,
-          selected_use_case: reveal_use_case,
+          selected_use_case: follow_up_use_case,
         }),
-        next_expected_stage: canonicalStageForUseCase(reveal_use_case),
-        reasoning_summary:
-          previous_stage === SELLER_FLOW_STAGES.CREATIVE_PROBE
-            ? "Seller engaged on the creative branch, so the next move is to reveal the matching creative structure."
-            : "Seller answered the property-fact questions, so the flow now has enough context to reveal the number.",
+        next_expected_stage: canonicalStageForUseCase(follow_up_use_case),
+        reasoning_summary: propertyInfoReasoningSummary(follow_up_use_case),
         response_tier: "hot",
-        offer_price_display,
+        offer_price_display:
+          follow_up_use_case === SELLER_FLOW_STAGES.OFFER_REVEAL_CASH ||
+          follow_up_use_case === SELLER_FLOW_STAGES.OFFER_REVEAL_LEASE_OPTION ||
+          follow_up_use_case === SELLER_FLOW_STAGES.OFFER_REVEAL_SUBJECT_TO ||
+          follow_up_use_case === SELLER_FLOW_STAGES.OFFER_REVEAL_NOVATION
+            ? offer_price_display
+            : null,
       });
     }
   }

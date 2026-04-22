@@ -267,6 +267,249 @@ test("replay-inbound pipeline failures do not leak INTERNAL_API_SECRET", async (
   assert.equal(json.error, "pipeline_error");
 });
 
+test("replay wrong number suppresses auto-reply, resolves no template, and stays terminal", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+  let load_template_called = false;
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({
+      language: "English",
+      objection: "wrong_number",
+      confidence: 0.99,
+    }),
+    loadTemplate: async () => {
+      load_template_called = true;
+      return {
+        text: "<p>これは間違いでした</p>",
+        template_id: "tmpl_wrong_person",
+        language: "Japanese",
+        selector_use_case: "wrong_person",
+        source: "local_registry",
+      };
+    },
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "Wrong number",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.detected_intent, "Ownership Denied / Wrong Person");
+  assert.equal(json.selected_use_case, "wrong_person");
+  assert.equal(json.next_stage, "terminal");
+  assert.equal(json.would_queue_reply, false);
+  assert.equal(json.suppression_reason, "wrong_number");
+  assert.equal(json.rendered_message_text, null);
+  assert.equal(json.selected_template_source, null);
+  assert.equal(load_template_called, false);
+  assert.equal(json.safety?.sms_sent, false);
+  assert.equal(json.safety?.queue_created, false);
+  assert.equal(json.safety?.podio_mutated, false);
+  assert.ok(!JSON.stringify(json).includes("Japanese"));
+});
+
+test("replay rendered_message_text is sanitized before returning output", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English" }),
+    extractUnderwritingSignals: () => ({}),
+    routeSellerConversation: () => ({
+      handled: true,
+      should_queue_reply: true,
+      next_expected_stage: "consider_selling",
+      selected_use_case: "consider_selling",
+      template_lookup_use_case: "consider_selling",
+      detected_intent: "Ownership Confirmed",
+      reasoning_summary: "Seller confirmed ownership",
+      detected_language: "English",
+    }),
+    maybeQueueSellerStageReply: async () => ({ ok: true, queued: false, dry_run: true }),
+    loadTemplate: async () => ({
+      text: "<p>Thanks <strong>for confirming</strong>.</p>",
+      template_id: "tmpl_html",
+      item_id: "tmpl_html",
+      language: "English",
+      selector_use_case: "consider_selling",
+      source: "local_registry",
+      template_resolution_source: "local_template_fallback",
+    }),
+    personalizeTemplate: () => ({ ok: true, text: "<p>Thanks <strong>for confirming</strong>.</p>", missing: [] }),
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "Yes I own it",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.rendered_message_text, "Thanks for confirming.");
+  assert.equal(/<[^>]+>/.test(json.rendered_message_text), false);
+  assert.ok(
+    json.alignment_assertions.some(
+      (assertion) => assertion.assertion === "rendered_message_text_no_html_tags" && assertion.ok
+    )
+  );
+});
+
+test("replay offer request without verified ownership gates back to ownership_check", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({
+      language: "English",
+      objection: "send_offer_first",
+      confidence: 0.99,
+    }),
+    loadTemplate: async ({ use_case }) => ({
+      text: use_case === "ownership_check" ? "Just to confirm, are you the owner of the property?" : "wrong",
+      template_id: "tmpl_ownership_gate",
+      item_id: "tmpl_ownership_gate",
+      language: "English",
+      selector_use_case: use_case,
+      source: "local_registry",
+      template_resolution_source: "local_template_fallback",
+    }),
+    personalizeTemplate: (text) => ({ ok: true, text, missing: [] }),
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "How much are you offering?",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.selected_use_case, "ownership_check");
+  assert.equal(json.template_lookup_use_case, "ownership_check");
+  assert.equal(json.next_stage, "ownership_check");
+  assert.equal(json.would_queue_reply, true);
+  assert.equal(json.selected_template_use_case, "ownership_check");
+  assert.match(json.rendered_message_text, /confirm/i);
+  assert.equal(json.safety?.queue_created, false);
+});
+
+test("replay tenant response without verified ownership does not auto-reply", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+  let load_template_called = false;
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English", confidence: 0.95 }),
+    loadTemplate: async () => {
+      load_template_called = true;
+      return null;
+    },
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "It is rented with tenants",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.detected_intent, "Property Info Provided");
+  assert.equal(json.would_queue_reply, false);
+  assert.equal(json.suppression_reason, "seller_flow_not_handled");
+  assert.equal(json.rendered_message_text, null);
+  assert.equal(load_template_called, false);
+  assert.equal(json.safety?.queue_created, false);
+});
+
+test("replay tenant response with ownership-confirmed context routes to underwriting follow-up", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English", confidence: 0.95 }),
+    loadTemplate: async ({ use_case }) => ({
+      text:
+        use_case === "ask_condition_clarifier"
+          ? "Got it. Are the tenants month-to-month or on a lease, and what does it rent for?"
+          : "unexpected",
+      template_id: "tmpl_underwriting_follow_up",
+      item_id: "tmpl_underwriting_follow_up",
+      language: "English",
+      selector_use_case: use_case,
+      source: "local_registry",
+      template_resolution_source: "local_template_fallback",
+    }),
+    personalizeTemplate: (text) => ({ ok: true, text, missing: [] }),
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "It is rented with tenants",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      prior_stage: "consider_selling",
+      prior_use_case: "consider_selling",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.selected_use_case, "ask_condition_clarifier");
+  assert.equal(json.template_lookup_use_case, "ask_condition_clarifier");
+  assert.equal(json.would_queue_reply, true);
+  assert.match(json.rendered_message_text, /lease|rent/i);
+  assert.equal(json.safety?.queue_created, false);
+});
+
 test("inbound webhook ignores replay after first completion", async () => {
   const ledger = createInMemoryIdempotencyLedger();
   let logInboundCount = 0;

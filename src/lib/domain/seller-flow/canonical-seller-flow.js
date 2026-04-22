@@ -242,10 +242,10 @@ export function canonicalStageForUseCase(use_case = null, variant_group = null) 
 
   if (!normalized) return null;
   if (normalized === SELLER_FLOW_STAGES.STOP_OR_OPT_OUT) return SELLER_FLOW_STAGES.TERMINAL;
+  if (normalized === SELLER_FLOW_STAGES.WRONG_PERSON) return SELLER_FLOW_STAGES.TERMINAL;
   if (FOLLOW_UP_STAGE_MAP[normalized]) return FOLLOW_UP_STAGE_MAP[normalized];
 
   switch (normalized) {
-    case SELLER_FLOW_STAGES.WRONG_PERSON:
     case SELLER_FLOW_STAGES.WHO_IS_THIS:
     case SELLER_FLOW_STAGES.HOW_GOT_NUMBER:
     case SELLER_FLOW_STAGES.NOT_INTERESTED:

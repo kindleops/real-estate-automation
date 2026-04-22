@@ -7,6 +7,7 @@ import { routeSellerConversation } from "@/lib/domain/seller-flow/route-seller-c
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { personalizeTemplate } from "@/lib/sms/personalize_template.js";
+import { prepareRenderedSmsForQueue } from "@/lib/sms/sanitize.js";
 import { SELLER_FLOW_STAGES } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
 import { warn as logWarn } from "@/lib/logging/logger.js";
 
@@ -59,6 +60,7 @@ const defaultReplayDeps = {
   maybeQueueSellerStageReply,
   loadTemplate,
   personalizeTemplate,
+  prepareRenderedSmsForQueue,
   warn: logWarn,
 };
 
@@ -155,7 +157,7 @@ function buildPersonalizeContext({ from_phone_number, to_phone_number, context, 
  * Run alignment assertions on the routing plan and resolved template.
  * Returns an array of { ok, assertion, detail } records.
  */
-function runAlignmentAssertions({ plan, template_resolved, underwriting }) {
+function runAlignmentAssertions({ plan, template_resolved, underwriting, rendered_message_text = null }) {
   const assertions = [];
 
   const next_stage     = clean(plan?.next_expected_stage);
@@ -215,6 +217,16 @@ function runAlignmentAssertions({ plan, template_resolved, underwriting }) {
       ok: !has_html,
       assertion: "template_text_no_html_tags",
       detail: has_html ? "HTML tags detected in template_text" : "clean",
+    });
+  }
+
+  const sanitized_rendered = clean(rendered_message_text);
+  if (sanitized_rendered) {
+    const has_html = /<[a-z][\s\S]*>/i.test(sanitized_rendered);
+    assertions.push({
+      ok: !has_html,
+      assertion: "rendered_message_text_no_html_tags",
+      detail: has_html ? "HTML tags detected in rendered_message_text" : "clean",
     });
   }
 
@@ -352,38 +364,44 @@ export async function POST(request) {
     };
 
     try {
-      const selected_template = await replayDeps.loadTemplate({
-        use_case:            plan?.template_lookup_use_case || plan?.selected_use_case,
-        language:            plan?.detected_language || classification?.language || "English",
-        touch_type:          "Follow-Up",
-        property_type_scope: underwriting?.property_type || property_type || null,
-        deal_strategy:       underwriting?.creative_strategy || deal_strategy || null,
-        context,
-      });
+      const resolved_template_lookup_use_case =
+        plan?.template_lookup_use_case !== undefined
+          ? plan?.template_lookup_use_case
+          : plan?.selected_use_case;
 
-      if (selected_template?.text) {
-        template_resolved = {
-          resolved: true,
-          source:
-            selected_template?.template_resolution_source ||
-            selected_template?.selected_template_source ||
-            selected_template?.source ||
-            null,
-          template_id: selected_template?.template_id || selected_template?.item_id || null,
-          stage_code: selected_template?.stage_code || plan?.next_expected_stage || null,
-          use_case:
-            selected_template?.selector_use_case ||
-            selected_template?.use_case ||
-            plan?.template_lookup_use_case ||
-            plan?.selected_use_case ||
-            null,
-          language:
-            selected_template?.language ||
-            plan?.detected_language ||
-            classification?.language ||
-            "English",
-          template_text: selected_template.text,
-        };
+      if (resolved_template_lookup_use_case) {
+        const selected_template = await replayDeps.loadTemplate({
+          use_case:            resolved_template_lookup_use_case,
+          language:            plan?.detected_language || classification?.language || "English",
+          touch_type:          "Follow-Up",
+          property_type_scope: underwriting?.property_type || property_type || null,
+          deal_strategy:       underwriting?.creative_strategy || deal_strategy || null,
+          context,
+        });
+
+        if (selected_template?.text) {
+          template_resolved = {
+            resolved: true,
+            source:
+              selected_template?.template_resolution_source ||
+              selected_template?.selected_template_source ||
+              selected_template?.source ||
+              null,
+            template_id: selected_template?.template_id || selected_template?.item_id || null,
+            stage_code: selected_template?.stage_code || plan?.next_expected_stage || null,
+            use_case:
+              selected_template?.selector_use_case ||
+              selected_template?.use_case ||
+              resolved_template_lookup_use_case ||
+              null,
+            language:
+              selected_template?.language ||
+              plan?.detected_language ||
+              classification?.language ||
+              "English",
+            template_text: selected_template.text,
+          };
+        }
       }
       pipeline.template_resolve = { ok: true, result: template_resolved };
     } catch (template_err) {
@@ -400,6 +418,7 @@ export async function POST(request) {
 
     // ── 7. Personalize template ───────────────────────────────────────────
     let personalized = null;
+    let sanitized_rendered_message_text = null;
     if (template_resolved?.resolved && template_resolved?.template_text) {
       const personalize_context = buildPersonalizeContext({
         from_phone_number: normalized_from_number,
@@ -408,13 +427,25 @@ export async function POST(request) {
         underwriting,
       });
       personalized = replayDeps.personalizeTemplate(template_resolved.template_text, personalize_context);
+      const prepared_sms = replayDeps.prepareRenderedSmsForQueue({
+        rendered_message_text: personalized?.ok ? personalized.text : null,
+        template_id: template_resolved?.template_id || null,
+        template_source: template_resolved?.source || null,
+      });
+      sanitized_rendered_message_text = clean(prepared_sms?.text) || null;
+      pipeline.rendered_sms = { ok: prepared_sms?.ok ?? false, result: prepared_sms };
     }
     pipeline.personalize = personalized
       ? { ok: true, result: personalized }
       : { ok: false, reason: "no_template_resolved" };
 
     // ── 8. Alignment assertions ───────────────────────────────────────────
-    const assertions = runAlignmentAssertions({ plan, template_resolved, underwriting });
+    const assertions = runAlignmentAssertions({
+      plan,
+      template_resolved,
+      underwriting,
+      rendered_message_text: sanitized_rendered_message_text,
+    });
     const assertions_passed = assertions.every((a) => a.ok);
 
     // ── 9. Build response ─────────────────────────────────────────────────
@@ -452,11 +483,17 @@ export async function POST(request) {
       selected_template_stage_code: template_resolved?.stage_code || null,
       selected_template_use_case:   template_resolved?.use_case || null,
       selected_template_language:   template_resolved?.language || null,
-      rendered_message_text:        personalized?.ok ? personalized.text : null,
+      rendered_message_text:        sanitized_rendered_message_text,
       personalization_ok:           personalized?.ok ?? false,
       personalization_missing:      personalized?.ok === false ? personalized?.missing : null,
       would_queue_reply:            plan?.should_queue_reply ?? false,
-      suppression_reason:           plan?.handled === false ? "seller_flow_not_handled" : null,
+      suppression_reason:
+        plan?.suppression_reason ||
+        (plan?.handled === false
+          ? "seller_flow_not_handled"
+          : plan?.should_queue_reply === false
+            ? "seller_flow_no_auto_reply_needed"
+            : null),
       underwriting_signals: {
         property_type:         underwriting?.property_type || null,
         asking_price:          underwriting?.asking_price ?? null,
