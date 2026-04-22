@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server.js";
 
 function clean(value) {
   return String(value ?? "").trim();

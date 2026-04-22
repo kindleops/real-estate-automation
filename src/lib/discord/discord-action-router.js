@@ -53,6 +53,7 @@ import {
   buildApprovalEmbed,
   buildSuccessEmbed,
   buildTargetScanEmbed,
+  buildTargetBuilderEmbed,
   buildCampaignCreatedEmbed,
   buildCampaignInspectEmbed,
   buildCampaignScaleEmbed,
@@ -88,6 +89,15 @@ import {
   leadInspectButtons,
   approvalButtons,
   targetActionRow,
+  targetBuilderMainActionRow,
+  targetBuilderRunActionRow,
+  marketRegionSelect,
+  marketSelect,
+  assetClassSelect,
+  strategySelect,
+  propertyTagMultiSelect,
+  propertyFilterCategorySelect,
+  propertyFilterValueSelect,
   campaignActionRow,
   territoryActionRow,
   emailActionRow,
@@ -116,6 +126,11 @@ import {
   normalizeOfferVsLastPurchasePrice,
   normalizeYearBuiltRange,
   scanPropertiesForTargeting,
+  getMarketRegions,
+  getMarketsForRegion,
+  normalizeMarketRegion,
+  normalizeMarketLabel,
+  resolveBuilderMarketToSystemSlug,
 } from "../domain/campaigns/targeting-console.js";
 import {
   listWireEvents,
@@ -425,6 +440,17 @@ function safeResultSummary(data, fields_to_show) {
     }
   }
   return out;
+}
+
+function sanitizeUserVisibleErrorText(raw_error) {
+  const text = String(raw_error ?? "unknown error");
+  const secrets = [
+    process.env.INTERNAL_API_SECRET,
+    process.env.CRON_SECRET,
+    process.env.DISCORD_BOT_TOKEN,
+  ].filter(Boolean);
+  if (secrets.some((s) => text.includes(String(s)))) return "unknown error";
+  return text.slice(0, 160);
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,6 +1480,318 @@ async function handleAlertsMode({ options_array, context }) {
 }
 
 // ---------------------------------------------------------------------------
+// Command: /target-build (interactive builder)
+// ---------------------------------------------------------------------------
+
+function createDefaultBuilderState() {
+  return {
+    scan_mode: "property_first",
+    market_region: null,
+    market: null,
+    asset_class: null,
+    strategy: null,
+    property_tags: [],
+    filters: {},
+    limits: {
+      max_scan_count: 100,
+      target_eligible_count: 10,
+    },
+  };
+}
+
+function makeBuilderSessionKey() {
+  return `tb_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+async function createTargetBuilderSession({ context, interaction }) {
+  const db = getDb();
+  const session_key = makeBuilderSessionKey();
+  const state = createDefaultBuilderState();
+
+  const row = {
+    session_key,
+    discord_user_id: context.user_id,
+    guild_id: context.guild_id,
+    channel_id: context.channel_id,
+    message_id: null,
+    state,
+    status: "active",
+  };
+
+  const { data, error } = await db
+    .from("discord_targeting_sessions")
+    .insert(row)
+    .select("*")
+    .maybeSingle();
+
+  if (error) throw error;
+  return data ?? row;
+}
+
+async function getTargetBuilderSession(session_key) {
+  const db = getDb();
+  const { data, error } = await db
+    .from("discord_targeting_sessions")
+    .select("*")
+    .eq("session_key", session_key)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function updateTargetBuilderSessionState(session_key, next_state, next_status = null) {
+  const db = getDb();
+  const update = {
+    state: next_state,
+    updated_at: new Date().toISOString(),
+  };
+  if (next_status) update.status = next_status;
+
+  const { data, error } = await db
+    .from("discord_targeting_sessions")
+    .update(update)
+    .eq("session_key", session_key)
+    .select("*")
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+function buildBuilderComponents({ session_key, mode = "main", region = null, filter_category = null }) {
+  const components = [];
+
+  if (mode === "market_region") {
+    components.push(marketRegionSelect(session_key));
+  } else if (mode === "market") {
+    components.push(marketSelect(session_key, region, getMarketsForRegion(region)));
+  } else if (mode === "asset") {
+    components.push(assetClassSelect(session_key));
+  } else if (mode === "strategy") {
+    components.push(strategySelect(session_key));
+  } else if (mode === "tags") {
+    components.push(propertyTagMultiSelect(session_key));
+  } else if (mode === "filter_category") {
+    components.push(propertyFilterCategorySelect(session_key));
+  } else if (mode === "filter_values") {
+    components.push(propertyFilterValueSelect(session_key, filter_category));
+  }
+
+  components.push(targetBuilderMainActionRow(session_key));
+  components.push(targetBuilderRunActionRow(session_key));
+  return components;
+}
+
+async function handleTargetBuild({ context, interaction }) {
+  try {
+    const session = await createTargetBuilderSession({ context, interaction });
+    const embed = buildTargetBuilderEmbed(session.state, {});
+    return cinematicMessage({
+      embeds: [embed],
+      components: buildBuilderComponents({ session_key: session.session_key }),
+      ephemeral: true,
+    });
+  } catch {
+    return errorResponse("Failed to create targeting builder session.");
+  }
+}
+
+function applyFilterSelection(state, packed) {
+  const next = { ...(state ?? createDefaultBuilderState()) };
+  next.filters = { ...(next.filters ?? {}) };
+
+  const [key, raw_value] = String(packed ?? "").split(":");
+  if (!key) return next;
+  const value = raw_value == null ? null : raw_value;
+  if (value == null || value === "") return next;
+  next.filters[key] = value;
+  return next;
+}
+
+async function handleTargetBuilderComponent({ interaction, custom_id, context }) {
+  const values = Array.isArray(interaction?.data?.values) ? interaction.data.values : [];
+  const parts = custom_id.split(":");
+  const action = parts[1] ?? "";
+  const session_key = parts[2] ?? "";
+
+  if (!session_key) {
+    return updateMessage("⚠️ Missing builder session key.");
+  }
+
+  let session;
+  try {
+    session = await getTargetBuilderSession(session_key);
+  } catch {
+    return updateMessage("⚠️ Could not load builder session.");
+  }
+
+  if (!session || session.status !== "active") {
+    return updateMessage("⚠️ Builder session expired or closed.");
+  }
+
+  if (session.discord_user_id && session.discord_user_id !== context.user_id) {
+    return deniedResponse("This builder session belongs to another user.");
+  }
+
+  let state = { ...createDefaultBuilderState(), ...(session.state ?? {}) };
+  let mode = "main";
+  let region = state.market_region;
+  let filter_category = null;
+  let diagnostics = {};
+
+  try {
+    if (action === "open_market") {
+      mode = "market_region";
+    } else if (action === "open_asset") {
+      mode = "asset";
+    } else if (action === "open_strategy") {
+      mode = "strategy";
+    } else if (action === "open_tags") {
+      mode = "tags";
+    } else if (action === "open_filters") {
+      mode = "filter_category";
+    } else if (action === "region") {
+      const selected = normalizeMarketRegion(values[0] ?? "other");
+      state.market_region = selected;
+      region = selected;
+      mode = "market";
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "market") {
+      state.market = normalizeMarketLabel(values[0] ?? "");
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "asset") {
+      state.asset_class = String(values[0] ?? "").trim() || null;
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "strategy") {
+      state.strategy = String(values[0] ?? "").trim() || null;
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "tags") {
+      state.property_tags = values.map((v) => String(v)).slice(0, 3);
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "filter_category") {
+      filter_category = String(values[0] ?? "score");
+      mode = "filter_values";
+    } else if (action === "filter") {
+      state = applyFilterSelection(state, values[0]);
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "reset") {
+      state = createDefaultBuilderState();
+      await updateTargetBuilderSessionState(session_key, state);
+    } else if (action === "close") {
+      await updateTargetBuilderSessionState(session_key, state, "closed");
+      return updateMessage("✅ Target builder closed.", {
+        embeds: [buildSuccessEmbed({
+          title: "Target Builder Closed",
+          description: "Session closed. Run /target-build to start again.",
+        })],
+        components: [],
+      });
+    } else if (action === "run_scan") {
+      const market_for_scan = resolveBuilderMarketToSystemSlug(state.market ?? "");
+      const targeting = buildNormalizedTargeting({
+        market: market_for_scan,
+        asset: state.asset_class,
+        strategy: state.strategy,
+        tag_1: state.property_tags?.[0] ?? null,
+        tag_2: state.property_tags?.[1] ?? null,
+        tag_3: state.property_tags?.[2] ?? null,
+      });
+
+      for (const [k, v] of Object.entries(state.filters ?? {})) {
+        if (v != null && v !== "") targeting[k] = v;
+      }
+
+      const max_scan_count = Number(state.limits?.max_scan_count ?? 100);
+      const target_eligible_count = Number(state.limits?.target_eligible_count ?? 10);
+
+      if (String(state.scan_mode) === "property_first") {
+        const property_result = await scanPropertiesForTargeting({
+          targeting,
+          max_scan_count,
+          target_eligible_count,
+          dry_run: true,
+        });
+        diagnostics.last_result = property_result.ok
+          ? `Property scan complete • scanned=${property_result.scanned_property_count ?? 0} • eligible=${property_result.final_eligible_count ?? 0}`
+          : `Property scan error: ${property_result.error ?? "unknown"}`;
+      } else {
+        const source_view_name = resolveTargetSourceViewName({
+          market: targeting.market_label,
+          asset_type: targeting.asset_slug,
+          strategy: targeting.strategy_slug,
+        });
+
+        const result = await callInternal("/api/internal/outbound/feed-master-owners", {
+          method: "POST",
+          body: {
+            dry_run: true,
+            limit: target_eligible_count,
+            scan_limit: max_scan_count,
+            source_view_name,
+            targeting_filters: Object.keys(targeting.filters ?? {}).length > 0 ? targeting.filters : undefined,
+            property_tags: targeting.tags?.length > 0 ? targeting.tags.map((t) => t.slug) : undefined,
+          },
+        });
+
+        diagnostics.last_result = result.ok
+          ? "Owner-first scan complete"
+          : `Owner-first scan error: ${result.error ?? "unknown"}`;
+      }
+    } else if (action === "create_campaign") {
+      const market_for_scan = resolveBuilderMarketToSystemSlug(state.market ?? "");
+      const targeting = buildNormalizedTargeting({
+        market: market_for_scan,
+        asset: state.asset_class,
+        strategy: state.strategy,
+        tag_1: state.property_tags?.[0] ?? null,
+        tag_2: state.property_tags?.[1] ?? null,
+        tag_3: state.property_tags?.[2] ?? null,
+      });
+
+      const campaign_key = buildCampaignKey({
+        market: targeting.market_slug,
+        asset_type: targeting.asset_slug,
+        strategy: targeting.strategy_slug,
+      });
+
+      const db = getDb();
+      await db.from("campaign_targets").upsert({
+        campaign_key,
+        campaign_name: `${targeting.market_label} ${targeting.asset_label} ${targeting.strategy_label}`,
+        market: targeting.market_slug,
+        asset_type: targeting.asset_slug,
+        strategy: targeting.strategy_slug,
+        status: "draft",
+        daily_cap: 50,
+        source_view_name: resolveTargetSourceViewName({
+          market: targeting.market_label,
+          asset_type: targeting.asset_slug,
+          strategy: targeting.strategy_slug,
+        }),
+        metadata: {
+          source: "target_builder_v1",
+          tags: targeting.tags,
+          filters: {
+            ...(targeting.filters ?? {}),
+            ...(state.filters ?? {}),
+          },
+          builder_state: state,
+        },
+        updated_at: new Date().toISOString(),
+      });
+
+      diagnostics.last_result = `Campaign created as draft: ${campaign_key}`;
+    }
+  } catch {
+    diagnostics.last_result = "Action failed. Check logs.";
+  }
+
+  const embed = buildTargetBuilderEmbed(state, diagnostics);
+  const components = buildBuilderComponents({ session_key, mode, region, filter_category });
+  return updateMessage(null, { embeds: [embed], components });
+}
+
+// ---------------------------------------------------------------------------
 // Command: /target scan  (deferred, always dry_run=true)
 // ---------------------------------------------------------------------------
 
@@ -2138,6 +2476,8 @@ async function handleReplayInbound({ options_array, context, interaction }) {
       method: "POST",
       body: {
         message_body:   text,
+        from_number:    null,
+        to_number:      null,
         prior_language: language,
         prior_stage:    stage,
         property_type,
@@ -2147,7 +2487,7 @@ async function handleReplayInbound({ options_array, context, interaction }) {
     });
 
     if (!result?.ok) {
-      return { content: `Replay failed: ${result?.error ?? "unknown error"}` };
+      return { content: `Replay failed: ${sanitizeUserVisibleErrorText(result?.error)}` };
     }
 
     const embed = buildReplayInboundEmbed({
@@ -2180,13 +2520,15 @@ async function handleReplayOwner({ options_array, context, interaction }) {
       method: "POST",
       body: {
         message_body:   text,
+        from_number:    null,
+        to_number:      null,
         master_owner_id: owner_id,
         dry_run:        true,
       },
     });
 
     if (!result?.ok) {
-      return { content: `Replay failed: ${result?.error ?? "unknown error"}` };
+      return { content: `Replay failed: ${sanitizeUserVisibleErrorText(result?.error)}` };
     }
 
     const embed = buildReplayOwnerEmbed({
@@ -2223,6 +2565,8 @@ async function handleReplayTemplate({ options_array, context, interaction }) {
       method: "POST",
       body: {
         message_body:   "[template preview]",
+        from_number:    null,
+        to_number:      null,
         prior_language: language,
         property_type,
         dry_run:        true,
@@ -2297,6 +2641,8 @@ async function handleReplayBatch({ options_array, context, interaction }) {
           method: "POST",
           body: {
             message_body: test_case.text,
+            from_number:  null,
+            to_number:    null,
             prior_stage:  test_case.stage,
             dry_run:      true,
           },
@@ -2309,7 +2655,11 @@ async function handleReplayBatch({ options_array, context, interaction }) {
           results.push({ name: test_case.text, status: "warn", note: "alignment warning" });
           warnings++;
         } else {
-          results.push({ name: test_case.text, status: "fail", note: result?.error });
+          results.push({
+            name: test_case.text,
+            status: "fail",
+            note: sanitizeUserVisibleErrorText(result?.error),
+          });
           failed++;
         }
       } catch {
@@ -2872,6 +3222,10 @@ export async function routeDiscordInteraction(interaction) {
   if (interaction.type === 3) {
     const custom_id = String(interaction?.data?.custom_id ?? "");
 
+    if (custom_id.startsWith("target_builder:")) {
+      return handleTargetBuilderComponent({ interaction, custom_id, context });
+    }
+
     // Legacy approval prefix (existing approval flows)
     if (custom_id.startsWith(APPROVE_PREFIX) || custom_id.startsWith(REJECT_PREFIX)) {
       return handleApproval({ interaction, custom_id });
@@ -3313,6 +3667,14 @@ export async function routeDiscordInteraction(interaction) {
       }
 
     // ── /target ──────────────────────────────────────────────────────────────
+    } else if (command_name === "target-build") {
+      if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+        response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+      } else {
+        response = await handleTargetBuild({ context, interaction });
+      }
+
+    // ── /target-scan ──────────────────────────────────────────────────────
     } else if (command_name === "target-scan") {
       if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
         response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");

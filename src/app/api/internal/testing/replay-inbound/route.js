@@ -1,13 +1,14 @@
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server.js";
 
 import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { extractUnderwritingSignals } from "@/lib/domain/underwriting/extract-underwriting-signals.js";
 import { routeSellerConversation } from "@/lib/domain/seller-flow/route-seller-conversation.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
-import { resolveTemplate } from "@/lib/sms/template_resolver.js";
+import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { personalizeTemplate } from "@/lib/sms/personalize_template.js";
 import { SELLER_FLOW_STAGES } from "@/lib/domain/seller-flow/canonical-seller-flow.js";
+import { warn as logWarn } from "@/lib/logging/logger.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,13 +34,42 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
-function asBoolean(value, fallback) {
-  if (value === undefined || value === null) return fallback;
-  if (typeof value === "boolean") return value;
-  const s = String(value).toLowerCase();
-  if (s === "true" || s === "1") return true;
-  if (s === "false" || s === "0") return false;
-  return fallback;
+function sanitizeErrorMessage(err) {
+  const raw = clean(err?.message || "unexpected_error");
+  const secrets = [
+    process.env.INTERNAL_API_SECRET,
+    process.env.CRON_SECRET,
+    process.env.DISCORD_BOT_TOKEN,
+  ].filter(Boolean);
+
+  const contains_secret = secrets.some((s) => raw.includes(String(s)));
+  if (!raw || contains_secret) return "unexpected_error";
+  return raw.slice(0, 200);
+}
+
+function isTemplateCsvMissingError(err) {
+  const msg = clean(err?.message).toLowerCase();
+  return msg.includes("enoent") && msg.includes("lifecycle-sms-template-pack.csv");
+}
+
+const defaultReplayDeps = {
+  classify,
+  extractUnderwritingSignals,
+  routeSellerConversation,
+  maybeQueueSellerStageReply,
+  loadTemplate,
+  personalizeTemplate,
+  warn: logWarn,
+};
+
+let replayDeps = { ...defaultReplayDeps };
+
+export function __setReplayInboundTestDeps(overrides = {}) {
+  replayDeps = { ...replayDeps, ...overrides };
+}
+
+export function __resetReplayInboundTestDeps() {
+  replayDeps = { ...defaultReplayDeps };
 }
 
 /**
@@ -210,7 +240,11 @@ export async function POST(request) {
   const {
     from_phone_number    = null,
     to_phone_number      = null,
-    message_body         = null,
+    from_number          = null,
+    to_number            = null,
+    from                 = null,
+    to                   = null,
+    message_body         = body?.body ?? body?.message ?? null,
     owner_id             = null,
     master_owner_id      = owner_id,
     property_id          = null,
@@ -224,10 +258,14 @@ export async function POST(request) {
     existing_offer       = null,
   } = body ?? {};
 
-  // Default dry_run to true — must explicitly pass false to allow writes
-  const dry_run = asBoolean(body?.dry_run, true);
+  // Replay endpoint is always dry-run to guarantee no side effects.
+  const dry_run = true;
 
-  if (!message_body || typeof message_body !== "string") {
+  const normalized_from_number = clean(from_number ?? from_phone_number ?? from) || null;
+  const normalized_to_number = clean(to_number ?? to_phone_number ?? to) || null;
+  const normalized_message_body = clean(message_body);
+
+  if (!normalized_message_body || typeof normalized_message_body !== "string") {
     return NextResponse.json(
       { ok: false, error: "missing_required_field", field: "message_body" },
       { status: 400 }
@@ -239,7 +277,7 @@ export async function POST(request) {
 
   try {
     // ── 1. Classify ──────────────────────────────────────────────────────
-    const classification = await classify(message_body, null);
+    const classification = await replayDeps.classify(normalized_message_body, null);
     pipeline.classify = { ok: true, result: classification };
 
     // ── 2. Build synthetic context ────────────────────────────────────────
@@ -255,18 +293,18 @@ export async function POST(request) {
     });
 
     // ── 3. Extract underwriting signals ────────────────────────────────────
-    const underwriting = extractUnderwritingSignals({
-      message:        message_body,
+    const underwriting = replayDeps.extractUnderwritingSignals({
+      message:        normalized_message_body,
       classification,
       context,
     });
     pipeline.underwriting = { ok: true, result: underwriting };
 
     // ── 4. Route the conversation ─────────────────────────────────────────
-    const plan = routeSellerConversation({
+    const plan = replayDeps.routeSellerConversation({
       context,
       classification,
-      message: message_body,
+      message: normalized_message_body,
       previous_outbound_use_case: prior_use_case,
       maybe_offer,
       existing_offer,
@@ -290,10 +328,10 @@ export async function POST(request) {
     let queue_result = null;
     if (plan?.handled) {
       queue_result = await maybeQueueSellerStageReply({
-        inbound_from:               from_phone_number,
+        inbound_from:               normalized_from_number,
         context,
         classification,
-        message:                    message_body,
+        message:                    normalized_message_body,
         previous_outbound_use_case: prior_use_case,
         maybe_offer,
         existing_offer,
@@ -303,30 +341,73 @@ export async function POST(request) {
     }
 
     // ── 6. Resolve template ───────────────────────────────────────────────
-    const template_resolved = resolveTemplate({
-      use_case:             plan?.template_lookup_use_case || plan?.selected_use_case,
-      stage_code:           plan?.next_expected_stage,
-      language:             plan?.detected_language || classification?.language || "English",
-      agent_style_fit:      null,
-      property_type_scope:  underwriting?.property_type || property_type || null,
-      deal_strategy:        underwriting?.creative_strategy || deal_strategy || null,
-      is_first_touch:       false,
-      is_follow_up:         true,
-      master_owner_id:      master_owner_id ? String(master_owner_id) : null,
-      phone_e164:           from_phone_number ? String(from_phone_number) : null,
-    });
-    pipeline.template_resolve = { ok: true, result: template_resolved };
+    let template_resolved = {
+      resolved: false,
+      source: null,
+      template_id: null,
+      stage_code: null,
+      use_case: null,
+      language: null,
+      template_text: null,
+    };
+
+    try {
+      const selected_template = await replayDeps.loadTemplate({
+        use_case:            plan?.template_lookup_use_case || plan?.selected_use_case,
+        language:            plan?.detected_language || classification?.language || "English",
+        touch_type:          "Follow-Up",
+        property_type_scope: underwriting?.property_type || property_type || null,
+        deal_strategy:       underwriting?.creative_strategy || deal_strategy || null,
+        context,
+      });
+
+      if (selected_template?.text) {
+        template_resolved = {
+          resolved: true,
+          source:
+            selected_template?.template_resolution_source ||
+            selected_template?.selected_template_source ||
+            selected_template?.source ||
+            null,
+          template_id: selected_template?.template_id || selected_template?.item_id || null,
+          stage_code: selected_template?.stage_code || plan?.next_expected_stage || null,
+          use_case:
+            selected_template?.selector_use_case ||
+            selected_template?.use_case ||
+            plan?.template_lookup_use_case ||
+            plan?.selected_use_case ||
+            null,
+          language:
+            selected_template?.language ||
+            plan?.detected_language ||
+            classification?.language ||
+            "English",
+          template_text: selected_template.text,
+        };
+      }
+      pipeline.template_resolve = { ok: true, result: template_resolved };
+    } catch (template_err) {
+      if (isTemplateCsvMissingError(template_err)) {
+        replayDeps.warn("replay.template_csv_missing", {
+          reason: "csv_template_catalog_not_found",
+        });
+      }
+      pipeline.template_resolve = {
+        ok: false,
+        error: sanitizeErrorMessage(template_err),
+      };
+    }
 
     // ── 7. Personalize template ───────────────────────────────────────────
     let personalized = null;
     if (template_resolved?.resolved && template_resolved?.template_text) {
       const personalize_context = buildPersonalizeContext({
-        from_phone_number,
-        to_phone_number,
+        from_phone_number: normalized_from_number,
+        to_phone_number: normalized_to_number,
         context,
         underwriting,
       });
-      personalized = personalizeTemplate(template_resolved.template_text, personalize_context);
+      personalized = replayDeps.personalizeTemplate(template_resolved.template_text, personalize_context);
     }
     pipeline.personalize = personalized
       ? { ok: true, result: personalized }
@@ -340,7 +421,10 @@ export async function POST(request) {
     const response = {
       ok:                       true,
       dry_run,
-      inbound_message_body:     message_body,
+      message_body:             normalized_message_body,
+      from_number:              normalized_from_number,
+      to_number:                normalized_to_number,
+      inbound_message_body:     normalized_message_body,
       classification: {
         language:         classification?.language,
         objection:        classification?.objection,
@@ -352,6 +436,13 @@ export async function POST(request) {
       },
       previous_stage:           prior_stage,
       next_stage:               plan?.next_expected_stage,
+      route: {
+        previous_stage:          prior_stage,
+        next_stage:              plan?.next_expected_stage,
+        detected_intent:         plan?.detected_intent || null,
+        selected_use_case:       plan?.selected_use_case || null,
+        template_lookup_use_case: plan?.template_lookup_use_case || null,
+      },
       stage_transition_reason:  plan?.reasoning_summary || null,
       detected_intent:          plan?.detected_intent || null,
       selected_use_case:        plan?.selected_use_case,
@@ -383,6 +474,11 @@ export async function POST(request) {
         ? plan?.selected_use_case
         : null,
       captured_queue_payload:   dry_run ? captured_queue_payload : undefined,
+      safety: {
+        sms_sent: false,
+        queue_created: false,
+        podio_mutated: false,
+      },
       alignment_assertions:     assertions,
       alignment_passed:         assertions_passed,
       errors:                   errors.length > 0 ? errors : null,
@@ -394,7 +490,7 @@ export async function POST(request) {
   } catch (err) {
     errors.push({
       step:    "pipeline",
-      message: err?.message || "unexpected_error",
+      message: sanitizeErrorMessage(err),
     });
 
     return NextResponse.json(
@@ -402,7 +498,7 @@ export async function POST(request) {
         ok:     false,
         dry_run,
         error:  "pipeline_error",
-        detail: err?.message || "unexpected_error",
+        detail: sanitizeErrorMessage(err),
         errors,
       },
       { status: 500 }

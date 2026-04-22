@@ -40,6 +40,231 @@ afterEach(() => {
   __resetDocusignWebhookTestDeps();
   __resetTitleWebhookTestDeps();
   __resetClosingWebhookTestDeps();
+  if (globalThis.__replay_route_test_mod__?.__resetReplayInboundTestDeps) {
+    globalThis.__replay_route_test_mod__.__resetReplayInboundTestDeps();
+  }
+});
+
+async function getReplayRouteModule() {
+  process.env.PODIO_CLIENT_ID ||= "test_podio_client_id";
+  process.env.PODIO_CLIENT_SECRET ||= "test_podio_client_secret";
+  process.env.PODIO_USERNAME ||= "test_podio_username";
+  process.env.PODIO_PASSWORD ||= "test_podio_password";
+
+  if (!globalThis.__replay_route_test_mod__) {
+    globalThis.__replay_route_test_mod__ = await import("@/app/api/internal/testing/replay-inbound/route.js");
+  }
+  return globalThis.__replay_route_test_mod__;
+}
+
+function makeReplayRequest(payload) {
+  return new Request("http://localhost/api/internal/testing/replay-inbound", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-internal-api-secret": String(process.env.INTERNAL_API_SECRET || ""),
+    },
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+test("replay-inbound accepts message_body/from_number/to_number and returns dry-run safety response", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English", confidence: 0.99 }),
+    extractUnderwritingSignals: () => ({ property_type: "Single Family", creative_strategy: "cash" }),
+    routeSellerConversation: () => ({
+      handled: true,
+      should_queue_reply: true,
+      next_expected_stage: "consider_selling",
+      selected_use_case: "consider_selling",
+      template_lookup_use_case: "consider_selling",
+      detected_intent: "Ownership Confirmed",
+      reasoning_summary: "Seller confirmed ownership",
+      detected_language: "English",
+    }),
+    maybeQueueSellerStageReply: async ({ queue_message }) => {
+      if (queue_message) {
+        await queue_message({ dry_run: true, would_enqueue: true });
+      }
+      return { ok: true, queued: false, dry_run: true };
+    },
+    loadTemplate: async () => ({
+      text: "Thanks for confirming.",
+      template_id: "tmpl_1",
+      item_id: "tmpl_1",
+      language: "English",
+      selector_use_case: "consider_selling",
+      source: "local_registry",
+      template_resolution_source: "local_template_fallback",
+    }),
+    personalizeTemplate: () => ({ ok: true, text: "Thanks for confirming.", missing: [] }),
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "Yes I own it",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.dry_run, true);
+  assert.equal(json.message_body, "Yes I own it");
+  assert.equal(json.from_number, "+16127433952");
+  assert.equal(json.to_number, "+19048774448");
+  assert.equal(json.would_queue_reply, true);
+  assert.equal(Boolean(json.selected_template_source), true);
+  assert.equal(typeof json.rendered_message_text, "string");
+  assert.equal(json.safety?.sms_sent, false);
+  assert.equal(json.safety?.queue_created, false);
+  assert.equal(json.safety?.podio_mutated, false);
+});
+
+test("replay-inbound accepts aliases body/message/from/to and normalizes fields", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English" }),
+    extractUnderwritingSignals: () => ({}),
+    routeSellerConversation: () => ({
+      handled: true,
+      should_queue_reply: false,
+      next_expected_stage: "ownership_check",
+      selected_use_case: "ownership_check",
+      template_lookup_use_case: "ownership_check",
+    }),
+    maybeQueueSellerStageReply: async () => ({ ok: true, queued: false }),
+    loadTemplate: async () => null,
+    personalizeTemplate: () => ({ ok: true, text: "n/a", missing: [] }),
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      body: "Yes I own it",
+      from: "+16127433952",
+      to: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.message_body, "Yes I own it");
+  assert.equal(json.from_number, "+16127433952");
+  assert.equal(json.to_number, "+19048774448");
+  assert.equal(json.dry_run, true);
+
+  const response_message_alias = await replayInboundPost(
+    makeReplayRequest({
+      message: "Still me",
+      from: "+16120000000",
+      to: "+19040000000",
+      dry_run: true,
+    })
+  );
+  const json_message_alias = await response_message_alias.json();
+  assert.equal(response_message_alias.status, 200);
+  assert.equal(json_message_alias.message_body, "Still me");
+  assert.equal(json_message_alias.from_number, "+16120000000");
+  assert.equal(json_message_alias.to_number, "+19040000000");
+});
+
+test("replay-inbound does not fail when lifecycle CSV is missing and logs replay.template_csv_missing", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+  const warnings = [];
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English" }),
+    extractUnderwritingSignals: () => ({}),
+    routeSellerConversation: () => ({
+      handled: true,
+      should_queue_reply: true,
+      next_expected_stage: "consider_selling",
+      selected_use_case: "consider_selling",
+      template_lookup_use_case: "consider_selling",
+    }),
+    maybeQueueSellerStageReply: async ({ queue_message }) => {
+      if (queue_message) await queue_message({ dry_run: true });
+      return { ok: true, queued: false };
+    },
+    loadTemplate: async () => {
+      throw new Error("ENOENT: no such file or directory, open '/vercel/path0/docs/templates/lifecycle-sms-template-pack.csv'");
+    },
+    personalizeTemplate: () => ({ ok: true, text: "n/a", missing: [] }),
+    warn: (event, meta) => warnings.push({ event, meta }),
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message: "Yes I own it",
+      from: "+16127433952",
+      to: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.dry_run, true);
+  assert.equal(json.safety?.queue_created, false);
+  assert.equal(json.selected_template_source, null);
+  assert.ok(warnings.some((entry) => entry.event === "replay.template_csv_missing"));
+});
+
+test("replay-inbound pipeline failures do not leak INTERNAL_API_SECRET", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret_very_private";
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => {
+      throw new Error(`boom ${process.env.INTERNAL_API_SECRET}`);
+    },
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "Yes I own it",
+      from_number: "+16127433952",
+      to_number: "+19048774448",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 500);
+  const serialized = JSON.stringify(json);
+  assert.ok(!serialized.includes(process.env.INTERNAL_API_SECRET));
+  assert.equal(json.error, "pipeline_error");
 });
 
 test("inbound webhook ignores replay after first completion", async () => {

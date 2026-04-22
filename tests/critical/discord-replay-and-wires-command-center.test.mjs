@@ -393,6 +393,28 @@ function makeWiresInteraction({
   };
 }
 
+function makeReplayInteraction({
+  subcommand = "inbound",
+  options = [],
+  role_ids = ["owner_role"],
+  token = "replay_tok",
+} = {}) {
+  return {
+    id: "rid",
+    type: 2,
+    token,
+    guild_id: "guild_test",
+    member: {
+      user: { id: "user_replay", username: "Tester" },
+      roles: role_ids,
+    },
+    data: {
+      name: "replay",
+      options: [{ type: 1, name: subcommand, options }],
+    },
+  };
+}
+
 function makeWiresMock(opts = {}) {
   const { error = null, rows = [] } = opts;
   return {
@@ -428,6 +450,88 @@ test("/wires cockpit returns deferred response (type 5)", async () => {
     const interaction = makeWiresInteraction({ subcommand: "cockpit" });
     const response = await routeDiscordInteraction(interaction);
     assert.equal(response.type, 5, "cockpit must return type 5 deferred");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/replay inbound sends message_body/from_number/to_number/dry_run payload to backend", async () => {
+  const calls = [];
+  const callInternal_override = async (path, options) => {
+    calls.push({ path, options });
+    return {
+      ok: true,
+      classification: { language: "English" },
+      previous_stage: "ownership_check",
+      next_stage: "consider_selling",
+      selected_use_case: "consider_selling",
+      selected_template_source: "local_template_fallback",
+      would_queue_reply: true,
+      underwriting_signals: {},
+      alignment_passed: true,
+    };
+  };
+
+  __setActionRouterDeps({
+    callInternal_override,
+    editInteractionResponse_override: async () => ({ ok: true }),
+  });
+
+  try {
+    const interaction = makeReplayInteraction({
+      subcommand: "inbound",
+      options: [
+        { name: "text", value: "Yes I own it" },
+        { name: "language", value: "English" },
+      ],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 5, "replay inbound should be deferred");
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(calls.length, 1, "backend called once");
+    assert.equal(calls[0].path, "/api/internal/testing/replay-inbound");
+    assert.equal(calls[0].options?.body?.message_body, "Yes I own it");
+    assert.equal(calls[0].options?.body?.from_number, null);
+    assert.equal(calls[0].options?.body?.to_number, null);
+    assert.equal(calls[0].options?.body?.dry_run, true);
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/replay inbound backend failure edits Discord response cleanly without leaking INTERNAL_API_SECRET", async () => {
+  const editCalls = [];
+  const callInternal_override = async () => ({
+    ok: false,
+    error: `upstream failed ${process.env.INTERNAL_API_SECRET}`,
+  });
+
+  __setActionRouterDeps({
+    callInternal_override,
+    editInteractionResponse_override: async (opts) => {
+      editCalls.push(opts);
+      return { ok: true };
+    },
+  });
+
+  try {
+    const interaction = makeReplayInteraction({
+      subcommand: "inbound",
+      options: [{ name: "text", value: "Yes I own it" }],
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 5, "replay inbound should be deferred");
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(editCalls.length, 1, "one edit call expected");
+    const serialized = JSON.stringify(editCalls[0]);
+    assert.ok(serialized.includes("Replay failed"), "clean replay failure message is returned");
+    assert.ok(!serialized.includes(process.env.INTERNAL_API_SECRET), "INTERNAL_API_SECRET must not leak");
   } finally {
     __resetActionRouterDeps();
   }
