@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 
 import {
   buildPodioPayloadForSupabaseEvent,
+  isPodioTemplateRelationAttachable,
   syncSupabaseMessageEventsToPodio,
   __setSyncPodioDeps,
   __resetSyncPodioDeps,
@@ -54,6 +55,8 @@ function makeOutboundRow(overrides = {}) {
     sms_agent_id: 901,
     textgrid_number_id: 501,
     template_id: 701,
+    selected_template_source: "podio",
+    selected_template_item_id: 701,
     brain_id: null,
     stage_before: "Initial Contact",
     stage_after: "Awaiting Response",
@@ -173,6 +176,10 @@ test("buildPodioPayloadForSupabaseEvent: null relation ids are omitted", () => {
     property_id: null,
     market_id: null,
     template_id: null,
+    selected_template_source: null,
+    selected_template_item_id: null,
+    template_relation_id: null,
+    template_source: null,
   });
   const fields = buildPodioPayloadForSupabaseEvent(row);
 
@@ -187,6 +194,9 @@ test("buildPodioPayloadForSupabaseEvent: null relation ids are omitted", () => {
 test("buildPodioPayloadForSupabaseEvent: supabase template source does not attach Podio template relation", () => {
   const row = makeOutboundRow({
     template_id: 200049,
+    selected_template_source: "supabase",
+    selected_template_item_id: null,
+    template_relation_id: null,
     template_source: "supabase",
   });
 
@@ -204,7 +214,30 @@ test("buildPodioPayloadForSupabaseEvent: supabase template source does not attac
   assert.equal(diag.template_relation_attempted, false);
   assert.equal(diag.template_relation_skipped, true);
   assert.equal(diag.template_relation_skip_reason, "non_podio_template_source");
+  assert.equal(diag.podio_template_item_id, null);
   assert.equal(diag.template_id, 200049);
+});
+
+test("buildPodioPayloadForSupabaseEvent: null template source skips relation as unknown source", () => {
+  const row = makeOutboundRow({
+    template_id: 200049,
+    selected_template_source: null,
+    template_source: null,
+    selected_template_item_id: null,
+    template_relation_id: null,
+  });
+
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.equal(fields["template"], undefined);
+
+  const ai_output = JSON.parse(fields["ai-output"] || "{}");
+  const diag = ai_output?.podio_sync_diagnostics || {};
+
+  assert.equal(diag.template_source, null);
+  assert.equal(diag.template_relation_attempted, false);
+  assert.equal(diag.template_relation_skipped, true);
+  assert.equal(diag.template_relation_skip_reason, "unknown_template_source");
+  assert.equal(diag.podio_template_item_id, null);
 });
 
 test("buildPodioPayloadForSupabaseEvent: podio template source with selected_template_item_id attaches relation", () => {
@@ -223,6 +256,46 @@ test("buildPodioPayloadForSupabaseEvent: podio template source with selected_tem
   assert.equal(diag.template_relation_attempted, true);
   assert.equal(diag.template_relation_skipped, false);
   assert.equal(diag.template_relation_skip_reason, null);
+  assert.equal(diag.podio_template_item_id, 9901);
+});
+
+test("isPodioTemplateRelationAttachable: helper returns expected guard decisions", () => {
+  const unknown = isPodioTemplateRelationAttachable({
+    template_id: 200049,
+    selected_template_item_id: null,
+    template_relation_id: null,
+  });
+  assert.deepEqual(unknown, {
+    attachable: false,
+    podio_template_item_id: null,
+    source: null,
+    skipped: true,
+    skip_reason: "unknown_template_source",
+  });
+
+  const supabase = isPodioTemplateRelationAttachable({
+    selected_template_source: "supabase_sms_templates",
+    template_id: 200049,
+  });
+  assert.deepEqual(supabase, {
+    attachable: false,
+    podio_template_item_id: null,
+    source: "supabase_sms_templates",
+    skipped: true,
+    skip_reason: "non_podio_template_source",
+  });
+
+  const podio = isPodioTemplateRelationAttachable({
+    selected_template_source: "podio",
+    selected_template_item_id: 9901,
+  });
+  assert.deepEqual(podio, {
+    attachable: true,
+    podio_template_item_id: 9901,
+    source: "podio",
+    skipped: false,
+    skip_reason: null,
+  });
 });
 
 // ─── 2. Inbound event → Podio payload ──────────────────────────────────────
@@ -665,6 +738,9 @@ test("syncSupabaseMessageEventsToPodio: event with null body is synced not skipp
 test("syncSupabaseMessageEventsToPodio: supabase template id is kept in metadata and relation is skipped without failing sync", async () => {
   const row = makeOutboundRow({
     template_id: 200049,
+    selected_template_source: "supabase_sms_templates",
+    selected_template_item_id: null,
+    template_relation_id: null,
     template_source: "supabase_sms_templates",
   });
   const updates = [];
@@ -711,7 +787,62 @@ test("syncSupabaseMessageEventsToPodio: supabase template id is kept in metadata
   assert.equal(diag.template_relation_attempted, false);
   assert.equal(diag.template_relation_skipped, true);
   assert.equal(diag.template_relation_skip_reason, "non_podio_template_source");
+  assert.equal(diag.podio_template_item_id, null);
   assert.equal(diag.template_id, 200049);
+
+  const success_update = updates.find((u) => u.podio_sync_status === "synced");
+  assert.ok(success_update, "row should be marked synced");
+  assert.equal(success_update.podio_sync_error, null);
+});
+
+test("syncSupabaseMessageEventsToPodio: null source with supabase template id skips template relation and still syncs", async () => {
+  const row = makeOutboundRow({
+    template_id: 200049,
+    selected_template_source: null,
+    template_source: null,
+    selected_template_item_id: null,
+    template_relation_id: null,
+  });
+  const updates = [];
+  const synced_fields = [];
+
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          or: () => ({
+            order: () => ({
+              limit: () => ({ data: [row], error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: (payload) => {
+        updates.push(payload);
+        return { eq: () => ({ data: null, error: null }) };
+      },
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async (fields) => {
+      synced_fields.push(fields);
+      return { item_id: 99887 };
+    },
+  });
+
+  assert.equal(result.synced_count, 1);
+  assert.equal(result.failed_count, 0);
+  assert.equal(synced_fields[0]["template"], undefined);
+
+  const ai_output = JSON.parse(synced_fields[0]["ai-output"] || "{}");
+  const diag = ai_output?.podio_sync_diagnostics || {};
+  assert.equal(diag.template_source, null);
+  assert.equal(diag.template_relation_attempted, false);
+  assert.equal(diag.template_relation_skipped, true);
+  assert.equal(diag.template_relation_skip_reason, "unknown_template_source");
+  assert.equal(diag.podio_template_item_id, null);
 
   const success_update = updates.find((u) => u.podio_sync_status === "synced");
   assert.ok(success_update, "row should be marked synced");

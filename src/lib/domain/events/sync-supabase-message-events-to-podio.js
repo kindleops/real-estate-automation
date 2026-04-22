@@ -76,6 +76,12 @@ function normalizeTemplateSource(value = null) {
   return clean(value).toLowerCase() || null;
 }
 
+function sourceLooksPodio(value = null) {
+  const normalized = normalizeTemplateSource(value);
+  if (!normalized) return false;
+  return normalized === "podio" || normalized.includes("podio");
+}
+
 function parseJsonObject(value = null) {
   if (!value) return {};
   if (typeof value === "object" && !Array.isArray(value)) return value;
@@ -117,9 +123,23 @@ function resolveTemplateRelationContext(row = {}) {
       row?.selected_template_source,
       row?.template_source,
       metadata?.selected_template_source,
+      metadata?.selected_template_resolution_source,
+      metadata?.queue_result?.selected_template_source,
+      metadata?.queue_result?.selected_template_resolution_source,
+      metadata?.send_result?.selected_template_source,
       metadata?.template_source,
       metadata?.queue_row?.selected_template_source,
+      metadata?.queue_row?.selected_template_resolution_source,
       metadata?.queue_row?.template_source
+    )
+  );
+
+  const template_resolution_source = normalizeTemplateSource(
+    readFirstNonEmpty(
+      row?.template_resolution_source,
+      metadata?.selected_template_resolution_source,
+      metadata?.queue_result?.selected_template_resolution_source,
+      metadata?.queue_row?.selected_template_resolution_source
     )
   );
 
@@ -144,6 +164,7 @@ function resolveTemplateRelationContext(row = {}) {
   return {
     metadata,
     selected_template_source,
+    template_resolution_source,
     selected_template_item_id,
     template_relation_id,
     template_id_numeric,
@@ -153,26 +174,51 @@ function resolveTemplateRelationContext(row = {}) {
 export function isPodioTemplateRelationAttachable({
   template_source = null,
   selected_template_source = null,
+  template_resolution_source = null,
   template_id = null,
   selected_template_item_id = null,
   template_relation_id = null,
 } = {}) {
-  const normalized_source = normalizeTemplateSource(
-    selected_template_source || template_source
+  const inferred_source = normalizeTemplateSource(
+    selected_template_source || template_source || template_resolution_source
   );
-  const has_explicit_source = Boolean(normalized_source);
+  const source_is_podio = sourceLooksPodio(inferred_source);
+  const has_source = Boolean(inferred_source);
+  const normalized_selected_item_id = asPositiveInt(selected_template_item_id);
+  const normalized_relation_id = asPositiveInt(template_relation_id);
+  const normalized_template_id = asPositiveInt(template_id);
   const candidate_relation_id =
-    asPositiveInt(template_relation_id) ||
-    asPositiveInt(selected_template_item_id) ||
-    asPositiveInt(template_id) ||
+    normalized_relation_id || normalized_selected_item_id ||
+    (source_is_podio ? normalized_template_id : null) ||
     null;
 
-  if (has_explicit_source && normalized_source !== "podio") {
+  if (!has_source) {
     return {
       attachable: false,
-      relation_item_id: null,
+      podio_template_item_id: null,
+      source: null,
+      skipped: true,
+      skip_reason: "unknown_template_source",
+    };
+  }
+
+  if (!source_is_podio) {
+    return {
+      attachable: false,
+      podio_template_item_id: null,
+      source: inferred_source,
+      skipped: true,
       skip_reason: "non_podio_template_source",
-      template_source: normalized_source,
+    };
+  }
+
+  if (!normalized_relation_id && !normalized_selected_item_id && !normalized_template_id) {
+    return {
+      attachable: false,
+      podio_template_item_id: null,
+      source: inferred_source,
+      skipped: true,
+      skip_reason: "missing_podio_template_item_id",
     };
   }
 
@@ -182,19 +228,21 @@ export function isPodioTemplateRelationAttachable({
 
     return {
       attachable: false,
-      relation_item_id: null,
+      podio_template_item_id: null,
+      source: inferred_source,
+      skipped: true,
       skip_reason: clean(raw_relation_candidate)
         ? "invalid_podio_template_item_id"
         : "missing_podio_template_item_id",
-      template_source: normalized_source,
     };
   }
 
   return {
     attachable: true,
-    relation_item_id: candidate_relation_id,
+    podio_template_item_id: candidate_relation_id,
+    source: inferred_source,
+    skipped: false,
     skip_reason: null,
-    template_source: normalized_source,
   };
 }
 
@@ -281,20 +329,22 @@ export function buildPodioPayloadForSupabaseEvent(row) {
   const template_relation_decision = isPodioTemplateRelationAttachable({
     template_source: template_ctx.selected_template_source,
     selected_template_source: template_ctx.selected_template_source,
+    template_resolution_source: template_ctx.template_resolution_source,
     template_id: template_ctx.template_id_numeric,
     selected_template_item_id: template_ctx.selected_template_item_id,
     template_relation_id: template_ctx.template_relation_id,
   });
 
   const template_diag = {
-    template_source: template_relation_decision.template_source,
+    template_source: template_relation_decision.source,
     template_relation_attempted: template_relation_decision.attachable,
-    template_relation_skipped: !template_relation_decision.attachable,
+    template_relation_skipped: template_relation_decision.skipped,
     template_relation_skip_reason: template_relation_decision.skip_reason,
-    template_relation_item_id: template_relation_decision.relation_item_id,
+    podio_template_item_id: template_relation_decision.podio_template_item_id,
     selected_template_item_id: template_ctx.selected_template_item_id,
     template_relation_id: template_ctx.template_relation_id,
     template_id: template_ctx.template_id_numeric,
+    template_resolution_source: template_ctx.template_resolution_source,
   };
 
   const fields = {
@@ -388,10 +438,10 @@ export function buildPodioPayloadForSupabaseEvent(row) {
     ...(asArrayRef(row.sms_agent_id)
       ? { [SELLER_MESSAGE_EVENT_FIELDS.sms_agent]: asArrayRef(row.sms_agent_id) }
       : {}),
-    ...(template_relation_decision.attachable && template_relation_decision.relation_item_id
+    ...(template_relation_decision.attachable && template_relation_decision.podio_template_item_id
       ? {
           [SELLER_MESSAGE_EVENT_FIELDS.template]: asArrayRef(
-            template_relation_decision.relation_item_id
+            template_relation_decision.podio_template_item_id
           ),
         }
       : {}),
