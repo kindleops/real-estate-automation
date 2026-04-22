@@ -1943,3 +1943,277 @@ export function buildDailyBriefingEmbed(metrics = {}) {
     footer: { text: "Empire Briefing • Real Estate Automation" },
   };
 }
+
+// ---------------------------------------------------------------------------
+// buildOpsNotificationEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic ops notification embed — system-triggered proactive alert.
+ *
+ * @param {object} payload
+ * @param {string}  payload.title               - Short notification title
+ * @param {string}  [payload.message]           - Body / description
+ * @param {string}  [payload.severity]          - "info" | "warning" | "critical"
+ * @param {string}  [payload.campaign_key]
+ * @param {object}  [payload.metrics]           - { sent, delivered, replied, opted_out, failed }
+ * @param {string}  [payload.recommended_action]
+ * @returns {object}  Discord embed
+ */
+export function buildOpsNotificationEmbed(payload = {}) {
+  const {
+    title              = "Ops Notification",
+    message            = null,
+    severity           = "info",
+    campaign_key       = null,
+    metrics            = null,
+    recommended_action = null,
+  } = payload;
+
+  const color = severity === "critical" ? COLOR.red
+              : severity === "warning"  ? COLOR.yellow
+              : COLOR.blue;
+
+  const fields = [];
+
+  if (campaign_key) {
+    fields.push(f("Campaign", String(campaign_key).slice(0, 100), true));
+  }
+
+  if (metrics && typeof metrics === "object") {
+    const { sent = 0, delivered = 0, replied = 0, opted_out = 0, failed = 0 } = metrics;
+    const base = delivered > 0 ? delivered : sent;
+    const reply_pct    = base   > 0 ? ((replied   / base)  * 100).toFixed(1) : "—";
+    const opt_out_pct  = base   > 0 ? ((opted_out / base)  * 100).toFixed(1) : "—";
+    const failed_pct   = sent    > 0 ? ((failed    / sent)  * 100).toFixed(1) : "—";
+    fields.push(f(
+      "Metrics",
+      `Sent: **${sent}**  |  Delivered: **${delivered}**  |  Replied: **${replied}** (${reply_pct}%)\nOpt-outs: **${opted_out}** (${opt_out_pct}%)  |  Failed: **${failed}** (${failed_pct}%)`,
+    ));
+  }
+
+  if (recommended_action) {
+    fields.push(f("Recommended Action", String(recommended_action).slice(0, 200), true));
+  }
+
+  return {
+    title:     String(title).slice(0, 256),
+    ...(message ? { description: String(message).slice(0, 2048) } : {}),
+    color,
+    timestamp: now(),
+    fields:    fields.slice(0, 25),
+    footer:    { text: `Severity: ${severity}  |  Proactive Ops Check` },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildCampaignScaleApprovalEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Campaign scale approval embed — prompts ops team to approve a scale-up.
+ *
+ * @param {object} payload
+ * @param {string}  payload.campaign_key
+ * @param {string}  [payload.market]
+ * @param {string}  [payload.asset]
+ * @param {string}  [payload.strategy]
+ * @param {number}  [payload.current_cap]
+ * @param {number}  [payload.proposed_cap]
+ * @param {object}  [payload.metrics]
+ * @param {string}  [payload.request_key]   - Approval request dedup key
+ * @param {string}  [payload.reason]
+ * @returns {object}
+ */
+export function buildCampaignScaleApprovalEmbed(payload = {}) {
+  const {
+    campaign_key = "",
+    market       = null,
+    asset        = null,
+    strategy     = null,
+    current_cap  = null,
+    proposed_cap = null,
+    metrics      = null,
+    request_key  = null,
+    reason       = null,
+  } = payload;
+
+  const fields = [];
+
+  if (market || asset || strategy) {
+    fields.push(f(
+      "Campaign",
+      [market, asset, strategy].filter(Boolean).join("  /  ").slice(0, 200),
+      true,
+    ));
+  }
+
+  if (current_cap != null || proposed_cap != null) {
+    fields.push(f(
+      "Cap Change",
+      `${current_cap ?? "—"} → **${proposed_cap ?? "—"} / day**`,
+      true,
+    ));
+  }
+
+  if (metrics && typeof metrics === "object") {
+    const { sent = 0, delivered = 0, replied = 0 } = metrics;
+    const base = delivered > 0 ? delivered : sent;
+    const reply_pct = base > 0 ? ((replied / base) * 100).toFixed(1) : "—";
+    fields.push(f(
+      "Signal",
+      `Sent: **${sent}**  |  Delivered: **${delivered}**  |  Reply rate: **${reply_pct}%**`,
+    ));
+  }
+
+  if (reason) {
+    fields.push(f("Analyst Reason", String(reason).slice(0, 500)));
+  }
+
+  return {
+    title:     `📈 Scale Approval Required — ${String(campaign_key).slice(0, 80)}`,
+    color:     COLOR.teal_green,
+    timestamp: now(),
+    fields:    fields.slice(0, 25),
+    footer:    { text: request_key ? `Request: ${String(request_key).slice(0, 100)}` : "Proactive Ops — Scale Gate" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildCampaignPauseAlertEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Campaign pause alert embed — proactive signal that a campaign should be paused.
+ *
+ * @param {object} payload
+ * @param {string}  payload.campaign_key
+ * @param {string}  [payload.reason]
+ * @param {number}  [payload.opt_out_rate]   - Decimal rate (0–1)
+ * @param {number}  [payload.failed_rate]    - Decimal rate (0–1)
+ * @param {string}  [payload.request_key]
+ * @returns {object}
+ */
+export function buildCampaignPauseAlertEmbed(payload = {}) {
+  const {
+    campaign_key = "",
+    reason       = null,
+    opt_out_rate = null,
+    failed_rate  = null,
+    request_key  = null,
+  } = payload;
+
+  const fields = [];
+
+  if (opt_out_rate != null || failed_rate != null) {
+    fields.push(f(
+      "Health Signals",
+      [
+        opt_out_rate != null ? `Opt-outs: **${(opt_out_rate * 100).toFixed(1)}%**` : null,
+        failed_rate  != null ? `Failed:   **${(failed_rate  * 100).toFixed(1)}%**` : null,
+      ].filter(Boolean).join("  |  "),
+      false,
+    ));
+  }
+
+  if (reason) {
+    fields.push(f("Reason", String(reason).slice(0, 500)));
+  }
+
+  return {
+    title:     `⚠️ Pause Alert — ${String(campaign_key).slice(0, 80)}`,
+    color:     COLOR.amber,
+    timestamp: now(),
+    fields:    fields.slice(0, 25),
+    footer:    { text: request_key ? `Request: ${String(request_key).slice(0, 100)}` : "Proactive Ops — Pause Gate" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildHotLeadOpsEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * Hot lead ops embed — surfaced by proactive check, shows high-activity leads.
+ *
+ * @param {object} payload
+ * @param {number}   payload.hot_count       - Total hot leads in window
+ * @param {object[]} [payload.recent_leads]  - [{ phone_last4, body_preview, created_at }]
+ * @param {string}   [payload.time_window]   - Human-readable window description
+ * @returns {object}
+ */
+export function buildHotLeadOpsEmbed(payload = {}) {
+  const {
+    hot_count     = 0,
+    recent_leads  = [],
+    time_window   = "last 24 h",
+  } = payload;
+
+  const lead_fields = recent_leads.slice(0, 5).map((lead, i) => {
+    const ts_str = lead.created_at
+      ? new Date(lead.created_at).toISOString().slice(0, 16).replace("T", " ")
+      : "—";
+    return f(
+      `${i + 1}. …${String(lead.phone_last4 ?? "????").slice(-4)}`,
+      `\`${String(lead.body_preview ?? "").slice(0, 80)}\`  ·  ${ts_str}`,
+    );
+  });
+
+  if (lead_fields.length === 0) {
+    lead_fields.push(f("No hot leads", "No high-activity leads in the current window."));
+  }
+
+  return {
+    title:     `🔥 Hot Leads — ${hot_count} in ${time_window}`,
+    color:     hot_count > 0 ? COLOR.gold_purple : COLOR.gray,
+    timestamp: now(),
+    fields:    lead_fields,
+    footer:    { text: "Proactive Ops — Hot Lead Alert" },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildSystemHealthOpsEmbed
+// ---------------------------------------------------------------------------
+
+/**
+ * System health ops embed — proactive infrastructure status summary.
+ *
+ * @param {object} payload
+ * @param {object[]} payload.checks          - [{ name, status, detail? }]  status: "ok"|"warn"|"error"
+ * @param {string}   [payload.overall_status] - "healthy" | "warning" | "critical"
+ * @returns {object}
+ */
+export function buildSystemHealthOpsEmbed(payload = {}) {
+  const {
+    checks         = [],
+    overall_status = "healthy",
+  } = payload;
+
+  const color = overall_status === "critical" ? COLOR.red
+              : overall_status === "warning"  ? COLOR.yellow
+              : COLOR.green;
+
+  const fields = checks.slice(0, 15).map((check) => {
+    const icon = check.status === "ok"    ? "✅"
+               : check.status === "warn"  ? "⚠️"
+               : "❌";
+    return f(
+      `${icon} ${String(check.name ?? "").slice(0, 60)}`,
+      String(check.detail ?? check.status ?? "").slice(0, 200),
+      true,
+    );
+  });
+
+  if (fields.length === 0) {
+    fields.push(f("No checks", "No health checks returned."));
+  }
+
+  return {
+    title:     `🛡️ System Health — ${String(overall_status).charAt(0).toUpperCase() + String(overall_status).slice(1)}`,
+    color,
+    timestamp: now(),
+    fields,
+    footer:    { text: "Proactive Ops — Infrastructure Check" },
+  };
+}

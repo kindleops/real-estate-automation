@@ -320,3 +320,41 @@ export function briefingActionRow() {
     ]),
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Proactive ops approval actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Ops approval action row for proactive campaign scale/pause notifications.
+ *
+ * custom_id format:
+ *   approval:campaign_scale:<requestKey>   — approve a scale (Owner / SMS Ops)
+ *   approval:campaign_pause:<requestKey>   — approve a pause (Owner / SMS Ops)
+ *   approval:hold:<requestKey>             — hold without action (any team)
+ *   approval:inspect:<requestKey>          — inspect campaign (any team)
+ *
+ * Note: custom_ids are truncated to 100 chars per Discord spec.
+ *
+ * @param {object} opts
+ * @param {string} opts.requestKey - Dedup key for the approval request
+ * @param {"scale"|"pause"} [opts.type="scale"] - Alert type
+ * @returns {object[]}  Array of action rows
+ */
+export function opsApprovalActionRow({ requestKey = "", type = "scale" } = {}) {
+  const safe_key = String(requestKey).replace(/[^a-zA-Z0-9_:-]/g, "").slice(0, 60);
+
+  const action_custom_id = type === "pause"
+    ? `approval:campaign_pause:${safe_key}`
+    : `approval:campaign_scale:${safe_key}`;
+
+  const approve_label = type === "pause" ? "⏸ Approve Pause" : "✅ Approve Scale";
+
+  return [
+    actionRow([
+      button({ label: approve_label,   custom_id: action_custom_id,              style: STYLE.SUCCESS   }),
+      button({ label: "⏸ Hold",        custom_id: `approval:hold:${safe_key}`,   style: STYLE.SECONDARY }),
+      button({ label: "🔍 Inspect",    custom_id: `approval:inspect:${safe_key}`, style: STYLE.SECONDARY }),
+    ]),
+  ];
+}

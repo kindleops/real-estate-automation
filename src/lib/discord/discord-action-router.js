@@ -76,6 +76,9 @@ import {
   buildWireReconcileEmbed,
   buildWireSetupRequiredEmbed,
   buildDailyBriefingEmbed,
+  buildCampaignScaleApprovalEmbed,
+  buildCampaignPauseAlertEmbed,
+  buildOpsNotificationEmbed,
 } from "./discord-embed-factory.js";
 import {
   missionButtons,
@@ -91,6 +94,7 @@ import {
   wireCockpitButtons,
   wireEventButtons,
   briefingActionRow,
+  opsApprovalActionRow,
 } from "./discord-components.js";
 import {
   buildCampaignKey,
@@ -116,6 +120,11 @@ import {
 import {
   getDailyBriefing,
 } from "../domain/kpis/daily-briefing.js";
+import {
+  loadApprovalRequest,
+  resolveApprovalRequest,
+  writeDiscordActionAudit,
+} from "../domain/ops/proactive-notifications.js";
 import {
   deferredPublicResponse,
   deferredEphemeralResponse,
@@ -2847,6 +2856,215 @@ export async function routeDiscordInteraction(interaction) {
         })],
         ephemeral: true,
       });
+    }
+
+    // ── Proactive ops approval buttons ──────────────────────────────────────
+    // custom_id format: approval:campaign_scale:<requestKey>
+    //                   approval:campaign_pause:<requestKey>
+    //                   approval:hold:<requestKey>
+    //                   approval:inspect:<requestKey>
+
+    if (
+      custom_id.startsWith("approval:campaign_scale:") ||
+      custom_id.startsWith("approval:campaign_pause:") ||
+      custom_id.startsWith("approval:hold:")           ||
+      custom_id.startsWith("approval:inspect:")
+    ) {
+      const is_scale  = custom_id.startsWith("approval:campaign_scale:");
+      const is_pause  = custom_id.startsWith("approval:campaign_pause:");
+      const is_hold   = custom_id.startsWith("approval:hold:");
+      const is_inspect = custom_id.startsWith("approval:inspect:");
+
+      const prefix = is_scale   ? "approval:campaign_scale:"
+                   : is_pause   ? "approval:campaign_pause:"
+                   : is_hold    ? "approval:hold:"
+                   : "approval:inspect:";
+      const request_key = custom_id.slice(prefix.length);
+
+      if (!request_key) {
+        return updateMessage("❌ Invalid ops approval request key.");
+      }
+
+      // Permission check — scale and pause require Owner or SMS Ops.
+      if ((is_scale || is_pause) && !checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
+        await writeDiscordActionAudit({
+          request_key,
+          action_type:    is_scale ? "campaign_scale" : "campaign_pause",
+          actor_user_id:  ctx.user_id,
+          actor_username: ctx.username,
+          guild_id:       ctx.guild_id,
+          outcome:        "unauthorized",
+        });
+        return updateMessage("🚫 Only **Owner** or **SMS Ops** can approve this action.");
+      }
+
+      // Load the approval request.
+      let approval_req = null;
+      try {
+        const db_ctx = _router_deps.supabase_override ?? supabase;
+        const { data } = await db_ctx
+          .from("campaign_approval_requests")
+          .select("*")
+          .eq("request_key", request_key)
+          .maybeSingle();
+        // Treat expired as unavailable.
+        if (data && data.expires_at && new Date(data.expires_at) < new Date()) {
+          approval_req = null;
+        } else {
+          approval_req = data;
+        }
+      } catch { /* non-fatal — approval_req stays null */ }
+
+      if (is_inspect) {
+        // Inspect is informational — return campaign snapshot without mutating.
+        await writeDiscordActionAudit({
+          request_key,
+          action_type:    "inspect",
+          actor_user_id:  ctx.user_id,
+          actor_username: ctx.username,
+          guild_id:       ctx.guild_id,
+          outcome:        "inspected",
+          details:        approval_req ? { campaign_key: approval_req.campaign_key } : null,
+        });
+
+        const inspect_embed = buildOpsNotificationEmbed({
+          title:    `Inspection — ${approval_req?.campaign_key ?? request_key}`,
+          message:  approval_req?.reason ?? "No additional context available.",
+          severity: "info",
+          campaign_key: approval_req?.campaign_key ?? null,
+          metrics:      approval_req?.metrics ?? null,
+        });
+        return updateMessage(null, { embeds: [inspect_embed] });
+      }
+
+      if (!approval_req) {
+        return updateMessage("⚠️ Approval request not found or has expired.");
+      }
+
+      if (approval_req.status !== "pending") {
+        return updateMessage(`⚠️ This request has already been **${approval_req.status}**.`);
+      }
+
+      if (is_hold) {
+        // Hold — record audit entry but don't mutate the campaign.
+        await resolveApprovalRequest(request_key, "cancelled", {
+          user_id:  ctx.user_id,
+          username: ctx.username,
+        });
+        await writeDiscordActionAudit({
+          request_key,
+          action_type:    is_scale ? "campaign_scale" : "campaign_pause",
+          actor_user_id:  ctx.user_id,
+          actor_username: ctx.username,
+          guild_id:       ctx.guild_id,
+          outcome:        "held",
+          details:        { campaign_key: approval_req.campaign_key },
+        });
+        return updateMessage(`⏸ Held by <@${ctx.user_id}> — no action taken on \`${approval_req.campaign_key}\`.`, {
+          allowed_mentions: { parse: [] },
+        });
+      }
+
+      // Scale approval — update daily_cap.
+      if (is_scale) {
+        const resolved = await resolveApprovalRequest(request_key, "approved", {
+          user_id:  ctx.user_id,
+          username: ctx.username,
+        });
+
+        if (!resolved) {
+          return updateMessage("⚠️ Could not update approval status — request may have changed.");
+        }
+
+        try {
+          const db_ctx = _router_deps.supabase_override ?? supabase;
+          await db_ctx
+            .from("campaign_targets")
+            .update({
+              daily_cap:  Number(approval_req.proposed_cap),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("campaign_key", approval_req.campaign_key);
+        } catch { /* non-fatal — audit still written */ }
+
+        await writeDiscordActionAudit({
+          request_key,
+          action_type:    "campaign_scale",
+          actor_user_id:  ctx.user_id,
+          actor_username: ctx.username,
+          guild_id:       ctx.guild_id,
+          outcome:        "approved",
+          details: {
+            campaign_key: approval_req.campaign_key,
+            current_cap:  approval_req.current_cap,
+            proposed_cap: approval_req.proposed_cap,
+          },
+        });
+
+        const scale_embed = buildCampaignScaleApprovalEmbed({
+          campaign_key: approval_req.campaign_key,
+          market:       approval_req.market,
+          asset:        approval_req.asset,
+          strategy:     approval_req.strategy,
+          current_cap:  approval_req.current_cap,
+          proposed_cap: approval_req.proposed_cap,
+          metrics:      approval_req.metrics,
+          request_key,
+          reason:       approval_req.reason,
+        });
+
+        return updateMessage(`✅ Scale approved by <@${ctx.user_id}>.`, {
+          embeds:           [scale_embed],
+          allowed_mentions: { parse: [] },
+        });
+      }
+
+      // Pause approval — pause the campaign.
+      if (is_pause) {
+        const resolved = await resolveApprovalRequest(request_key, "approved", {
+          user_id:  ctx.user_id,
+          username: ctx.username,
+        });
+
+        if (!resolved) {
+          return updateMessage("⚠️ Could not update approval status — request may have changed.");
+        }
+
+        try {
+          const db_ctx = _router_deps.supabase_override ?? supabase;
+          await db_ctx
+            .from("campaign_targets")
+            .update({ paused: true, updated_at: new Date().toISOString() })
+            .eq("campaign_key", approval_req.campaign_key);
+        } catch { /* non-fatal */ }
+
+        await writeDiscordActionAudit({
+          request_key,
+          action_type:    "campaign_pause",
+          actor_user_id:  ctx.user_id,
+          actor_username: ctx.username,
+          guild_id:       ctx.guild_id,
+          outcome:        "approved",
+          details:        { campaign_key: approval_req.campaign_key, reason: approval_req.reason },
+        });
+
+        const pause_embed = buildCampaignPauseAlertEmbed({
+          campaign_key: approval_req.campaign_key,
+          reason:       approval_req.reason,
+          opt_out_rate: approval_req.metrics?.opted_out && approval_req.metrics?.delivered
+            ? approval_req.metrics.opted_out / approval_req.metrics.delivered
+            : null,
+          failed_rate: approval_req.metrics?.failed && approval_req.metrics?.sent
+            ? approval_req.metrics.failed / approval_req.metrics.sent
+            : null,
+          request_key,
+        });
+
+        return updateMessage(`⏸ Pause approved by <@${ctx.user_id}>.`, {
+          embeds:           [pause_embed],
+          allowed_mentions: { parse: [] },
+        });
+      }
     }
 
     return updateMessage("⚠️ Unknown button interaction.");
