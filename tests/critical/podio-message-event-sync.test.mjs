@@ -184,6 +184,47 @@ test("buildPodioPayloadForSupabaseEvent: null relation ids are omitted", () => {
   assert.deepEqual(fields["master-owner"], [201]);
 });
 
+test("buildPodioPayloadForSupabaseEvent: supabase template source does not attach Podio template relation", () => {
+  const row = makeOutboundRow({
+    template_id: 200049,
+    template_source: "supabase",
+  });
+
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.equal(
+    fields["template"],
+    undefined,
+    "non-Podio template sources must never attach template app relation"
+  );
+
+  const ai_output = JSON.parse(fields["ai-output"] || "{}");
+  const diag = ai_output?.podio_sync_diagnostics || {};
+
+  assert.equal(diag.template_source, "supabase");
+  assert.equal(diag.template_relation_attempted, false);
+  assert.equal(diag.template_relation_skipped, true);
+  assert.equal(diag.template_relation_skip_reason, "non_podio_template_source");
+  assert.equal(diag.template_id, 200049);
+});
+
+test("buildPodioPayloadForSupabaseEvent: podio template source with selected_template_item_id attaches relation", () => {
+  const row = makeOutboundRow({
+    template_id: 200049,
+    template_source: "podio",
+    selected_template_item_id: 9901,
+  });
+
+  const fields = buildPodioPayloadForSupabaseEvent(row);
+  assert.deepEqual(fields["template"], [9901]);
+
+  const ai_output = JSON.parse(fields["ai-output"] || "{}");
+  const diag = ai_output?.podio_sync_diagnostics || {};
+  assert.equal(diag.template_source, "podio");
+  assert.equal(diag.template_relation_attempted, true);
+  assert.equal(diag.template_relation_skipped, false);
+  assert.equal(diag.template_relation_skip_reason, null);
+});
+
 // ─── 2. Inbound event → Podio payload ──────────────────────────────────────
 
 test("buildPodioPayloadForSupabaseEvent: inbound row maps to correct Podio fields", () => {
@@ -619,4 +660,103 @@ test("syncSupabaseMessageEventsToPodio: event with null body is synced not skipp
     synced_fields[0]["message"] && synced_fields[0]["message"].length > 0,
     "Podio must receive non-empty message for null body (placeholder)"
   );
+});
+
+test("syncSupabaseMessageEventsToPodio: supabase template id is kept in metadata and relation is skipped without failing sync", async () => {
+  const row = makeOutboundRow({
+    template_id: 200049,
+    template_source: "supabase_sms_templates",
+  });
+  const updates = [];
+  const synced_fields = [];
+
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          or: () => ({
+            order: () => ({
+              limit: () => ({ data: [row], error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: (payload) => {
+        updates.push(payload);
+        return { eq: () => ({ data: null, error: null }) };
+      },
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async (fields) => {
+      synced_fields.push(fields);
+      return { item_id: 98765 };
+    },
+  });
+
+  assert.equal(result.synced_count, 1);
+  assert.equal(result.failed_count, 0);
+  assert.equal(synced_fields.length, 1);
+  assert.equal(
+    synced_fields[0]["template"],
+    undefined,
+    "sync payload must not include template relation for non-Podio template sources"
+  );
+
+  const ai_output = JSON.parse(synced_fields[0]["ai-output"] || "{}");
+  const diag = ai_output?.podio_sync_diagnostics || {};
+  assert.equal(diag.template_source, "supabase_sms_templates");
+  assert.equal(diag.template_relation_attempted, false);
+  assert.equal(diag.template_relation_skipped, true);
+  assert.equal(diag.template_relation_skip_reason, "non_podio_template_source");
+  assert.equal(diag.template_id, 200049);
+
+  const success_update = updates.find((u) => u.podio_sync_status === "synced");
+  assert.ok(success_update, "row should be marked synced");
+  assert.equal(success_update.podio_sync_error, null);
+});
+
+test("syncSupabaseMessageEventsToPodio: podio source with selected_template_item_id writes template relation", async () => {
+  const row = makeOutboundRow({
+    template_id: 200049,
+    template_source: "podio",
+    selected_template_item_id: 9901,
+  });
+  const synced_fields = [];
+
+  const fakeSupabase = {
+    from: () => ({
+      select: () => ({
+        in: () => ({
+          or: () => ({
+            order: () => ({
+              limit: () => ({ data: [row], error: null }),
+            }),
+          }),
+        }),
+      }),
+      update: () => ({ eq: () => ({ data: null, error: null }) }),
+    }),
+  };
+
+  const result = await syncSupabaseMessageEventsToPodio({
+    supabase: fakeSupabase,
+    createMessageEvent: async (fields) => {
+      synced_fields.push(fields);
+      return { item_id: 11111 };
+    },
+  });
+
+  assert.equal(result.synced_count, 1);
+  assert.equal(result.failed_count, 0);
+  assert.deepEqual(synced_fields[0]["template"], [9901]);
+
+  const ai_output = JSON.parse(synced_fields[0]["ai-output"] || "{}");
+  const diag = ai_output?.podio_sync_diagnostics || {};
+  assert.equal(diag.template_source, "podio");
+  assert.equal(diag.template_relation_attempted, true);
+  assert.equal(diag.template_relation_skipped, false);
+  assert.equal(diag.template_relation_skip_reason, null);
 });

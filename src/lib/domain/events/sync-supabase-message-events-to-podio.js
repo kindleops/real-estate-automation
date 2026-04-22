@@ -72,9 +72,130 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function normalizeTemplateSource(value = null) {
+  return clean(value).toLowerCase() || null;
+}
+
+function parseJsonObject(value = null) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return {};
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function asPositiveInt(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function readFirstNonEmpty(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    const normalized = clean(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 function asArrayRef(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? [parsed] : undefined;
+}
+
+function resolveTemplateRelationContext(row = {}) {
+  const metadata = parseJsonObject(row?.metadata);
+  const selected_template_source = normalizeTemplateSource(
+    readFirstNonEmpty(
+      row?.selected_template_source,
+      row?.template_source,
+      metadata?.selected_template_source,
+      metadata?.template_source,
+      metadata?.queue_row?.selected_template_source,
+      metadata?.queue_row?.template_source
+    )
+  );
+
+  const selected_template_item_id = asPositiveInt(
+    row?.selected_template_item_id ??
+      metadata?.selected_template_item_id ??
+      metadata?.queue_row?.selected_template_item_id
+  );
+
+  const template_relation_id = asPositiveInt(
+    row?.template_relation_id ??
+      metadata?.template_relation_id ??
+      metadata?.queue_row?.template_relation_id
+  );
+
+  const template_id_numeric = asPositiveInt(
+    row?.template_id ??
+      metadata?.template_id ??
+      metadata?.queue_row?.template_id
+  );
+
+  return {
+    metadata,
+    selected_template_source,
+    selected_template_item_id,
+    template_relation_id,
+    template_id_numeric,
+  };
+}
+
+export function isPodioTemplateRelationAttachable({
+  template_source = null,
+  selected_template_source = null,
+  template_id = null,
+  selected_template_item_id = null,
+  template_relation_id = null,
+} = {}) {
+  const normalized_source = normalizeTemplateSource(
+    selected_template_source || template_source
+  );
+  const has_explicit_source = Boolean(normalized_source);
+  const candidate_relation_id =
+    asPositiveInt(template_relation_id) ||
+    asPositiveInt(selected_template_item_id) ||
+    asPositiveInt(template_id) ||
+    null;
+
+  if (has_explicit_source && normalized_source !== "podio") {
+    return {
+      attachable: false,
+      relation_item_id: null,
+      skip_reason: "non_podio_template_source",
+      template_source: normalized_source,
+    };
+  }
+
+  if (!candidate_relation_id) {
+    const raw_relation_candidate =
+      template_relation_id ?? selected_template_item_id ?? template_id ?? null;
+
+    return {
+      attachable: false,
+      relation_item_id: null,
+      skip_reason: clean(raw_relation_candidate)
+        ? "invalid_podio_template_item_id"
+        : "missing_podio_template_item_id",
+      template_source: normalized_source,
+    };
+  }
+
+  return {
+    attachable: true,
+    relation_item_id: candidate_relation_id,
+    skip_reason: null,
+    template_source: normalized_source,
+  };
 }
 
 /**
@@ -155,6 +276,26 @@ export function buildPodioPayloadForSupabaseEvent(row) {
   // Use placeholder so Podio's "must be ≥1 character" validation never rejects
   // the record solely because an inbound message had no body saved.
   const message_body = raw_message_body || MESSAGE_BODY_PLACEHOLDER;
+
+  const template_ctx = resolveTemplateRelationContext(row);
+  const template_relation_decision = isPodioTemplateRelationAttachable({
+    template_source: template_ctx.selected_template_source,
+    selected_template_source: template_ctx.selected_template_source,
+    template_id: template_ctx.template_id_numeric,
+    selected_template_item_id: template_ctx.selected_template_item_id,
+    template_relation_id: template_ctx.template_relation_id,
+  });
+
+  const template_diag = {
+    template_source: template_relation_decision.template_source,
+    template_relation_attempted: template_relation_decision.attachable,
+    template_relation_skipped: !template_relation_decision.attachable,
+    template_relation_skip_reason: template_relation_decision.skip_reason,
+    template_relation_item_id: template_relation_decision.relation_item_id,
+    selected_template_item_id: template_ctx.selected_template_item_id,
+    template_relation_id: template_ctx.template_relation_id,
+    template_id: template_ctx.template_id_numeric,
+  };
 
   const fields = {
     // Core identifiers
@@ -247,8 +388,12 @@ export function buildPodioPayloadForSupabaseEvent(row) {
     ...(asArrayRef(row.sms_agent_id)
       ? { [SELLER_MESSAGE_EVENT_FIELDS.sms_agent]: asArrayRef(row.sms_agent_id) }
       : {}),
-    ...(asArrayRef(row.template_id)
-      ? { [SELLER_MESSAGE_EVENT_FIELDS.template]: asArrayRef(row.template_id) }
+    ...(template_relation_decision.attachable && template_relation_decision.relation_item_id
+      ? {
+          [SELLER_MESSAGE_EVENT_FIELDS.template]: asArrayRef(
+            template_relation_decision.relation_item_id
+          ),
+        }
       : {}),
     ...(asArrayRef(row.brain_id)
       ? { [SELLER_MESSAGE_EVENT_FIELDS.conversation]: asArrayRef(row.brain_id) }
@@ -276,6 +421,15 @@ export function buildPodioPayloadForSupabaseEvent(row) {
       fields[SELLER_MESSAGE_EVENT_FIELDS.opt_out_keyword] = keyword;
     }
   }
+
+  const metadata_payload = {
+    ...(template_ctx.metadata || {}),
+    podio_sync_diagnostics: {
+      ...(template_ctx.metadata?.podio_sync_diagnostics || {}),
+      ...template_diag,
+    },
+  };
+  fields[SELLER_MESSAGE_EVENT_FIELDS.ai_output] = JSON.stringify(metadata_payload);
 
   // Drop undefined values so Podio doesn't receive nulled-out fields.
   return Object.fromEntries(
@@ -466,6 +620,22 @@ export async function syncSupabaseMessageEventsToPodio(options = {}) {
         direction_sent:   fields?.["direction"] ?? null,
         category_sent:    fields?.["category"] ?? null,
         body_empty:       !fields?.["message"],
+        template_source:  fields?.[SELLER_MESSAGE_EVENT_FIELDS.ai_output]
+          ? parseJsonObject(fields[SELLER_MESSAGE_EVENT_FIELDS.ai_output])?.podio_sync_diagnostics?.template_source ?? null
+          : null,
+        template_relation_attempted: fields?.[SELLER_MESSAGE_EVENT_FIELDS.ai_output]
+          ? Boolean(
+              parseJsonObject(fields[SELLER_MESSAGE_EVENT_FIELDS.ai_output])?.podio_sync_diagnostics?.template_relation_attempted
+            )
+          : false,
+        template_relation_skipped: fields?.[SELLER_MESSAGE_EVENT_FIELDS.ai_output]
+          ? Boolean(
+              parseJsonObject(fields[SELLER_MESSAGE_EVENT_FIELDS.ai_output])?.podio_sync_diagnostics?.template_relation_skipped
+            )
+          : false,
+        template_relation_skip_reason: fields?.[SELLER_MESSAGE_EVENT_FIELDS.ai_output]
+          ? parseJsonObject(fields[SELLER_MESSAGE_EVENT_FIELDS.ai_output])?.podio_sync_diagnostics?.template_relation_skip_reason ?? null
+          : null,
       };
 
       if (failed_errors.length < 10) {
