@@ -18,6 +18,11 @@
  * Note: DISCORD_BOT_TOKEN is read from env and never logged.
  */
 
+import {
+  validateCommandOptionCounts,
+  validateCommandPayloadSizes,
+} from "../src/lib/discord/command-registration-validation.js";
+
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
@@ -486,6 +491,26 @@ const LANGUAGE_CHOICES = [
   { name: "Spanish", value: "spanish" },
 ];
 
+const PRIORITY_TIER_CHOICES = [
+  { name: "Tier 1", value: "tier_1" },
+  { name: "Tier 2", value: "tier_2" },
+  { name: "Tier 3", value: "tier_3" },
+];
+
+const PHONE_QUALITY_CHOICES = [
+  { name: "Excellent", value: "excellent" },
+  { name: "Good",      value: "good"      },
+  { name: "Fair",      value: "fair"      },
+  { name: "Poor",      value: "poor"      },
+  { name: "Unknown",   value: "unknown"   },
+];
+
+const CONTACT_CONFIDENCE_CHOICES = [
+  { name: "High",   value: "high"   },
+  { name: "Medium", value: "medium" },
+  { name: "Low",    value: "low"    },
+];
+
 // ───────────────────────────────────────────────────────────────────────────
 // Property Filter Choices — v3
 // ───────────────────────────────────────────────────────────────────────────
@@ -580,219 +605,282 @@ const YEAR_BUILT_RANGE_CHOICES = [
 ];
 
 const TARGETING_COMMANDS = [
-  // ── /target ────────────────────────────────────────────────────────────
+  // ── /target-scan ───────────────────────────────────────────────────────
   {
-    name:        "target",
-    description: "Market targeting operations (SMS Ops, Tech Ops, or Owner)",
+    name:        "target-scan",
+    description: "Run a core owner targeting scan",
     options: [
       {
-        type:        OPT.SUB_COMMAND,
-        name:        "scan",
-        description: "Dry-run scan a target territory — no SMS sent",
-        options: [
-          // — Required —
-          {
-            type:        OPT.STRING,
-            name:        "market",
-            description: "Market to scan",
-            required:    true,
-            choices:     MARKET_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "asset",
-            description: "Asset class",
-            required:    true,
-            choices:     ASSET_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "strategy",
-            description: "Acquisition strategy",
-            required:    true,
-            choices:     STRATEGY_CHOICES,
-          },
-          // — Property tags (optional) —
-          {
-            type:        OPT.STRING,
-            name:        "tag_1",
-            description: "Property tag filter (primary)",
-            required:    false,
-            choices:     PROPERTY_TAG_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "tag_2",
-            description: "Property tag filter (secondary)",
-            required:    false,
-            choices:     PROPERTY_TAG_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "tag_3",
-            description: "Property tag filter (tertiary)",
-            required:    false,
-            choices:     PROPERTY_TAG_CHOICES,
-          },
-          // — Geographic filters (optional) —
-          {
-            type:        OPT.STRING,
-            name:        "zip",
-            description: "Zip code filter",
-            required:    false,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "county",
-            description: "County filter",
-            required:    false,
-          },
-          // — Property filters (optional) —
-          {
-            type:        OPT.INTEGER,
-            name:        "min_equity",
-            description: "Minimum equity percentile (0–100)",
-            required:    false,
-            min_value:   0,
-            max_value:   100,
-          },
-          {
-            type:        OPT.INTEGER,
-            name:        "max_year_built",
-            description: "Maximum year built (e.g. 1980)",
-            required:    false,
-            min_value:   1800,
-            max_value:   2030,
-          },
-          // — Owner filters (optional) —
-          {
-            type:        OPT.STRING,
-            name:        "owner_type",
-            description: "Owner entity type filter",
-            required:    false,
-            choices:     OWNER_TYPE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "phone_status",
-            description: "Phone activity filter",
-            required:    false,
-            choices:     PHONE_STATUS_CHOICES,
-          },
-          // — Outreach settings (optional) —
-          {
-            type:        OPT.STRING,
-            name:        "language",
-            description: "Outreach language (default auto)",
-            required:    false,
-            choices:     LANGUAGE_CHOICES,
-          },
-          {
-            type:        OPT.INTEGER,
-            name:        "motivation_min",
-            description: "Minimum motivation score (0–100)",
-            required:    false,
-            min_value:   0,
-            max_value:   100,
-          },
-          // — Volume controls (optional) —
-          {
-            type:        OPT.INTEGER,
-            name:        "limit",
-            description: "Max owners to evaluate (default 25, max 500)",
-            required:    false,
-            min_value:   1,
-            max_value:   500,
-          },
-          {
-            type:        OPT.INTEGER,
-            name:        "scan_limit",
-            description: "Max Podio owners to scan (default 100, max 5000)",
-            required:    false,
-            min_value:   1,
-            max_value:   5000,
-          },
-          // — Advanced property filters (optional) —
-          // When any of these are selected, use property-first targeting path
-          {
-            type:        OPT.STRING,
-            name:        "sq_ft_range",
-            description: "Square footage range (property-first filter)",
-            required:    false,
-            choices:     SQ_FT_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "units_range",
-            description: "Number of units range (property-first filter)",
-            required:    false,
-            choices:     UNITS_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "ownership_years_range",
-            description: "Ownership tenure range (property-first filter)",
-            required:    false,
-            choices:     OWNERSHIP_YEARS_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "estimated_value_range",
-            description: "Current estimated property value (property-first filter)",
-            required:    false,
-            choices:     ESTIMATED_VALUE_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "equity_percent_range",
-            description: "Equity percentage range (property-first filter)",
-            required:    false,
-            choices:     EQUITY_PERCENT_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "repair_cost_range",
-            description: "Estimated repair cost range (property-first filter)",
-            required:    false,
-            choices:     REPAIR_COST_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "building_condition",
-            description: "Building condition assessment (property-first filter)",
-            required:    false,
-            choices:     BUILDING_CONDITION_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "offer_vs_loan",
-            description: "Smart offer vs mortgage balance (property-first filter)",
-            required:    false,
-            choices:     OFFER_VS_LOAN_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "offer_vs_last_purchase_price",
-            description: "Smart offer vs last purchase price (property-first filter)",
-            required:    false,
-            choices:     OFFER_VS_PURCHASE_PRICE_CHOICES,
-          },
-          {
-            type:        OPT.STRING,
-            name:        "year_built_range",
-            description: "Property year-built range (property-first filter)",
-            required:    false,
-            choices:     YEAR_BUILT_RANGE_CHOICES,
-          },
-          {
-            type:        OPT.INTEGER,
-            name:        "min_property_score",
-            description: "Minimum FINAL Aquisition Score (0–100)",
-            required:    false,
-            min_value:   0,
-            max_value:   100,
-          },
-        ],
+        type:        OPT.STRING,
+        name:        "market",
+        description: "Market to scan",
+        required:    true,
+        choices:     MARKET_CHOICES,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "asset_class",
+        description: "Asset class",
+        required:    true,
+        choices:     ASSET_CHOICES,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "strategy",
+        description: "Acquisition strategy",
+        required:    true,
+        choices:     STRATEGY_CHOICES,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "property_tag_1",
+        description: "Property tag filter (primary)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "property_tag_2",
+        description: "Property tag filter (secondary)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "property_tag_3",
+        description: "Property tag filter (tertiary)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "priority_tier",
+        description: "Priority tier filter",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "language",
+        description: "Outreach language (default auto)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "phone_quality",
+        description: "Phone quality bucket",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "contact_confidence",
+        description: "Contact confidence bucket",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "owner_type",
+        description: "Owner entity type filter",
+        required:    false,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "min_contactability_score",
+        description: "Minimum contactability score (0-100)",
+        required:    false,
+        min_value:   0,
+        max_value:   100,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "min_financial_pressure_score",
+        description: "Minimum financial pressure score (0-100)",
+        required:    false,
+        min_value:   0,
+        max_value:   100,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "min_urgency_score",
+        description: "Minimum urgency score (0-100)",
+        required:    false,
+        min_value:   0,
+        max_value:   100,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "min_equity",
+        description: "Minimum equity percentile (0–100)",
+        required:    false,
+        min_value:   0,
+        max_value:   100,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "max_scan_count",
+        description: "Maximum records to scan (default 100, max 5000)",
+        required:    false,
+        min_value:   1,
+        max_value:   5000,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "target_eligible_count",
+        description: "Stop after this many eligible owners (default 25, max 500)",
+        required:    false,
+        min_value:   1,
+        max_value:   500,
+      },
+    ],
+  },
+
+  // ── /target-property ───────────────────────────────────────────────────
+  {
+    name:        "target-property",
+    description: "Run an advanced property-first targeting scan",
+    options: [
+      {
+        type:        OPT.STRING,
+        name:        "market",
+        description: "Market to scan",
+        required:    true,
+        choices:     MARKET_CHOICES,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "asset_class",
+        description: "Asset class",
+        required:    true,
+        choices:     ASSET_CHOICES,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "strategy",
+        description: "Acquisition strategy",
+        required:    true,
+        choices:     STRATEGY_CHOICES,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "property_tag_1",
+        description: "Property tag filter (primary)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "property_tag_2",
+        description: "Property tag filter (secondary)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "property_tag_3",
+        description: "Property tag filter (tertiary)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "sq_ft_range",
+        description: "Square footage range (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "units_range",
+        description: "Number of units range (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "ownership_years_range",
+        description: "Ownership tenure range (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "estimated_value_range",
+        description: "Current estimated property value (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "equity_percent_range",
+        description: "Equity percentage range (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "repair_cost_range",
+        description: "Estimated repair cost range (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "building_condition",
+        description: "Building condition assessment (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "offer_vs_loan",
+        description: "Smart offer vs mortgage balance (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "offer_vs_last_purchase_price",
+        description: "Smart offer vs last purchase price (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "year_built_range",
+        description: "Property year-built range (property-first filter)",
+        required:    false,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "min_property_score",
+        description: "Minimum FINAL Aquisition Score (0–100)",
+        required:    false,
+        min_value:   0,
+        max_value:   100,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "priority_tier",
+        description: "Priority tier filter",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "language",
+        description: "Outreach language (default auto)",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "phone_quality",
+        description: "Phone quality bucket",
+        required:    false,
+      },
+      {
+        type:        OPT.STRING,
+        name:        "contact_confidence",
+        description: "Contact confidence bucket",
+        required:    false,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "max_scan_count",
+        description: "Maximum records to scan (default 5000)",
+        required:    false,
+        min_value:   1,
+        max_value:   10000,
+      },
+      {
+        type:        OPT.INTEGER,
+        name:        "target_eligible_count",
+        description: "Stop after this many eligible owners (default 250)",
+        required:    false,
+        min_value:   1,
+        max_value:   5000,
       },
     ],
   },
@@ -1499,6 +1587,15 @@ const BRIEFING_COMMANDS = [
 
 // Final command set = existing + targeting console additions + replay additions + wires additions + briefing.
 const ALL_COMMANDS = [...COMMANDS, ...TARGETING_COMMANDS, ...REPLAY_COMMANDS, ...WIRES_COMMANDS, ...BRIEFING_COMMANDS];
+
+try {
+  validateCommandOptionCounts(ALL_COMMANDS, 25);
+  validateCommandPayloadSizes(ALL_COMMANDS, 8000);
+} catch (err) {
+  console.error("Command registration schema error:");
+  console.error(err?.message ?? String(err));
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // Registration

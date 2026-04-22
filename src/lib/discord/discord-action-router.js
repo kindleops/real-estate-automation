@@ -1457,9 +1457,23 @@ async function handleAlertsMode({ options_array, context }) {
 // Command: /target scan  (deferred, always dry_run=true)
 // ---------------------------------------------------------------------------
 
-async function handleTargetScan({ options_array, context, interaction }) {
+async function handleTargetScan({
+  options_array,
+  context,
+  interaction,
+  scan_mode = "core",
+  force_property_first = false,
+}) {
+  const opt = (...names) => {
+    for (const name of names) {
+      const value = getOption(options_array, name);
+      if (value != null) return value;
+    }
+    return null;
+  };
+
   const market_raw  = String(getOption(options_array, "market") ?? "").trim();
-  const asset_raw   = String(getOption(options_array, "asset") ?? "").trim();
+  const asset_raw   = String(opt("asset_class", "asset") ?? "").trim();
   const strategy_raw = String(getOption(options_array, "strategy") ?? "").trim();
 
   if (!market_raw || !asset_raw || !strategy_raw) {
@@ -1472,13 +1486,13 @@ async function handleTargetScan({ options_array, context, interaction }) {
     return errorResponse(`Unknown market: "${market_slug}". Use a supported market choice.`);
   }
 
-  const limit      = Math.min(Math.max(1, Number(getOption(options_array, "limit")) || 25), 500);
-  const scan_limit = Math.min(Math.max(1, Number(getOption(options_array, "scan_limit")) || 100), 5000);
+  const target_eligible_count = Math.min(Math.max(1, Number(opt("target_eligible_count", "limit")) || 25), 5000);
+  const max_scan_count = Math.min(Math.max(1, Number(opt("max_scan_count", "scan_limit")) || 100), 10000);
 
   // Tags and filters
-  const tag_1         = getOption(options_array, "tag_1")          ?? null;
-  const tag_2         = getOption(options_array, "tag_2")          ?? null;
-  const tag_3         = getOption(options_array, "tag_3")          ?? null;
+  const tag_1         = opt("property_tag_1", "tag_1")            ?? null;
+  const tag_2         = opt("property_tag_2", "tag_2")            ?? null;
+  const tag_3         = opt("property_tag_3", "tag_3")            ?? null;
   const zip           = getOption(options_array, "zip")            ?? null;
   const county        = getOption(options_array, "county")         ?? null;
   const min_equity    = getOption(options_array, "min_equity")     ?? null;
@@ -1487,6 +1501,12 @@ async function handleTargetScan({ options_array, context, interaction }) {
   const phone_status  = getOption(options_array, "phone_status")   ?? null;
   const language      = getOption(options_array, "language")       ?? null;
   const motivation_min = getOption(options_array, "motivation_min") ?? null;
+  const priority_tier = getOption(options_array, "priority_tier")  ?? null;
+  const phone_quality = getOption(options_array, "phone_quality")  ?? null;
+  const contact_confidence = getOption(options_array, "contact_confidence") ?? null;
+  const min_contactability_score = getOption(options_array, "min_contactability_score") ?? null;
+  const min_financial_pressure_score = getOption(options_array, "min_financial_pressure_score") ?? null;
+  const min_urgency_score = getOption(options_array, "min_urgency_score") ?? null;
 
   // Property-first filter options — Advanced v3
   const sq_ft_range                    = getOption(options_array, "sq_ft_range") ?? null;
@@ -1507,6 +1527,31 @@ async function handleTargetScan({ options_array, context, interaction }) {
     zip, county, min_equity, max_year_built,
     owner_type, phone_status, language, motivation_min,
   });
+
+  if (priority_tier) {
+    targeting.priority_tier = String(priority_tier);
+    targeting.filters.priority_tier = String(priority_tier);
+  }
+  if (phone_quality) {
+    targeting.phone_quality = String(phone_quality);
+    targeting.filters.phone_quality = String(phone_quality);
+  }
+  if (contact_confidence) {
+    targeting.contact_confidence = String(contact_confidence);
+    targeting.filters.contact_confidence = String(contact_confidence);
+  }
+  if (min_contactability_score != null) {
+    targeting.min_contactability_score = Number(min_contactability_score);
+    targeting.filters.min_contactability_score = Number(min_contactability_score);
+  }
+  if (min_financial_pressure_score != null) {
+    targeting.min_financial_pressure_score = Number(min_financial_pressure_score);
+    targeting.filters.min_financial_pressure_score = Number(min_financial_pressure_score);
+  }
+  if (min_urgency_score != null) {
+    targeting.min_urgency_score = Number(min_urgency_score);
+    targeting.filters.min_urgency_score = Number(min_urgency_score);
+  }
 
   // Normalize and attach property filters to targeting object
   if (sq_ft_range) targeting.sq_ft_range = normalizeSqFtRange(sq_ft_range);
@@ -1534,17 +1579,18 @@ async function handleTargetScan({ options_array, context, interaction }) {
   const token  = interaction.token;
 
   // Detect path: use property-first scan if any property filters selected
-  const use_property_first = isPropertyFirstTargeting(targeting);
+  const forced_property_first = force_property_first || scan_mode === "property_first";
+  const use_property_first = forced_property_first || isPropertyFirstTargeting(targeting);
 
   info("discord.target.scan.started", {
     market: targeting.market_slug,
     asset:  targeting.asset_slug,
     strategy: targeting.strategy_slug,
-    limit,
-    scan_limit,
+    target_eligible_count,
+    max_scan_count,
     tag_count:    targeting.tags.length,
     filter_count: Object.keys(targeting.filters).length,
-    property_filter_count: Object.keys({
+    property_filter_count: Object.values({
       sq_ft_range,
       units_range,
       ownership_years_range,
@@ -1556,7 +1602,9 @@ async function handleTargetScan({ options_array, context, interaction }) {
       offer_vs_last_purchase_price,
       year_built_range,
       min_property_score,
-    }).filter(k => arguments[0][k] != null).length,
+    }).filter((v) => v != null).length,
+    scan_mode,
+    force_property_first: forced_property_first,
     use_property_first,
     user_id: context.user_id,
   });
@@ -1570,6 +1618,8 @@ async function handleTargetScan({ options_array, context, interaction }) {
       // Property-first targeting path
       const property_result = await scanPropertiesForTargeting({
         targeting,
+        max_scan_count,
+        target_eligible_count,
         dry_run: true,
       });
       
@@ -1594,8 +1644,8 @@ async function handleTargetScan({ options_array, context, interaction }) {
         method: "POST",
         body: {
           dry_run:          true,
-          limit,
-          scan_limit,
+          limit: target_eligible_count,
+          scan_limit: max_scan_count,
           source_view_name,
           targeting_filters: Object.keys(targeting.filters).length > 0 ? targeting.filters : undefined,
           property_tags:     targeting.tags.length > 0
@@ -3263,12 +3313,58 @@ export async function routeDiscordInteraction(interaction) {
       }
 
     // ── /target ──────────────────────────────────────────────────────────────
+    } else if (command_name === "target-scan") {
+      if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+        response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+      } else {
+        response = await handleTargetScan({
+          options_array: top_options,
+          context,
+          interaction,
+          scan_mode: "core",
+          force_property_first: false,
+        });
+      }
+
+    // ── /target-property ───────────────────────────────────────────────────
+    } else if (command_name === "target-property") {
+      if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+        response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+      } else {
+        response = await handleTargetScan({
+          options_array: top_options,
+          context,
+          interaction,
+          scan_mode: "property_first",
+          force_property_first: true,
+        });
+      }
+
+    // ── /target (legacy compatibility) ────────────────────────────────────
     } else if (command_name === "target") {
       if (sub_name === "scan") {
         if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
           response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
         } else {
-          response = await handleTargetScan({ options_array: sub_opts, context, interaction });
+          response = await handleTargetScan({
+            options_array: sub_opts,
+            context,
+            interaction,
+            scan_mode: "core",
+            force_property_first: false,
+          });
+        }
+      } else if (sub_name === "property") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops"])) {
+          response = deniedResponse("Requires **SMS Ops**, **Tech Ops**, or **Owner**.");
+        } else {
+          response = await handleTargetScan({
+            options_array: sub_opts,
+            context,
+            interaction,
+            scan_mode: "property_first",
+            force_property_first: true,
+          });
         }
       } else {
         response = errorResponse(`Unknown /target subcommand: ${sub_name}`);

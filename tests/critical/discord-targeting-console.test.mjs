@@ -21,6 +21,9 @@
 import test    from "node:test";
 import assert  from "node:assert/strict";
 import fs      from "node:fs";
+import os      from "node:os";
+import path    from "node:path";
+import { execFileSync } from "node:child_process";
 
 import {
   buildCampaignKey,
@@ -58,6 +61,9 @@ import {
   __setActionRouterDeps,
   __resetActionRouterDeps,
 } from "@/lib/discord/discord-action-router.js";
+
+import { validateCommandOptionCounts } from "@/lib/discord/command-registration-validation.js";
+import { validateCommandPayloadSizes } from "@/lib/discord/command-registration-validation.js";
 
 // ---------------------------------------------------------------------------
 // Test environment
@@ -802,18 +808,288 @@ test("routing handles /target, /territory, /conquest and campaign create/inspect
   }
 });
 
-test("command registration includes target, territory, conquest and campaign create/inspect/scale", () => {
+test("command registration includes target-scan, target-property, territory, conquest and campaign create/inspect/scale", () => {
   const source = fs.readFileSync(
     "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
     "utf8"
   );
 
-  assert.ok(source.includes('name:        "target"'), "registers /target");
+  assert.ok(source.includes('name:        "target-scan"'), "registers /target-scan");
+  assert.ok(source.includes('name:        "target-property"'), "registers /target-property");
+  assert.ok(!source.includes('name:        "target"'), "does not register oversized /target wrapper");
   assert.ok(source.includes('name:        "territory"'), "registers /territory");
   assert.ok(source.includes('name:        "conquest"'), "registers /conquest");
   assert.ok(source.includes('name:        "create"'), "registers /campaign create");
   assert.ok(source.includes('name:        "inspect"'), "registers /campaign inspect");
   assert.ok(source.includes('name:        "scale"'), "registers /campaign scale");
+});
+
+function extractTopLevelCommandBlock(source, command_name) {
+  const needle = `name:        "${command_name}"`;
+  const start = source.indexOf(needle);
+  if (start < 0) return "";
+
+  const after = source.slice(start + needle.length);
+  const next_command_start = after.search(/\n\s{2}\{\n\s{4}name:\s*"/);
+  if (next_command_start < 0) return source.slice(start);
+
+  return source.slice(start, start + needle.length + next_command_start);
+}
+
+function countOptionNameLines(command_block) {
+  const matches = command_block.match(/\n\s{8}name:\s*"[^"]+"/g);
+  return matches?.length ?? 0;
+}
+
+function loadRegisteredCommandsPayload() {
+  const tmp_dir = fs.mkdtempSync(path.join(os.tmpdir(), "discord-register-test-"));
+  const preload_path = path.join(tmp_dir, "fetch-preload.mjs");
+  const capture_path = path.join(tmp_dir, "commands.json");
+
+  fs.writeFileSync(
+    preload_path,
+    [
+      'import fs from "node:fs";',
+      'globalThis.fetch = async (_url, init = {}) => {',
+      '  fs.writeFileSync(process.env.CAPTURE_COMMANDS_PATH, String(init.body ?? "[]"), "utf8");',
+      '  return { ok: true, json: async () => [] };',
+      '};',
+    ].join("\n"),
+    "utf8"
+  );
+
+  execFileSync(
+    process.execPath,
+    ["--import", preload_path, "scripts/register-discord-commands.mjs"],
+    {
+      cwd: "/Users/ryankindle/real-estate-automation",
+      env: {
+        ...process.env,
+        DISCORD_APPLICATION_ID: "app_test",
+        DISCORD_GUILD_ID: "guild_test",
+        DISCORD_BOT_TOKEN: "bot_test",
+        CAPTURE_COMMANDS_PATH: capture_path,
+      },
+      stdio: "pipe",
+    }
+  );
+
+  const body = fs.readFileSync(capture_path, "utf8");
+  return JSON.parse(body);
+}
+
+test("v3: /target-scan has <= 25 options", () => {
+  const source = fs.readFileSync(
+    "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
+    "utf8"
+  );
+  const scan_block = extractTopLevelCommandBlock(source, "target-scan");
+  assert.ok(scan_block.includes('name:        "target-scan"'), "target-scan command exists");
+
+  const count = countOptionNameLines(scan_block);
+  assert.ok(count > 0, "target-scan options were detected");
+  assert.ok(count <= 25, `target-scan options should be <= 25, got ${count}`);
+});
+
+test("v3: /target-property has <= 25 options", () => {
+  const source = fs.readFileSync(
+    "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
+    "utf8"
+  );
+  const property_block = extractTopLevelCommandBlock(source, "target-property");
+  assert.ok(property_block.includes('name:        "target-property"'), "target-property command exists");
+
+  const count = countOptionNameLines(property_block);
+  assert.ok(count > 0, "target-property options were detected");
+  assert.ok(count <= 25, `target-property options should be <= 25, got ${count}`);
+});
+
+test("v3: /target-property includes advanced property filters", () => {
+  const source = fs.readFileSync(
+    "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
+    "utf8"
+  );
+  const property_block = extractTopLevelCommandBlock(source, "target-property");
+
+  const required_advanced = [
+    "sq_ft_range",
+    "units_range",
+    "ownership_years_range",
+    "estimated_value_range",
+    "equity_percent_range",
+    "repair_cost_range",
+    "building_condition",
+    "offer_vs_loan",
+    "offer_vs_last_purchase_price",
+    "year_built_range",
+    "min_property_score",
+  ];
+
+  for (const name of required_advanced) {
+    assert.ok(
+      property_block.includes(`name:        "${name}"`),
+      `/target-property includes ${name}`
+    );
+  }
+});
+
+test("v3: /target-scan does not include advanced property filters", () => {
+  const source = fs.readFileSync(
+    "/Users/ryankindle/real-estate-automation/scripts/register-discord-commands.mjs",
+    "utf8"
+  );
+  const scan_block = extractTopLevelCommandBlock(source, "target-scan");
+
+  const advanced_names = [
+    "sq_ft_range",
+    "units_range",
+    "ownership_years_range",
+    "estimated_value_range",
+    "equity_percent_range",
+    "repair_cost_range",
+    "building_condition",
+    "offer_vs_loan",
+    "offer_vs_last_purchase_price",
+    "year_built_range",
+    "min_property_score",
+  ];
+
+  for (const name of advanced_names) {
+    assert.ok(
+      !scan_block.includes(`name:        "${name}"`),
+      `/target-scan excludes ${name}`
+    );
+  }
+});
+
+test("v3: top-level target-scan route is handled", async () => {
+  const calls = [];
+  const callInternal_override = async (path, options) => {
+    calls.push({ path, options });
+    return {
+      ok: true,
+      data: { result: { eligible_count: 10, loaded_count: 40, inserted_count: 8, skipped_count: 30 } },
+    };
+  };
+
+  const mock = makeMock({
+    campaign_targets:       { rows: [] },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command: "target-scan",
+      options: [
+        { name: "market",      value: "miami" },
+        { name: "asset_class", value: "sfr"   },
+        { name: "strategy",    value: "cash"  },
+      ],
+      role_ids: ["owner_role"],
+      token:    "tok_target_scan_top_level",
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 5, "deferred response (type 5)");
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(calls.length, 1, "target-scan should call master-owner feeder path");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v3: top-level target-property route forces property_first scan path", async () => {
+  const calls = [];
+  const callInternal_override = async (path, options) => {
+    calls.push({ path, options });
+    return { ok: true, data: { result: {} } };
+  };
+
+  const mock = makeMock({
+    campaign_targets:       { rows: [] },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock, callInternal_override });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "target-property",
+      options: [
+        { name: "market",      value: "miami" },
+        { name: "asset_class", value: "sfr"   },
+        { name: "strategy",    value: "cash"  },
+      ],
+      role_ids: ["owner_role"],
+      token:    "tok_property_force",
+    });
+
+    const response = await routeDiscordInteraction(interaction);
+    assert.equal(response.type, 5, "deferred response (type 5)");
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(calls.length, 0, "target-property must not call master-owner feeder");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("v3: target-scan and target-property command payloads are under 8000 bytes", () => {
+  const registered = loadRegisteredCommandsPayload();
+  const target_scan = registered.find((cmd) => cmd?.name === "target-scan");
+  const target_property = registered.find((cmd) => cmd?.name === "target-property");
+
+  assert.ok(target_scan, "target-scan command exists in registration payload");
+  assert.ok(target_property, "target-property command exists in registration payload");
+
+  const scan_len = JSON.stringify(target_scan).length;
+  const property_len = JSON.stringify(target_property).length;
+
+  assert.ok(scan_len < 8000, `target-scan payload must be < 8000 bytes, got ${scan_len}`);
+  assert.ok(property_len < 8000, `target-property payload must be < 8000 bytes, got ${property_len}`);
+});
+
+test("v3: command registration validation catches >25 options", () => {
+  const too_many = [
+    {
+      name: "target",
+      options: [
+        {
+          type: 1,
+          name: "scan",
+          options: Array.from({ length: 26 }, (_, i) => ({
+            type: 3,
+            name: `opt_${i + 1}`,
+            description: "x",
+          })),
+        },
+      ],
+    },
+  ];
+
+  assert.throws(
+    () => validateCommandOptionCounts(too_many, 25),
+    /command:\s*target[\s\S]*subcommand:\s*scan[\s\S]*option_count:\s*26/i
+  );
+});
+
+test("v3: command registration validation catches payload >= 8000 bytes", () => {
+  const huge_option_name = "x".repeat(7900);
+  const too_large = [
+    {
+      name: "target-property",
+      description: "payload test",
+      options: [{ type: 3, name: huge_option_name, description: "x" }],
+    },
+  ];
+
+  assert.throws(
+    () => validateCommandPayloadSizes(too_large, 8000),
+    /command:\s*target-property[\s\S]*json_length:\s*\d+[\s\S]*max_allowed:\s*8000/i
+  );
 });
 
 // ===========================================================================
