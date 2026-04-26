@@ -164,6 +164,12 @@ export async function maybeQueueSellerStageReply({
   extra_queue_context = null,
   extra_template_render_overrides = null,
   cash_offer_snapshot_id = null,
+  scheduled_for_local = null,
+  scheduled_for_utc = null,
+  timezone_override = null,
+  contact_window_override = null,
+  send_priority_override = null,
+  preview_only = false,
   now = new Date().toISOString(),
   queue_message = queueOutboundMessage,
   schedule_resolver = resolveLatencyAwareQueueSchedule,
@@ -267,16 +273,24 @@ export async function maybeQueueSellerStageReply({
     plan.response_tier
   );
   const rotation_key = deriveRotationKey({ context, plan });
-  const timezone_label = deriveTimezoneLabel(context);
-  const contact_window = buildAlwaysOnContactWindow(timezone_label);
-  const schedule = schedule_resolver({
-    now,
-    timezone_label,
-    contact_window,
-    distribution_key: rotation_key,
-    delay_min_minutes: response_window.min_minutes,
-    delay_max_minutes: response_window.max_minutes,
-  });
+  const timezone_label = clean(timezone_override) || deriveTimezoneLabel(context);
+  const contact_window = clean(contact_window_override) || buildAlwaysOnContactWindow(timezone_label);
+  const schedule = clean(scheduled_for_local) || clean(scheduled_for_utc)
+    ? {
+        scheduled_for_local: clean(scheduled_for_local) || clean(scheduled_for_utc),
+        scheduled_for_utc: clean(scheduled_for_utc) || clean(scheduled_for_local),
+        timezone_label,
+        contact_window,
+        delay_source: "caller_override",
+      }
+    : schedule_resolver({
+        now,
+        timezone_label,
+        contact_window,
+        distribution_key: rotation_key,
+        delay_min_minutes: response_window.min_minutes,
+        delay_max_minutes: response_window.max_minutes,
+      });
 
   logDeps.info("seller_queue.before_create", {
     inbound_from,
@@ -301,7 +315,7 @@ export async function maybeQueueSellerStageReply({
 
   let queued;
   try {
-    queued = await queue_message({
+    const queue_args = {
       inbound_from,
       create_brain_if_missing: true,
       category: derivePrimaryCategory(context),
@@ -317,7 +331,7 @@ export async function maybeQueueSellerStageReply({
       scheduled_for_utc: schedule.scheduled_for_utc,
       timezone: schedule.timezone_label || timezone_label,
       contact_window: schedule.contact_window || contact_window,
-      send_priority: deriveSendPriority(plan.response_tier),
+      send_priority: clean(send_priority_override) || deriveSendPriority(plan.response_tier),
       message_type: plan.selected_use_case === "reengagement" ? "Re-Engagement" : "Follow-Up",
       queue_status: "Queued",
       rotation_key,
@@ -328,7 +342,17 @@ export async function maybeQueueSellerStageReply({
       },
       extra_queue_context: extra_queue_context || undefined,
       cash_offer_snapshot_id: cash_offer_snapshot_id || undefined,
-    });
+    };
+
+    queued = preview_only
+      ? await queueOutboundMessage(queue_args, {
+          smsQueueMessageImpl: async () => ({
+            ok: true,
+            item_id: null,
+            preview_only: true,
+          }),
+        })
+      : await queue_message(queue_args);
   } catch (err) {
     logDeps.warn("seller_queue.create_failed", {
       inbound_from,
@@ -404,11 +428,17 @@ export async function maybeQueueSellerStageReply({
 
   return {
     ok: Boolean(queued?.ok),
-    queued: Boolean(queued?.ok),
+    queued: preview_only ? false : Boolean(queued?.ok),
     handled: true,
-    reason: queued?.ok ? "seller_flow_reply_queued" : queued?.reason || "seller_flow_queue_failed",
+    reason: queued?.ok
+      ? preview_only
+        ? "seller_flow_reply_preview_ready"
+        : "seller_flow_reply_queued"
+      : queued?.reason || "seller_flow_queue_failed",
     plan,
     queue_result: queued,
+    preview_result: preview_only ? queued : null,
+    preview_only: Boolean(preview_only),
     schedule,
     response_window,
     brain_stage: queued?.ok ? brainStageForUseCase(plan.selected_use_case) : null,

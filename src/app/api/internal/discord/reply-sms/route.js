@@ -25,6 +25,10 @@ import { clean } from "@/lib/utils/strings.js";
 import { nowIso } from "@/lib/utils/dates.js";
 import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
 import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
+import {
+  cancelInboundAutopilotQueue,
+  findInboundAutopilotQueue,
+} from "@/lib/discord/inbound-autopilot-queue.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { mapNextAction, ACTIONS } from "@/lib/sms/flow_map.js";
@@ -669,6 +673,45 @@ async function notifyOpsOfReply(
   } catch {}
 }
 
+async function updateInboundDiscordReviewMetadata(
+  {
+    supabase = null,
+    message_event_id = "",
+    inbound_event = {},
+    discord_review_status = "approved",
+    approved_by_discord_user_id = "",
+    outbound_queue_id = "",
+    final_reply_text_preview = "",
+    action_type = "approve_inbound_template_reply",
+  } = {}
+) {
+  if (!supabase || !clean(message_event_id)) return;
+
+  const base_metadata = ensureObject(inbound_event.metadata);
+  const next_metadata = {
+    ...base_metadata,
+    discord_review_status,
+    approved_by_discord_user_id: clean(approved_by_discord_user_id) || null,
+    outbound_queue_id: clean(outbound_queue_id) || null,
+    final_reply_text_preview: previewText(final_reply_text_preview, 160),
+    reviewed_action_type: clean(action_type) || null,
+    discord_reviewed_at: nowIso(),
+  };
+
+  await supabase
+    .from("message_events")
+    .update({ metadata: next_metadata })
+    .eq("id", message_event_id);
+}
+
+function deriveDiscordReviewStatus(action_type = "", reply_mode = "auto_template") {
+  const action = clean(action_type);
+  if (action === "manual_inbound_sms_reply") return "manual_override_sent";
+  if (action === "approve_send_now") return "approved_send_now";
+  if (action === "approve_inbound_template_reply") return "approved_send_now";
+  return reply_mode === "manual" ? "manual_override_sent" : "approved_send_now";
+}
+
 export async function POST(request) {
   const start_ms = Date.now();
   let body = {};
@@ -705,6 +748,36 @@ export async function POST(request) {
       template_id,
       supabase,
     });
+
+    if (clean(action_type) === "manual_inbound_sms_reply") {
+      await cancelInboundAutopilotQueue({
+        message_event_id,
+        supabase,
+        discord_user_id: approved_by_discord_user_id,
+        review_status: "manual_override_sent",
+        cancellation_reason: "manual_override",
+      }).catch(() => null);
+    }
+
+    if (clean(action_type) === "approve_send_now") {
+      const pending_autopilot = await findInboundAutopilotQueue({
+        message_event_id,
+        supabase,
+        includeStatuses: ["queued"],
+      }).catch(() => null);
+
+      if (pending_autopilot?.id) {
+        return NextResponse.json(
+          {
+            ok: true,
+            status: "already_pending",
+            queue_id: pending_autopilot.id,
+            message_event_id,
+          },
+          { status: 200 }
+        );
+      }
+    }
 
     if (!resolved.ok) {
       await auditReplyBlocked(
@@ -812,6 +885,17 @@ export async function POST(request) {
 
     const queue_id = queue_result.queue_id;
     const verified_event = safety_result.verified_event;
+
+    await updateInboundDiscordReviewMetadata({
+      supabase,
+      message_event_id,
+      inbound_event: verified_event,
+      discord_review_status: deriveDiscordReviewStatus(action_type, resolved.reply_mode),
+      approved_by_discord_user_id,
+      outbound_queue_id: queue_id,
+      final_reply_text_preview: resolved.reply_text,
+      action_type,
+    }).catch(() => {});
 
     await appendToBrain({
       conversation_brain_id: verified_event.conversation_brain_id,

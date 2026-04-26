@@ -36,6 +36,13 @@ import {
 import { findLatestOpenOffer } from "@/lib/podio/apps/offers.js";
 import { handleUnknownInboundRouter } from "@/lib/domain/inbound/unknown-inbound-router.js";
 import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
+import { postInboundSmsDiscordCard } from "@/lib/discord/inbound-sms-card.js";
+import {
+  buildInboundAutopilotSchedule,
+  findInboundAutopilotQueue,
+  updateInboundAutopilotQueue,
+} from "@/lib/discord/inbound-autopilot-queue.js";
+import { getDefaultSupabaseClient } from "@/lib/supabase/default-client.js";
 import { info, warn } from "@/lib/logging/logger.js";
 
 const defaultDeps = {
@@ -69,6 +76,11 @@ const defaultDeps = {
   findLatestOpenOffer,
   handleUnknownInboundRouter,
   notifyDiscordOps,
+  postInboundSmsDiscordCard,
+  buildInboundAutopilotSchedule,
+  findInboundAutopilotQueue,
+  updateInboundAutopilotQueue,
+  getSupabaseClient: getDefaultSupabaseClient,
   info,
   warn,
 };
@@ -85,6 +97,168 @@ export function __resetTextgridInboundTestDeps() {
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function asBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const normalized = clean(value).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function asPositiveInt(value, fallback = 0) {
+  const numeric = Number.parseInt(clean(value), 10);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
+}
+
+function previewText(value = "", max = 180) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function buildAutopilotStatusText({
+  autopilot_enabled = false,
+  autopilot_delay_seconds = 60,
+  outbound_queue_id = null,
+  suggested_reply_ready = false,
+} = {}) {
+  if (autopilot_enabled && outbound_queue_id) {
+    return `Autopilot reply scheduled in ${autopilot_delay_seconds}s`;
+  }
+
+  if (!suggested_reply_ready) {
+    return "Manual review required — no safe reply generated";
+  }
+
+  return autopilot_enabled
+    ? `Autopilot enabled — scheduling unavailable`
+    : "Manual review required";
+}
+
+function buildDiscordReviewMetadata({
+  autopilot_enabled = false,
+  autopilot_delay_seconds = 0,
+  suggested_reply_preview = "",
+  selected_template_id = null,
+  selected_template_source = null,
+  outbound_queue_id = null,
+  discord_review_status = null,
+  discord_card_error = null,
+  post_result = {},
+  existing_metadata = {},
+  context_incomplete = false,
+} = {}) {
+  const available_actions = context_incomplete
+    ? ["sr:m", "sr:wn", "sr:oo"]
+    : ["sr:a", "sr:m", "sr:c", "sr:ni", "sr:wn", "sr:oo", "context:open_record"];
+
+  return {
+    ...existing_metadata,
+    inbound_discord_review_required: !autopilot_enabled,
+    inbound_autopilot_enabled: Boolean(autopilot_enabled),
+    inbound_autopilot_post_discord_card: existing_metadata?.inbound_autopilot_post_discord_card ?? true,
+    autopilot_reply: Boolean(autopilot_enabled && clean(outbound_queue_id)),
+    autopilot_override_window_seconds: Number(autopilot_delay_seconds || 0),
+    suggested_reply_ready: Boolean(clean(suggested_reply_preview)),
+    suggested_reply_preview: clean(suggested_reply_preview) || null,
+    selected_template_id: clean(selected_template_id) || null,
+    selected_template_source: clean(selected_template_source) || null,
+    outbound_queue_id: clean(outbound_queue_id) || existing_metadata?.outbound_queue_id || null,
+    discord_card_posted_at: post_result?.ok && !post_result?.skipped ? new Date().toISOString() : existing_metadata?.discord_card_posted_at || null,
+    discord_channel_id: post_result?.channel_id || existing_metadata?.discord_channel_id || null,
+    discord_message_id: post_result?.discord_message_id || existing_metadata?.discord_message_id || null,
+    discord_card_error: clean(discord_card_error) || existing_metadata?.discord_card_error || null,
+    discord_review_status:
+      clean(discord_review_status) ||
+      existing_metadata?.discord_review_status ||
+      (autopilot_enabled && clean(outbound_queue_id) ? "autopilot_pending" : "manual_review_required"),
+    discord_available_actions: available_actions,
+  };
+}
+
+async function postInboundDiscordReviewCard({
+  runtimeDeps,
+  message_event_id = null,
+  inbound_from = "",
+  message_body = "",
+  context = null,
+  classification = null,
+  route = null,
+  seller_stage_reply = null,
+  inbound_autopilot_enabled = false,
+  inbound_autopilot_delay_seconds = 60,
+  outbound_queue_id = null,
+  context_incomplete = false,
+  existing_metadata = {},
+} = {}) {
+  if (typeof runtimeDeps.postInboundSmsDiscordCard !== "function") {
+    return { ok: false, skipped: true, reason: "discord_card_poster_unavailable" };
+  }
+
+  const preview_source =
+    seller_stage_reply?.preview_result?.rendered_message_text ||
+    seller_stage_reply?.queue_result?.rendered_message_text ||
+    seller_stage_reply?.queue_result?.rendered_message_preview ||
+    "";
+  const selected_template_id =
+    seller_stage_reply?.preview_result?.template_id ||
+    seller_stage_reply?.queue_result?.template_id ||
+    seller_stage_reply?.queue_result?.selected_template_id ||
+    null;
+  const selected_template_source =
+    seller_stage_reply?.preview_result?.selected_template_source ||
+    seller_stage_reply?.queue_result?.selected_template_source ||
+    seller_stage_reply?.queue_result?.selected_template_resolution_source ||
+    null;
+
+  return runtimeDeps.postInboundSmsDiscordCard({
+    message_event_id,
+    inbound_from,
+    seller_name: context?.summary?.seller_first_name || context?.summary?.owner_name || null,
+    property_address: context?.summary?.property_address || null,
+    market: context?.summary?.market || context?.summary?.market_name || null,
+    current_stage: seller_stage_reply?.brain_stage || route?.stage || context?.summary?.conversation_stage || null,
+    classification_intent:
+      seller_stage_reply?.plan?.selected_use_case ||
+      route?.use_case ||
+      classification?.objection ||
+      classification?.source ||
+      null,
+    language:
+      seller_stage_reply?.plan?.detected_language ||
+      classification?.language ||
+      context?.summary?.language_preference ||
+      null,
+    inbound_message_body: message_body,
+    suggested_reply_preview: previewText(preview_source, 300),
+    selected_template_id,
+    selected_template_source,
+    confidence: classification?.confidence ?? null,
+    classification_result:
+      clean(classification?.source) ||
+      clean(classification?.objection) ||
+      clean(seller_stage_reply?.plan?.detected_intent) ||
+      "unknown",
+    safety_state:
+      context_incomplete
+        ? "Manual review required — context incomplete"
+        : buildAutopilotStatusText({
+            autopilot_enabled: inbound_autopilot_enabled,
+            autopilot_delay_seconds: inbound_autopilot_delay_seconds,
+            outbound_queue_id,
+            suggested_reply_ready: Boolean(clean(preview_source)),
+          }),
+    autopilot_enabled: Boolean(inbound_autopilot_enabled),
+    autopilot_status: buildAutopilotStatusText({
+      autopilot_enabled: inbound_autopilot_enabled,
+      autopilot_delay_seconds: inbound_autopilot_delay_seconds,
+      outbound_queue_id,
+      suggested_reply_ready: Boolean(clean(preview_source)),
+    }),
+    outbound_queue_id,
+    context_incomplete,
+    existing_metadata,
+  });
 }
 
 function formatOfferCurrency(value) {
@@ -268,9 +442,24 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
   const {
     inbound_debug_stage = null,
     dry_run = false,
-    auto_reply_enabled = true,
+    auto_reply_enabled = null,
+    auto_post_discord_card = null,
+    auto_reply_delay_seconds = null,
     inbound_user_initiated = true,
   } = opts;
+
+  const inbound_autopilot_enabled = asBoolean(
+    auto_reply_enabled,
+    asBoolean(process.env.INBOUND_AUTOPILOT_ENABLED, true)
+  );
+  const inbound_autopilot_post_discord_card = asBoolean(
+    auto_post_discord_card,
+    asBoolean(process.env.INBOUND_AUTOPILOT_POST_DISCORD_CARD, true)
+  );
+  const inbound_autopilot_delay_seconds = asPositiveInt(
+    auto_reply_delay_seconds,
+    asPositiveInt(process.env.INBOUND_AUTOPILOT_DELAY_SECONDS, 60)
+  );
 
   if (inbound_debug_stage === "handler_entry") {
     return { ok: true, stage: "handler_entry" };
@@ -451,12 +640,59 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           inbound_to,
           message_body,
           dry_run: Boolean(dry_run),
-          auto_reply_enabled: Boolean(auto_reply_enabled),
+          auto_reply_enabled: inbound_autopilot_enabled,
+          inbound_autopilot_enabled,
           inbound_user_initiated: Boolean(inbound_user_initiated),
         });
       } catch (err) {
         return failStepAndReturn("textgrid_inbound_failed_unknown_router", err);
       }
+
+      let fallback_message_event_id = null;
+      try {
+        const fallback_event = await runtimeDeps.logInboundMessageEvent({
+          brain_item: null,
+          conversation_item_id: null,
+          master_owner_id: null,
+          prospect_id: null,
+          property_id: null,
+          market_id: null,
+          phone_item_id: null,
+          inbound_number_item_id: null,
+          sms_agent_id: null,
+          property_address: null,
+          message_body,
+          provider_message_id: extracted.message_id,
+          raw_carrier_status: extracted.status || "received",
+          received_at: extracted.received_at || payload?.http_received_at || new Date().toISOString(),
+          processed_by: "Manual Sender",
+          source_app: "External API",
+          trigger_name: "textgrid-inbound",
+          inbound_from,
+          inbound_to,
+          metadata: {
+            inbound_discord_review_required: true,
+            inbound_autopilot_enabled,
+            suggested_reply_ready: false,
+            discord_review_status: "pending",
+          },
+        });
+        fallback_message_event_id = fallback_event?.item_id || null;
+      } catch {}
+
+      await postInboundDiscordReviewCard({
+        runtimeDeps,
+        message_event_id: fallback_message_event_id,
+        inbound_from,
+        message_body,
+        context: null,
+        classification: null,
+        route: null,
+        seller_stage_reply: null,
+        inbound_autopilot_enabled: false,
+        context_incomplete: true,
+        existing_metadata: {},
+      }).catch(() => {});
 
       await runtimeDeps.completeIdempotentProcessing({
         record_item_id: idempotency.record_item_id,
@@ -622,7 +858,28 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             deal_strategy: route?.deal_strategy || context.summary?.deal_strategy || null,
           });
     } catch (err) {
-      return failStepAndReturn("textgrid_inbound_failed_conversation_resolution", err);
+      classification = {
+        language: context?.summary?.language_preference || "English",
+        source: "inbound_review_fallback",
+        confidence: 0,
+        notes: err?.message || "conversation_resolution_failed",
+      };
+      route = {
+        stage: context?.summary?.conversation_stage || "unknown",
+        use_case: null,
+      };
+      signals = {};
+      deterministic_state = null;
+      offer_routing = {
+        ok: true,
+        offer_route: "manual_review",
+        reason: err?.message || "conversation_resolution_failed",
+      };
+      safeWarn("textgrid.inbound_conversation_resolution_degraded", {
+        message_id: extracted.message_id,
+        inbound_from,
+        error: err?.message || "unknown",
+      });
     }
 
     if (inbound_debug_stage === "after_conversation_resolution") {
@@ -680,9 +937,9 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
 
     // ── SEGMENT: podio_write ──────────────────────────────────────────────
     // All offer, underwriting, contract, and pipeline writes happen here.
-    let maybe_offer_progress, initial_offer, underwriting, seller_stage_reply,
-        underwriting_follow_up, maybe_offer, active_offer_item_id, contract, pipeline,
-        underwriting_transfer;
+    let maybe_offer_progress, initial_offer, underwriting, seller_stage_preview,
+      seller_stage_reply, underwriting_follow_up, maybe_offer, active_offer_item_id,
+      contract, pipeline, underwriting_transfer, autopilot_queue_row = null;
 
     try {
       const offer_route = offer_routing?.offer_route || null;
@@ -755,7 +1012,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       if (offer_route === "sfh_cash_preview") {
         const cash_offer = offer_routing?.meta?.cash_offer ?? null;
         const snapshot_id = offer_routing?.meta?.snapshot_id ?? null;
-        seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+        seller_stage_preview = await runtimeDeps.maybeQueueSellerStageReply({
           inbound_from,
           context,
           classification,
@@ -775,9 +1032,10 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             smart_cash_offer_display: formatOfferCurrency(cash_offer),
           },
           cash_offer_snapshot_id: snapshot_id,
+          preview_only: true,
         });
       } else if (offer_route === "condition_clarifier") {
-        seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+        seller_stage_preview = await runtimeDeps.maybeQueueSellerStageReply({
           inbound_from,
           context,
           classification,
@@ -791,9 +1049,10 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             offer_route,
             condition_clarifier_reason: offer_routing?.reason || null,
           },
+          preview_only: true,
         });
       } else if (offer_route === "manual_review") {
-        seller_stage_reply = {
+        seller_stage_preview = {
           ok: true,
           queued: false,
           handled: true,
@@ -813,17 +1072,20 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           offer_route_reason: offer_routing?.reason || null,
         });
       } else {
-        seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
+        seller_stage_preview = await runtimeDeps.maybeQueueSellerStageReply({
           inbound_from,
           context,
           classification,
           message: message_body,
           maybe_offer: initial_offer,
           existing_offer,
+          preview_only: true,
         });
       }
 
-      if (shouldCreateBrainForInbound({ brain_id, seller_stage_reply })) {
+      seller_stage_reply = seller_stage_preview;
+
+      if (shouldCreateBrainForInbound({ brain_id, seller_stage_reply: seller_stage_preview })) {
         brain_item = await runtimeDeps.createBrain({
           master_owner_id,
           prospect_id,
@@ -862,11 +1124,13 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         }
       }
 
-      if (seller_stage_reply?.brain_stage && brain_id) {
-        await runtimeDeps.updateBrainStage({ brain_id, stage: seller_stage_reply.brain_stage });
+      if (seller_stage_preview?.brain_stage && brain_id) {
+        await runtimeDeps.updateBrainStage({ brain_id, stage: seller_stage_preview.brain_stage });
       }
 
-      underwriting_follow_up = seller_stage_reply?.handled
+      underwriting_follow_up = !inbound_autopilot_enabled
+        ? { ok: true, queued: false, reason: "manual_review_required" }
+        : seller_stage_preview?.handled
         ? { ok: true, queued: false, reason: "suppressed_by_seller_stage_reply" }
         : await runtimeDeps.maybeQueueUnderwritingFollowUp({
             inbound_from,
@@ -897,6 +1161,133 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
               created_by: "Underwriting Offer Engine",
               respect_underwriting_gate: false,
             });
+
+      const suggested_reply_preview =
+        seller_stage_preview?.preview_result?.rendered_message_text ||
+        seller_stage_preview?.queue_result?.rendered_message_text ||
+        "";
+      const autopilot_ready = Boolean(
+        inbound_autopilot_enabled &&
+        seller_stage_preview?.ok &&
+        seller_stage_preview?.handled &&
+        clean(suggested_reply_preview)
+      );
+
+      if (autopilot_ready && inbound_message_event_id) {
+        const existing_autopilot_queue = await runtimeDeps.findInboundAutopilotQueue({
+          message_event_id: inbound_message_event_id,
+          supabase: runtimeDeps.getSupabaseClient?.() || null,
+          includeStatuses: ["queued", "sending"],
+        }).catch(() => null);
+
+        if (existing_autopilot_queue?.id) {
+          autopilot_queue_row = existing_autopilot_queue;
+        } else {
+          const autopilot_schedule = runtimeDeps.buildInboundAutopilotSchedule(
+            inbound_autopilot_delay_seconds,
+            new Date().toISOString()
+          );
+
+          const queue_extra_context = {
+            ...(seller_stage_preview?.queue_result?.queue_context || {}),
+            inbound_message_event_id: inbound_message_event_id,
+            autopilot_reply: true,
+            autopilot_override_window_seconds: inbound_autopilot_delay_seconds,
+            discord_review_status: "autopilot_pending",
+            action_type: "autopilot_inbound_reply",
+          };
+
+          let queued_autopilot_reply = null;
+          if (offer_route === "sfh_cash_preview") {
+            const cash_offer = offer_routing?.meta?.cash_offer ?? null;
+            const snapshot_id = offer_routing?.meta?.snapshot_id ?? null;
+            queued_autopilot_reply = await runtimeDeps.maybeQueueSellerStageReply({
+              inbound_from,
+              context,
+              classification,
+              message: message_body,
+              maybe_offer: initial_offer,
+              existing_offer,
+              explicit_use_case: "offer_reveal_cash",
+              explicit_template_lookup_use_case: "offer_reveal_cash",
+              force_queue_reply: true,
+              extra_queue_context: {
+                offer_route,
+                cash_offer_amount: cash_offer,
+                cash_offer_snapshot_id: snapshot_id,
+                ...queue_extra_context,
+              },
+              extra_template_render_overrides: {
+                offer_price: formatOfferCurrency(cash_offer),
+                smart_cash_offer_display: formatOfferCurrency(cash_offer),
+              },
+              cash_offer_snapshot_id: snapshot_id,
+              preview_only: false,
+              scheduled_for_local: autopilot_schedule.scheduled_for_local,
+              scheduled_for_utc: autopilot_schedule.scheduled_for_utc,
+              send_priority_override: "_ Urgent",
+            });
+          } else if (offer_route === "condition_clarifier") {
+            queued_autopilot_reply = await runtimeDeps.maybeQueueSellerStageReply({
+              inbound_from,
+              context,
+              classification,
+              message: message_body,
+              maybe_offer: initial_offer,
+              existing_offer,
+              explicit_use_case: "ask_condition_clarifier",
+              explicit_template_lookup_use_case: "ask_condition_clarifier",
+              force_queue_reply: true,
+              extra_queue_context: {
+                offer_route,
+                condition_clarifier_reason: offer_routing?.reason || null,
+                ...queue_extra_context,
+              },
+              preview_only: false,
+              scheduled_for_local: autopilot_schedule.scheduled_for_local,
+              scheduled_for_utc: autopilot_schedule.scheduled_for_utc,
+              send_priority_override: "_ Urgent",
+            });
+          } else {
+            queued_autopilot_reply = await runtimeDeps.maybeQueueSellerStageReply({
+              inbound_from,
+              context,
+              classification,
+              message: message_body,
+              maybe_offer: initial_offer,
+              existing_offer,
+              extra_queue_context: queue_extra_context,
+              preview_only: false,
+              scheduled_for_local: autopilot_schedule.scheduled_for_local,
+              scheduled_for_utc: autopilot_schedule.scheduled_for_utc,
+              send_priority_override: "_ Urgent",
+            });
+          }
+
+          if (queued_autopilot_reply?.ok && queued_autopilot_reply?.queue_item_id) {
+            autopilot_queue_row = {
+              id: queued_autopilot_reply.queue_item_id,
+              queue_status: "queued",
+              scheduled_for: autopilot_schedule.scheduled_for,
+              scheduled_for_utc: autopilot_schedule.scheduled_for_utc,
+              scheduled_for_local: autopilot_schedule.scheduled_for_local,
+              metadata: {
+                inbound_message_event_id: inbound_message_event_id,
+                autopilot_reply: true,
+                autopilot_override_window_seconds: inbound_autopilot_delay_seconds,
+                discord_review_status: "autopilot_pending",
+              },
+            };
+            seller_stage_reply = {
+              ...queued_autopilot_reply,
+              preview_result:
+                seller_stage_preview?.preview_result ||
+                seller_stage_preview?.queue_result ||
+                null,
+            };
+          }
+        }
+      }
 
       active_offer_item_id =
         maybe_offer?.offer?.offer_item_id ||
@@ -936,6 +1327,77 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       });
 
       if (inbound_message_event_id) {
+        const suggested_reply_preview =
+          seller_stage_reply?.preview_result?.rendered_message_text ||
+          seller_stage_reply?.queue_result?.rendered_message_text ||
+          seller_stage_preview?.preview_result?.rendered_message_text ||
+          seller_stage_preview?.queue_result?.rendered_message_text ||
+          "";
+        const selected_template_id =
+          seller_stage_reply?.preview_result?.template_id ||
+          seller_stage_reply?.queue_result?.template_id ||
+          seller_stage_preview?.preview_result?.template_id ||
+          seller_stage_preview?.queue_result?.template_id ||
+          null;
+        const selected_template_source =
+          seller_stage_reply?.preview_result?.selected_template_source ||
+          seller_stage_reply?.queue_result?.selected_template_source ||
+          seller_stage_reply?.queue_result?.selected_template_resolution_source ||
+          seller_stage_preview?.preview_result?.selected_template_source ||
+          seller_stage_preview?.queue_result?.selected_template_source ||
+          seller_stage_preview?.queue_result?.selected_template_resolution_source ||
+          null;
+        const outbound_queue_id = autopilot_queue_row?.id || seller_stage_reply?.queue_item_id || null;
+        const context_incomplete = Boolean(
+          !context?.summary?.property_address || !context?.ids?.master_owner_id || !context?.ids?.property_id
+        );
+        const discord_review_status = outbound_queue_id && inbound_autopilot_enabled
+          ? "autopilot_pending"
+          : clean(suggested_reply_preview)
+            ? "manual_review_required"
+            : "manual_review_required";
+
+        let discord_card = {
+          ok: true,
+          skipped: !inbound_autopilot_post_discord_card,
+          reason: inbound_autopilot_post_discord_card ? null : "discord_card_disabled",
+        };
+
+        if (inbound_autopilot_post_discord_card) {
+          discord_card = await postInboundDiscordReviewCard({
+            runtimeDeps,
+            message_event_id: inbound_message_event_id,
+            inbound_from,
+            message_body,
+            context,
+            classification,
+            route,
+            seller_stage_reply,
+            inbound_autopilot_enabled: Boolean(inbound_autopilot_enabled && outbound_queue_id),
+            inbound_autopilot_delay_seconds,
+            outbound_queue_id,
+            context_incomplete,
+            existing_metadata: {},
+          }).catch((error) => ({
+            ok: false,
+            reason: "discord_card_post_failed",
+            error: error?.message || "discord_card_post_failed",
+          }));
+        }
+
+        const discord_card_error = !discord_card?.ok
+          ? clean(discord_card?.error || discord_card?.reason || "discord_card_post_failed")
+          : null;
+
+        if (discord_card_error) {
+          safeWarn("textgrid.inbound_discord_card_failed", {
+            message_id: extracted.message_id,
+            inbound_from,
+            message_event_id: inbound_message_event_id,
+            discord_card_error,
+          });
+        }
+
         await runtimeDeps.logInboundMessageEvent({
           record_item_id: inbound_message_event_id,
           brain_item,
@@ -973,10 +1435,28 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             inbound_is_negative,
           metadata: {
             classification_source: classification?.source || null,
+            classification_result:
+              classification?.objection ||
+              classification?.source ||
+              seller_stage_reply?.plan?.detected_intent ||
+              null,
             route_stage: route?.stage || null,
             route_use_case: route?.use_case || null,
             seller_stage_use_case:
               seller_stage_reply?.plan?.selected_use_case || null,
+            ...buildDiscordReviewMetadata({
+              autopilot_enabled: Boolean(inbound_autopilot_enabled && outbound_queue_id),
+              autopilot_delay_seconds: inbound_autopilot_delay_seconds,
+              suggested_reply_preview,
+              selected_template_id,
+              selected_template_source,
+              outbound_queue_id,
+              discord_review_status,
+              discord_card_error,
+              post_result: discord_card,
+              existing_metadata: {},
+              context_incomplete,
+            }),
             offer_route: offer_routing?.offer_route || null,
             offer_route_reason: offer_routing?.reason || null,
             underwriting_route_reason:

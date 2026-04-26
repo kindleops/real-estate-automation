@@ -23,6 +23,16 @@ import {
   buildSuggestedReplyPreview,
 } from "@/lib/discord/discord-components/sms-reply-components.js";
 import { resolveReplyContentForMode } from "@/lib/discord/reply-sms-content-resolver.js";
+import {
+  handleSendSuggestedSmsReply,
+  handleManualSmsReply,
+  handleSubmitSmsReplyModal,
+  handleApproveSendNowSmsReply,
+  handleCancelAutopilotSmsReply,
+  handleNotInterestedSmsReply,
+  handleWrongNumberSmsReply,
+  handleOptOutSmsReply,
+} from "@/lib/discord/discord-action-handlers/handle-sms-reply.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Safety Checks Tests
@@ -565,33 +575,40 @@ describe("Discord SMS Reply Components", () => {
       assert.strictEqual(buttons.length, 0);
     });
 
-    it("includes Approve Template button", () => {
+    it("includes compact approve and manual review actions", () => {
       const buttons = buildSmsReplyActionButtons({
         message_event_id: "event-123",
         suggested_reply: "Call us at 555-1234",
       });
 
       assert.ok(buttons.length > 0);
-      assert.ok(buttons[0].components.some((b) => b.label.includes("Approve Template")));
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:a:event-123"));
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:m:event-123"));
     });
 
-    it("includes Manual Reply button", () => {
-      const buttons = buildSmsReplyActionButtons({
-        message_event_id: "event-123",
-        suggested_reply: "Test suggestion",
-      });
-
-      assert.ok(buttons[0].components.some((b) => b.label.includes("Manual Reply")));
-    });
-
-    it("includes hot lead and suppress buttons", () => {
+    it("includes not interested, wrong number, and opt out buttons", () => {
       const buttons = buildSmsReplyActionButtons({
         message_event_id: "event-123",
       });
 
-      const component = buttons[0];
-      assert.ok(component.components.some((b) => b.label.includes("Hot Lead")));
-      assert.ok(component.components.some((b) => b.label.includes("Suppress")));
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:ni:event-123"));
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:wn:event-123"));
+      assert.ok(buttons[1].components.some((b) => b.custom_id === "sr:oo:event-123"));
+    });
+
+    it("supports manual-only review mode for incomplete context", () => {
+      const buttons = buildSmsReplyActionButtons({
+        message_event_id: "event-123",
+        review_mode: "manual_only",
+      });
+
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:a:event-123"));
+      assert.equal(
+        buttons[0].components.find((b) => b.custom_id === "sr:a:event-123")?.disabled,
+        true
+      );
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:m:event-123"));
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "sr:wn:event-123"));
     });
 
     it("truncates long message_event_id", () => {
@@ -608,22 +625,13 @@ describe("Discord SMS Reply Components", () => {
   });
 
   describe("buildInboundContextButtons", () => {
-    it("includes podio button when podio_item_id provided", () => {
+    it("includes open record button when message_event_id provided", () => {
       const buttons = buildInboundContextButtons({
-        podio_item_id: "podio-123",
+        message_event_id: "event-123",
       });
 
       assert.ok(buttons.length > 0);
-      assert.ok(buttons[0].components.some((b) => b.label.includes("Podio")));
-    });
-
-    it("includes context button when master_owner_id provided", () => {
-      const buttons = buildInboundContextButtons({
-        master_owner_id: "owner-123",
-      });
-
-      assert.ok(buttons.length > 0);
-      assert.ok(buttons[0].components.some((b) => b.label.includes("Context")));
+      assert.ok(buttons[0].components.some((b) => b.custom_id === "context:open_record:event-123"));
     });
 
     it("returns empty array if no context IDs", () => {
@@ -662,3 +670,447 @@ export function __setDiscordSmsReplyTestDeps(overrides = {}) {
 export function __resetDiscordSmsReplyTestDeps() {
   // Placeholder
 }
+
+describe("Discord SMS Reply Action Handlers", () => {
+  it("approve button queues auto_template reply", async () => {
+    const result = await handleSendSuggestedSmsReply({
+      message_event_id: "evt-approve-1",
+      discord_user_id: "user-1",
+      channel_id: "chan-1",
+      message_id: "msg-1",
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.bridge_endpoint, "/api/internal/discord/reply-sms");
+    assert.strictEqual(result.bridge_payload.reply_mode, "auto_template");
+    assert.strictEqual(result.bridge_payload.action_type, "approve_send_now");
+  });
+
+  it("approve send now expedites pending autopilot queue", async () => {
+    let queue_updated = false;
+    let metadata_updated = false;
+
+    globalThis.__rea_default_supabase_client__ = {
+      from(table) {
+        if (table === "send_queue") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    eq() {
+                      return {
+                        order() {
+                          return {
+                            limit: async () => ({
+                              data: [
+                                {
+                                  id: "queue-approve-1",
+                                  queue_status: "queued",
+                                  metadata: {
+                                    inbound_message_event_id: "evt-approve-now-1",
+                                    autopilot_reply: true,
+                                  },
+                                },
+                              ],
+                              error: null,
+                            }),
+                          };
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            },
+            update(payload) {
+              queue_updated = payload.scheduled_for !== undefined;
+              return {
+                eq() {
+                  return {
+                    select() {
+                      return {
+                        maybeSingle: async () => ({
+                          data: {
+                            id: "queue-approve-1",
+                            queue_status: "queued",
+                            metadata: payload.metadata,
+                          },
+                          error: null,
+                        }),
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+
+        if (table === "message_events") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    maybeSingle: async () => ({
+                      data: { id: "evt-approve-now-1", metadata: {} },
+                      error: null,
+                    }),
+                  };
+                },
+              };
+            },
+            update() {
+              metadata_updated = true;
+              return { eq: async () => ({ error: null }) };
+            },
+          };
+        }
+
+        return {
+          select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+        };
+      },
+    };
+
+    const result = await handleApproveSendNowSmsReply({
+      message_event_id: "evt-approve-now-1",
+      discord_user_id: "user-approve-1",
+    });
+
+    delete globalThis.__rea_default_supabase_client__;
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.content, "Queued autopilot reply released for immediate send.");
+    assert.strictEqual(queue_updated, true);
+    assert.strictEqual(metadata_updated, true);
+  });
+
+  it("cancel autopilot marks queued reply as cancelled", async () => {
+    let queue_cancelled = false;
+    let metadata_updated = false;
+
+    globalThis.__rea_default_supabase_client__ = {
+      from(table) {
+        if (table === "send_queue") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    eq() {
+                      return {
+                        order() {
+                          return {
+                            limit: async () => ({
+                              data: [
+                                {
+                                  id: "queue-cancel-1",
+                                  queue_status: "queued",
+                                  metadata: {
+                                    inbound_message_event_id: "evt-cancel-1",
+                                    autopilot_reply: true,
+                                  },
+                                },
+                              ],
+                              error: null,
+                            }),
+                          };
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            },
+            update(payload) {
+              queue_cancelled = payload.queue_status === "cancelled";
+              return {
+                eq() {
+                  return {
+                    select() {
+                      return {
+                        maybeSingle: async () => ({
+                          data: {
+                            id: "queue-cancel-1",
+                            queue_status: "cancelled",
+                            metadata: payload.metadata,
+                          },
+                          error: null,
+                        }),
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+
+        if (table === "message_events") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    maybeSingle: async () => ({
+                      data: { id: "evt-cancel-1", metadata: {} },
+                      error: null,
+                    }),
+                  };
+                },
+              };
+            },
+            update() {
+              metadata_updated = true;
+              return { eq: async () => ({ error: null }) };
+            },
+          };
+        }
+
+        return {
+          select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+        };
+      },
+    };
+
+    const result = await handleCancelAutopilotSmsReply({
+      message_event_id: "evt-cancel-1",
+      discord_user_id: "user-cancel-1",
+    });
+
+    delete globalThis.__rea_default_supabase_client__;
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.content, "Autopilot cancelled.");
+    assert.strictEqual(queue_cancelled, true);
+    assert.strictEqual(metadata_updated, true);
+  });
+
+  it("not interested cancels pending autopilot before suppressing follow-up", async () => {
+    let queue_cancelled = false;
+    let final_metadata = null;
+
+    globalThis.__rea_default_supabase_client__ = {
+      from(table) {
+        if (table === "send_queue") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    eq() {
+                      return {
+                        order() {
+                          return {
+                            limit: async () => ({
+                              data: [
+                                {
+                                  id: "queue-ni-1",
+                                  queue_status: "queued",
+                                  metadata: {
+                                    inbound_message_event_id: "evt-ni-1",
+                                    autopilot_reply: true,
+                                  },
+                                },
+                              ],
+                              error: null,
+                            }),
+                          };
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            },
+            update(payload) {
+              queue_cancelled = payload.queue_status === "cancelled";
+              return {
+                eq() {
+                  return {
+                    select() {
+                      return {
+                        maybeSingle: async () => ({
+                          data: { id: "queue-ni-1", metadata: payload.metadata },
+                          error: null,
+                        }),
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+
+        if (table === "message_events") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    maybeSingle: async () => ({
+                      data: { id: "evt-ni-1", metadata: {} },
+                      error: null,
+                    }),
+                  };
+                },
+              };
+            },
+            update(payload) {
+              final_metadata = payload.metadata;
+              return { eq: async () => ({ error: null }) };
+            },
+          };
+        }
+
+        return {
+          select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+        };
+      },
+    };
+
+    const result = await handleNotInterestedSmsReply({
+      message_event_id: "evt-ni-1",
+      discord_user_id: "user-ni-1",
+    });
+
+    delete globalThis.__rea_default_supabase_client__;
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(queue_cancelled, true);
+    assert.strictEqual(final_metadata.discord_review_status, "not_interested");
+    assert.strictEqual(final_metadata.suppress_followup, true);
+  });
+
+  it("manual button opens modal with new custom id", async () => {
+    const result = await handleManualSmsReply({
+      interaction: { id: "interaction-1" },
+      message_event_id: "evt-manual-1",
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.type, 9);
+    assert.strictEqual(result.data.custom_id, "sms_reply_manual_modal:evt-manual-1");
+  });
+
+  it("manual modal queues manual reply", async () => {
+    const result = await handleSubmitSmsReplyModal({
+      interaction: {
+        data: {
+          custom_id: "sms_reply_manual_modal:evt-modal-1",
+          components: [
+            {
+              components: [
+                { custom_id: "reply_text_input", value: "Manual reply text" },
+              ],
+            },
+          ],
+        },
+      },
+      discord_user_id: "user-2",
+      channel_id: "chan-2",
+      message_id: "msg-2",
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.bridge_payload.reply_mode, "manual");
+    assert.strictEqual(result.bridge_payload.reply_text, "Manual reply text");
+    assert.strictEqual(result.bridge_payload.action_type, "manual_inbound_sms_reply");
+  });
+
+  it("wrong number creates suppression and does not queue outbound reply", async () => {
+    let suppression_inserted = false;
+    let metadata_updated = false;
+    globalThis.__rea_default_supabase_client__ = {
+      from(table) {
+        if (table === "message_events") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    maybeSingle: async () => ({
+                      data: { id: "evt-wn-1", from_phone_number: "+16025550111", metadata: {} },
+                      error: null,
+                    }),
+                  };
+                },
+              };
+            },
+            update() {
+              metadata_updated = true;
+              return { eq: async () => ({ error: null }) };
+            },
+          };
+        }
+        if (table === "sms_suppression_list") {
+          return {
+            insert() {
+              suppression_inserted = true;
+              return { maybeSingle: async () => ({ data: null, error: null }) };
+            },
+          };
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) };
+      },
+    };
+
+    const result = await handleWrongNumberSmsReply({
+      message_event_id: "evt-wn-1",
+      discord_user_id: "user-3",
+    });
+
+    delete globalThis.__rea_default_supabase_client__;
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(suppression_inserted, true);
+    assert.strictEqual(metadata_updated, true);
+  });
+
+  it("opt out creates suppression and does not queue outbound reply", async () => {
+    let suppression_inserted = false;
+    let metadata_updated = false;
+    globalThis.__rea_default_supabase_client__ = {
+      from(table) {
+        if (table === "message_events") {
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    maybeSingle: async () => ({
+                      data: { id: "evt-oo-1", from_phone_number: "+16025550112", metadata: {} },
+                      error: null,
+                    }),
+                  };
+                },
+              };
+            },
+            update() {
+              metadata_updated = true;
+              return { eq: async () => ({ error: null }) };
+            },
+          };
+        }
+        if (table === "sms_suppression_list") {
+          return {
+            insert() {
+              suppression_inserted = true;
+              return { maybeSingle: async () => ({ data: null, error: null }) };
+            },
+          };
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) };
+      },
+    };
+
+    const result = await handleOptOutSmsReply({
+      message_event_id: "evt-oo-1",
+      discord_user_id: "user-4",
+    });
+
+    delete globalThis.__rea_default_supabase_client__;
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(suppression_inserted, true);
+    assert.strictEqual(metadata_updated, true);
+  });
+});

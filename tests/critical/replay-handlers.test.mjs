@@ -665,6 +665,8 @@ test("inbound webhook suppresses underwriting follow-up when seller-stage reply 
     to: "+15550000002",
     body: "Yes, I own it.",
     status: "received",
+  }, {
+    auto_reply_enabled: true,
   });
 
   assert.equal(result.ok, true);
@@ -845,6 +847,8 @@ test("inbound webhook runs a single ungated second offer pass only after underwr
     to: "+15550000002",
     body: "Make me an offer.",
     status: "received",
+  }, {
+    auto_reply_enabled: true,
   });
 
   assert.equal(result.ok, true);

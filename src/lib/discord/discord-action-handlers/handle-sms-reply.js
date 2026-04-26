@@ -5,6 +5,10 @@
 
 import { child } from "@/lib/logging/logger.js";
 import { getDefaultSupabaseClient } from "@/lib/supabase/default-client.js";
+import {
+  cancelInboundAutopilotQueue,
+  expediteInboundAutopilotQueue,
+} from "@/lib/discord/inbound-autopilot-queue.js";
 
 // Button styles
 const STYLE = {
@@ -71,7 +75,7 @@ export async function handleOpenSmsReplyModal({
     : "Enter your SMS reply...";
 
   const modal_payload = {
-    custom_id: `sms_reply_modal:${message_event_id}`,
+    custom_id: `sms_reply_manual_modal:${message_event_id}`,
     title: modal_title,
     components: [
       actionRow([
@@ -148,7 +152,7 @@ export async function handleSubmitSmsReplyModal({
       approved_by_discord_user_id: discord_user_id,
       source_channel_id: channel_id,
       source_message_id: message_id,
-      action_type: "manual_sms_reply",
+      action_type: "manual_inbound_sms_reply",
     },
     method: "POST",
   };
@@ -190,7 +194,7 @@ export async function handleSendSuggestedSmsReply({
       approved_by_discord_user_id: discord_user_id,
       source_channel_id: channel_id,
       source_message_id: message_id,
-      action_type: "approve_template_sms_reply",
+      action_type: "approve_send_now",
     },
     method: "POST",
   };
@@ -219,6 +223,219 @@ export async function handleManualSmsReply({
     interaction,
     message_event_id,
     suggested_reply: "",
+  });
+}
+
+async function updateMessageEventMetadata(message_event_id = "", updater = () => ({}), supabase = null) {
+  if (!message_event_id || !supabase) {
+    return { ok: false, reason: "missing_event_or_supabase" };
+  }
+
+  const { data: event_row, error: load_error } = await supabase
+    .from("message_events")
+    .select("id, metadata")
+    .eq("id", message_event_id)
+    .maybeSingle();
+
+  if (load_error) {
+    return { ok: false, reason: load_error.message || "load_failed" };
+  }
+
+  const current_metadata = ensureObject(event_row?.metadata);
+  const next_metadata = ensureObject(updater(current_metadata));
+
+  const { error: update_error } = await supabase
+    .from("message_events")
+    .update({ metadata: next_metadata })
+    .eq("id", message_event_id);
+
+  if (update_error) {
+    return { ok: false, reason: update_error.message || "update_failed" };
+  }
+
+  return { ok: true, metadata: next_metadata };
+}
+
+export async function handleNotInterestedSmsReply({
+  message_event_id = "",
+  discord_user_id = "",
+}) {
+  const supabase = getDefaultSupabaseClient();
+  await cancelInboundAutopilotQueue({
+    message_event_id,
+    supabase,
+    discord_user_id,
+    review_status: "not_interested",
+    cancellation_reason: "not_interested",
+  }).catch(() => null);
+
+  const result = await updateMessageEventMetadata(
+    message_event_id,
+    (metadata) => ({
+      ...metadata,
+      discord_review_status: "not_interested",
+      contact_status: "not_interested",
+      suppress_followup: true,
+      reviewed_by_discord_user_id: discord_user_id,
+      reviewed_at: new Date().toISOString(),
+    }),
+    supabase
+  );
+
+  return result.ok
+    ? { ok: true, ephemeral: true, content: "Marked not interested. Follow-up suppressed." }
+    : { ok: false, ephemeral: true, error: result.reason };
+}
+
+async function suppressInboundContact({ message_event_id = "", discord_user_id = "", suppression_reason = "opt_out" } = {}) {
+  const supabase = getDefaultSupabaseClient();
+  await cancelInboundAutopilotQueue({
+    message_event_id,
+    supabase,
+    discord_user_id,
+    review_status:
+      suppression_reason === "wrong_number" ? "wrong_number_suppressed" : "opted_out",
+    cancellation_reason: suppression_reason,
+  }).catch(() => null);
+
+  const { data: event_row } = await supabase
+    .from("message_events")
+    .select("id, from_phone_number, metadata")
+    .eq("id", message_event_id)
+    .maybeSingle();
+
+  const from_phone_number = clean(event_row?.from_phone_number || event_row?.metadata?.from_phone_number || event_row?.metadata?.inbound_from);
+  if (from_phone_number) {
+    await supabase.from("sms_suppression_list").insert({
+      phone_number: from_phone_number,
+      suppression_reason,
+      is_active: true,
+      suppressed_by_discord_user_id: discord_user_id,
+      suppressed_at: new Date().toISOString(),
+    }).maybeSingle().catch(() => null);
+  }
+
+  return updateMessageEventMetadata(
+    message_event_id,
+    (metadata) => ({
+      ...metadata,
+      discord_review_status:
+        suppression_reason === "wrong_number" ? "wrong_number_suppressed" : "opted_out",
+      reviewed_by_discord_user_id: discord_user_id,
+      reviewed_at: new Date().toISOString(),
+      suppress_followup: true,
+      contact_status: suppression_reason === "wrong_number" ? "wrong_number" : metadata.contact_status,
+      suppression_reason,
+    }),
+    supabase
+  );
+}
+
+export async function handleWrongNumberSmsReply({ message_event_id = "", discord_user_id = "" }) {
+  const result = await suppressInboundContact({
+    message_event_id,
+    discord_user_id,
+    suppression_reason: "wrong_number",
+  });
+  return result.ok
+    ? { ok: true, ephemeral: true, content: "Wrong number recorded. Further outreach suppressed." }
+    : { ok: false, ephemeral: true, error: result.reason };
+}
+
+export async function handleOptOutSmsReply({ message_event_id = "", discord_user_id = "" }) {
+  const result = await suppressInboundContact({
+    message_event_id,
+    discord_user_id,
+    suppression_reason: "opt_out",
+  });
+  return result.ok
+    ? { ok: true, ephemeral: true, content: "Opt-out recorded. Further outreach suppressed." }
+    : { ok: false, ephemeral: true, error: result.reason };
+}
+
+export async function handleOpenRecord({ message_event_id = "" }) {
+  return {
+    ok: true,
+    ephemeral: true,
+    content: `Record reference: ${clean(message_event_id) || "unknown"}`,
+  };
+}
+
+export async function handleCancelAutopilotSmsReply({
+  message_event_id = "",
+  discord_user_id = "",
+}) {
+  const supabase = getDefaultSupabaseClient();
+  const cancel_result = await cancelInboundAutopilotQueue({
+    message_event_id,
+    supabase,
+    discord_user_id,
+    review_status: "autopilot_cancelled",
+    cancellation_reason: "discord_cancel_autopilot",
+  }).catch((error) => ({ ok: false, error: error?.message || "cancel_failed" }));
+
+  if (!cancel_result?.ok) {
+    return { ok: false, ephemeral: true, error: cancel_result.error || "cancel_failed" };
+  }
+
+  const metadata_result = await updateMessageEventMetadata(
+    message_event_id,
+    (metadata) => ({
+      ...metadata,
+      discord_review_status: "autopilot_cancelled",
+      cancelled_by_discord_user_id: discord_user_id,
+      autopilot_cancelled_at: new Date().toISOString(),
+    }),
+    supabase
+  );
+
+  return metadata_result.ok
+    ? { ok: true, ephemeral: true, content: cancel_result.cancelled ? "Autopilot cancelled." : "No pending autopilot reply to cancel." }
+    : { ok: false, ephemeral: true, error: metadata_result.reason };
+}
+
+export async function handleApproveSendNowSmsReply({
+  message_event_id = "",
+  discord_user_id = "",
+  channel_id = "",
+  message_id = "",
+}) {
+  const supabase = getDefaultSupabaseClient();
+  const expedite_result = await expediteInboundAutopilotQueue({
+    message_event_id,
+    supabase,
+    discord_user_id,
+    review_status: "approved_send_now",
+  }).catch((error) => ({ ok: false, error: error?.message || "expedite_failed" }));
+
+  if (!expedite_result?.ok) {
+    return { ok: false, ephemeral: true, error: expedite_result.error || "expedite_failed" };
+  }
+
+  if (expedite_result?.expedited) {
+    await updateMessageEventMetadata(
+      message_event_id,
+      (metadata) => ({
+        ...metadata,
+        discord_review_status: "approved_send_now",
+        approved_by_discord_user_id: discord_user_id,
+        approved_send_now_at: new Date().toISOString(),
+      }),
+      supabase
+    ).catch(() => null);
+
+    return {
+      ok: true,
+      ephemeral: true,
+      content: "Queued autopilot reply released for immediate send.",
+    };
+  }
+
+  return handleSendSuggestedSmsReply({
+    message_event_id,
+    discord_user_id,
+    channel_id,
+    message_id,
   });
 }
 

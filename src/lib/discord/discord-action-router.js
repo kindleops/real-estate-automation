@@ -3456,7 +3456,7 @@ export async function routeDiscordInteraction(interaction) {
       return updateMessage(`⚠️ Action not wired yet: ${action || "unknown"}`);
     }
 
-    // SMS reply action buttons (inbound alert cards)
+    // SMS reply action buttons (legacy inbound alert cards)
     // custom_id format: sms_action:{action_type}:{message_event_id}
     if (custom_id.startsWith("sms_action:")) {
       const [, action, message_event_id] = custom_id.split(":");
@@ -3509,6 +3509,86 @@ export async function routeDiscordInteraction(interaction) {
       }
 
       return updateMessage(`⚠️ SMS action not wired yet: ${action || "unknown"}`);
+    }
+
+    // Compact inbound SMS review actions
+    // custom_id format: sr:{action}:{message_event_id}
+    if (custom_id.startsWith("sr:")) {
+      const [, action, message_event_id] = custom_id.split(":");
+      const {
+        handleApproveSendNowSmsReply,
+        handleManualSmsReply,
+        handleCancelAutopilotSmsReply,
+        handleNotInterestedSmsReply,
+        handleWrongNumberSmsReply,
+        handleOptOutSmsReply,
+        handleOpenRecord,
+      } = await import("@/lib/discord/discord-action-handlers/handle-sms-reply.js").catch(() => ({}));
+
+      if (action === "a" && handleApproveSendNowSmsReply) {
+        return await handleApproveSendNowSmsReply({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+          channel_id: ctx.channel_id,
+          message_id: interaction?.message?.id,
+        });
+      }
+
+      if (action === "c" && handleCancelAutopilotSmsReply) {
+        return await handleCancelAutopilotSmsReply({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+          channel_id: ctx.channel_id,
+          message_id: interaction?.message?.id,
+        });
+      }
+
+      if (action === "m" && handleManualSmsReply) {
+        return await handleManualSmsReply({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+          channel_id: ctx.channel_id,
+          message_id: interaction?.message?.id,
+        });
+      }
+
+      if (action === "ni" && handleNotInterestedSmsReply) {
+        return await handleNotInterestedSmsReply({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+        });
+      }
+
+      if (action === "wn" && handleWrongNumberSmsReply) {
+        return await handleWrongNumberSmsReply({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+        });
+      }
+
+      if (action === "oo" && handleOptOutSmsReply) {
+        return await handleOptOutSmsReply({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+        });
+      }
+
+      return updateMessage(`⚠️ Unsupported SMS review action: ${action || "unknown"}`);
+    }
+
+    if (custom_id.startsWith("context:open_record:")) {
+      const message_event_id = custom_id.split(":").slice(2).join(":");
+      const { handleOpenRecord } = await import("@/lib/discord/discord-action-handlers/handle-sms-reply.js").catch(() => ({}));
+      if (handleOpenRecord) {
+        return await handleOpenRecord({ message_event_id });
+      }
+      return updateMessage("⚠️ Open record handler not available.");
     }
 
     // Briefing quick-action buttons
@@ -3804,7 +3884,7 @@ export async function routeDiscordInteraction(interaction) {
     const modal_custom_id = String(interaction?.data?.custom_id ?? "");
 
     // SMS reply modal submission
-    if (modal_custom_id.startsWith("sms_reply_modal:")) {
+    if (modal_custom_id.startsWith("sms_reply_modal:") || modal_custom_id.startsWith("sms_reply_manual_modal:")) {
       const { handleSubmitSmsReplyModal } = await import(
         "@/lib/discord/discord-action-handlers/handle-sms-reply.js"
       ).catch(() => ({}));

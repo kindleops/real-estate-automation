@@ -418,25 +418,221 @@ function deriveSellerFirstName(candidate = {}) {
   return "";
 }
 
+function getFirstName(value = "") {
+  const normalized = clean(String(value || "").replace(/\s+/g, " "));
+  if (!normalized) return "";
+  return clean(normalized.split(/\s+/)[0] || "");
+}
+
+function parseCityStateFromAddress(address = "") {
+  const text = clean(address);
+  if (!text) {
+    return { city: "", state: "" };
+  }
+
+  // Common pattern: "123 Main St, Houston, TX 77002"
+  const comma_parts = text.split(",").map((part) => clean(part)).filter(Boolean);
+  if (comma_parts.length >= 2) {
+    const city = clean(comma_parts[comma_parts.length - 2]);
+    const trailing = clean(comma_parts[comma_parts.length - 1]);
+    const state_match = trailing.match(/^([A-Za-z]{2})\b/);
+    return {
+      city,
+      state: state_match ? clean(state_match[1]).toUpperCase() : "",
+    };
+  }
+
+  return { city: "", state: "" };
+}
+
+function getStreetAddress(value = "") {
+  const normalized = clean(String(value || "").replace(/\s+/g, " "));
+  if (!normalized) return "";
+
+  const comma_index = normalized.indexOf(",");
+  if (comma_index === -1) {
+    return normalized;
+  }
+
+  return clean(normalized.slice(0, comma_index).replace(/\s+/g, " "));
+}
+
+function hasRenderedFullAddressSuffix(rendered_text = "", full_address = "", street_address = "") {
+  const rendered = lower(clean(rendered_text));
+  const full = clean(full_address);
+  const street = clean(street_address);
+
+  if (!rendered || !full || !street) return false;
+  if (full.length <= street.length) return false;
+
+  const comma_index = full.indexOf(",");
+  if (comma_index === -1) return false;
+
+  const suffix = clean(full.slice(comma_index));
+  if (!suffix) return false;
+
+  return rendered.includes(lower(suffix));
+}
+
+function isColdOutboundS1OwnershipCheck(selector = {}) {
+  const use_case = clean(selector.use_case);
+  const is_first_touch = Boolean(selector.is_first_touch);
+  const stage_code = clean(selector.stage_code).toUpperCase();
+  return use_case === "ownership_check" && is_first_touch && stage_code === "S1";
+}
+
+function rewriteAddressPlaceholdersForColdS1(template_body = "", selector = {}) {
+  if (!isColdOutboundS1OwnershipCheck(selector)) {
+    return template_body;
+  }
+
+  return String(template_body || "")
+    .replace(/\{\{\s*property_address_full\s*\}\}/gi, "{{property_street_address}}")
+    .replace(/\{\s*property_address_full\s*\}/gi, "{property_street_address}");
+}
+
+function hasBlankLocationPattern(text = "") {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) return false;
+
+  const direct_patterns = [
+    " en .",
+    " em .",
+    " in .",
+    "zai zhao",
+  ];
+
+  if (direct_patterns.some((pattern) => normalized.includes(pattern))) {
+    return true;
+  }
+
+  // Detect language-specific "in <blank>." patterns with optional spaces.
+  if (/\b(en|em|in)\s*\./i.test(normalized)) {
+    return true;
+  }
+
+  // Mandarin romanization pattern where location token disappears.
+  if (/\bzai\s{2,}zhao\b/i.test(String(text || ""))) {
+    return true;
+  }
+
+  return false;
+}
+
 function buildTemplateVariablePayload(candidate = {}) {
   const owner_display_name = clean(
     pick(candidate.raw?.display_name, candidate.owner_display_name, candidate.raw?.owner_display_name)
   );
   const language = clean(pick(candidate.best_language, candidate.language, "English")) || "English";
+  const property_address_full = clean(
+    pick(candidate.property_address_full, candidate.property_address, candidate.raw?.property_address_full)
+  );
+  const property_street_address = getStreetAddress(property_address_full);
+  const parsed_location = parseCityStateFromAddress(
+    property_address_full
+  );
+
+  const property_city = clean(
+    pick(
+      candidate.raw?.property_address_city,
+      candidate.property_city,
+      candidate.raw?.property_city,
+      candidate.raw?.city,
+      parsed_location.city,
+      ""
+    )
+  );
+
+  const seller_market = clean(
+    pick(
+      candidate.seller_market,
+      candidate.market,
+      candidate.normalized_market,
+      candidate.raw?.seller_market,
+      candidate.raw?.market,
+      candidate.raw?.normalized_market,
+      property_city,
+      ""
+    )
+  );
+
+  const market = clean(
+    pick(
+      candidate.market,
+      candidate.seller_market,
+      candidate.normalized_market,
+      candidate.raw?.market,
+      candidate.raw?.seller_market,
+      candidate.raw?.normalized_market,
+      property_city,
+      ""
+    )
+  );
+
+  const city = clean(pick(property_city, seller_market, market, ""));
+
+  const property_state = clean(
+    pick(
+      candidate.property_state,
+      candidate.state,
+      candidate.raw?.property_address_state,
+      candidate.raw?.property_state,
+      candidate.raw?.seller_state,
+      parsed_location.state,
+      ""
+    )
+  );
+
+  const agent_name_raw = clean(
+    pick(
+      candidate.agent_persona,
+      candidate.agent_name,
+      candidate.sms_agent_name,
+      candidate.assigned_agent_name,
+      candidate.raw?.agent_persona,
+      candidate.raw?.agent_name,
+      candidate.raw?.sms_agent_name,
+      candidate.raw?.assigned_agent_name,
+      candidate.raw?.acquisition_agent_name,
+      candidate.raw?.agent_family,
+      candidate.agent_family,
+      "Alex"
+    )
+  ) || "Alex";
+  const agent_first_name = getFirstName(agent_name_raw) || "Alex";
+
   const payload = {
     seller_first_name: deriveSellerFirstName(candidate),
     owner_display_name,
     owner_name: owner_display_name || candidate.seller_name || "",
     seller_full_name: clean(pick(candidate.seller_full_name, candidate.phone_full_name)),
-    property_address: clean(candidate.property_address_full),
-    property_city: clean(candidate.property_city),
-    property_state: clean(candidate.property_state || candidate.state),
+    property_address_full,
+    property_address: property_street_address || property_address_full,
+    property_street_address: property_street_address || property_address_full,
+    property_city,
+    city,
+    property_address_city: property_city,
+    market,
+    seller_market,
+    normalized_market: clean(pick(candidate.normalized_market, candidate.raw?.normalized_market, market)),
+    property_state,
+    state: property_state,
+    property_address_state: property_state,
+    seller_state: property_state,
     property_zip: clean(candidate.property_zip),
     offer_price: formatCurrency(candidate.cash_offer),
     cash_offer: candidate.cash_offer,
-    agent_name: clean(pick(candidate.agent_persona, candidate.raw?.agent_name, "Alex")) || "Alex",
+    agent_name: agent_first_name,
+    agent_first_name,
+    sender_name: agent_first_name,
+    sms_agent_name: agent_first_name,
+    acquisition_agent_name: agent_first_name,
+    agent_name_raw,
     language,
-    market: clean(candidate.market),
   };
 
   return payload;
@@ -517,6 +713,193 @@ function sortTemplateCandidates(left, right, selector) {
   if (l.usage_count !== r.usage_count) return r.usage_count - l.usage_count;
   if (l.version !== r.version) return r.version - l.version;
   return r.updated_at_ts - l.updated_at_ts;
+}
+
+function computeTemplateQualityScore(template = {}, selector = {}) {
+  const ranked = scoreTemplateCandidate(template, selector);
+  const quality_floor = 200;
+  const ranking_score = Math.max(0, 100 - ranked.ranking_group * 12);
+  const stage_score = ranked.stage_bonus * 6;
+  const touch_score = ranked.touch_bonus * 5;
+  const success_score = Math.max(0, Math.min(30, Number(ranked.success_rate || 0) * 30));
+  const usage_score = Math.min(10, Math.log10(Math.max(1, Number(ranked.usage_count || 0))) * 4);
+  const recency_score = ranked.updated_at_ts > 0 ? 1 : 0;
+  return quality_floor + ranking_score + stage_score + touch_score + success_score + usage_score + recency_score;
+}
+
+function buildTemplateRotationSeed({
+  master_owner_id,
+  property_id,
+  phone_id,
+  language,
+  use_case,
+  stage_code,
+  campaign_key,
+  day_bucket,
+} = {}) {
+  const utc_bucket = clean(day_bucket) || new Date().toISOString().slice(0, 10);
+  return [
+    clean(master_owner_id),
+    clean(property_id),
+    clean(phone_id),
+    clean(language),
+    clean(use_case),
+    clean(stage_code),
+    clean(campaign_key),
+    utc_bucket,
+  ].join("|");
+}
+
+function stableSeedModulo(seed = "", modulo = 1) {
+  const safe_modulo = Math.max(1, Number(modulo) || 1);
+  const digest = crypto.createHash("sha1").update(clean(seed)).digest("hex");
+  const numeric = Number.parseInt(digest.slice(0, 8), 16);
+  return Number.isFinite(numeric) ? numeric % safe_modulo : 0;
+}
+
+function chooseRotatingTemplate(candidates = [], seed = "") {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return {
+      selected: null,
+      selected_index: -1,
+      selected_hash_index: -1,
+      rotation_pool: [],
+    };
+  }
+
+  const index = stableSeedModulo(seed, candidates.length);
+  const selected = candidates[index] || candidates[0] || null;
+  return {
+    selected,
+    selected_index: candidates.findIndex((template) => {
+      const left = clean(template?.template_id || template?.id || template?.item_id);
+      const right = clean(selected?.template_id || selected?.id || selected?.item_id);
+      return left && right ? left === right : template === selected;
+    }),
+    selected_hash_index: index,
+    rotation_pool: candidates,
+  };
+}
+
+function shouldEnableTemplateRotation(selector = {}) {
+  return isColdOutboundS1OwnershipCheck(selector);
+}
+
+async function getRecentTemplateIds(candidate = {}, selector = {}, options = {}, deps = {}) {
+  if (typeof deps.getRecentTemplateIds === "function") {
+    const custom = await deps.getRecentTemplateIds(candidate, selector, options);
+    return Array.isArray(custom) ? custom.map((value) => clean(value)).filter(Boolean) : [];
+  }
+
+  let supabase;
+  try {
+    supabase = getSupabase(deps);
+  } catch {
+    return [];
+  }
+
+  const phone = normalizePhone(candidate.canonical_e164);
+  const use_case = clean(selector.use_case);
+  const stage_code = clean(selector.stage_code);
+  const lookback_ms = 30 * 24 * 60 * 60 * 1000;
+  const cutoff_ms = Date.now() - lookback_ms;
+  const recent_template_ids = new Set();
+
+  const collectFromRows = (rows = []) => {
+    for (const row of rows) {
+      const created_at_raw = pick(row?.created_at, row?.sent_at, row?.scheduled_for, row?.inserted_at);
+      const created_at_ms = created_at_raw ? new Date(created_at_raw).getTime() : 0;
+      if (!created_at_ms || created_at_ms < cutoff_ms) continue;
+
+      const row_phone = normalizePhone(pick(row?.to_phone_number, row?.phone_number, row?.recipient_phone));
+      if (phone && row_phone && phone !== row_phone) continue;
+
+      const row_use_case = clean(
+        pick(row?.use_case_template, row?.metadata?.template_use_case, row?.template_use_case, row?.use_case)
+      );
+      if (use_case && row_use_case && lower(row_use_case) !== lower(use_case)) continue;
+
+      const row_stage_code = clean(
+        pick(row?.metadata?.template_stage_code, row?.stage_code, row?.metadata?.selected_template_stage_code)
+      );
+      if (stage_code && row_stage_code && lower(row_stage_code) !== lower(stage_code)) continue;
+
+      const template_id = clean(
+        pick(
+          row?.template_id,
+          row?.metadata?.template_id,
+          row?.metadata?.selected_template_id,
+          row?.metadata?.template?.id
+        )
+      );
+      if (template_id) recent_template_ids.add(template_id);
+    }
+  };
+
+  try {
+    const queue_query = await supabase
+      .from(SEND_QUEUE_TABLE)
+      .select("template_id,metadata,to_phone_number,created_at,scheduled_for,use_case_template,stage_code")
+      .eq("master_owner_id", candidate.master_owner_id)
+      .limit(200);
+    if (Array.isArray(queue_query?.data)) {
+      collectFromRows(queue_query.data);
+    }
+  } catch {
+    // Best-effort only.
+  }
+
+  try {
+    const events_query = await supabase
+      .from("message_events")
+      .select("template_id,metadata,to_phone_number,created_at,sent_at,use_case,stage_code")
+      .eq("master_owner_id", candidate.master_owner_id)
+      .limit(200);
+    if (Array.isArray(events_query?.data)) {
+      collectFromRows(events_query.data);
+    }
+  } catch {
+    // message_events may not exist in every environment.
+  }
+
+  return [...recent_template_ids];
+}
+
+function buildRotationPool(sorted_templates = [], selector = {}) {
+  const cap = 50;
+  const scored = sorted_templates.map((template) => ({
+    template,
+    score: computeTemplateQualityScore(template, selector),
+  }));
+
+  if (!scored.length) {
+    return {
+      pool: [],
+      best_score: null,
+    };
+  }
+
+  const has_scores = scored.some((entry) => Number.isFinite(entry.score));
+  if (!has_scores) {
+    return {
+      pool: sorted_templates.slice(0, Math.min(25, cap)),
+      best_score: null,
+    };
+  }
+
+  const best_score = Math.max(...scored.map((entry) => Number(entry.score || 0)));
+  let pool = scored
+    .filter((entry) => Number(entry.score || 0) >= best_score - 10)
+    .map((entry) => entry.template);
+
+  if (!pool.length) {
+    pool = sorted_templates.slice(0, 25);
+  }
+
+  return {
+    pool: pool.slice(0, cap),
+    best_score,
+  };
 }
 
 function parseWindowTime(value) {
@@ -1008,13 +1391,56 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
     };
   }
 
-  const selected_template = [...templates].sort((left, right) => sortTemplateCandidates(left, right, selector))[0] || null;
+  const sorted_templates = [...templates].sort((left, right) => sortTemplateCandidates(left, right, selector));
+  let selected_template = sorted_templates[0] || null;
+  const rotation_enabled = shouldEnableTemplateRotation(selector);
+  const recent_template_ids = rotation_enabled
+    ? await getRecentTemplateIds(candidate, selector, options, deps)
+    : [];
+
+  let eligible_rotation_candidates = sorted_templates;
+  if (rotation_enabled && recent_template_ids.length) {
+    const recent_id_set = new Set(recent_template_ids.map((value) => clean(value)));
+    const without_recent = sorted_templates.filter((template) => {
+      const template_id = clean(template?.template_id || template?.id || template?.item_id);
+      return !template_id || !recent_id_set.has(template_id);
+    });
+    if (without_recent.length) {
+      eligible_rotation_candidates = without_recent;
+    }
+  }
+
+  const pool_result = rotation_enabled
+    ? buildRotationPool(eligible_rotation_candidates, selector)
+    : { pool: [selected_template].filter(Boolean), best_score: null };
+  const rotation_seed = buildTemplateRotationSeed({
+    master_owner_id: candidate.master_owner_id,
+    property_id: candidate.property_id,
+    phone_id: candidate.best_phone_id || candidate.phone_id,
+    language: selector.preferred_language,
+    use_case: selector.use_case,
+    stage_code: selector.stage_code,
+    campaign_key: clean(options.campaign_key || options.campaign_session_id || candidate.campaign_session_id),
+    day_bucket: clean(options.day_bucket) || clean(options.now).slice(0, 10),
+  });
+  const rotation_choice = rotation_enabled
+    ? chooseRotatingTemplate(pool_result.pool, rotation_seed)
+    : {
+        selected: selected_template,
+        selected_index: selected_template ? 0 : -1,
+        selected_hash_index: selected_template ? 0 : -1,
+        rotation_pool: [selected_template].filter(Boolean),
+      };
+
+  selected_template = rotation_choice.selected || selected_template;
+
   const selected_template_with_source = selected_template
     ? { ...selected_template, source: "sms_templates" }
     : null;
   const source_body = clean(pick(selected_template?.template_body, selected_template?.english_translation));
+  const rewritten_source_body = rewriteAddressPlaceholdersForColdS1(source_body, selector);
 
-  if (!source_body) {
+  if (!rewritten_source_body) {
     return {
       ok: false,
       reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
@@ -1034,11 +1460,23 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
+      template_rotation: {
+        enabled: rotation_enabled,
+        seed: rotation_seed,
+        eligible_template_count: sorted_templates.length,
+        rotation_pool_size: rotation_choice.rotation_pool.length,
+        rotation_candidate_template_ids: rotation_choice.rotation_pool
+          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+          .filter(Boolean),
+        excluded_recent_template_ids: recent_template_ids,
+        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+        selected_index: rotation_choice.selected_index,
+      },
     };
   }
 
   const variable_payload = buildTemplateVariablePayload(candidate);
-  const rendered = applyTemplatePlaceholders(source_body, variable_payload);
+  const rendered = applyTemplatePlaceholders(rewritten_source_body, variable_payload);
   const normalized_rendered = clean(decodeBasicHtmlEntities(stripHtml(rendered.rendered_text || "")));
 
   if (!normalized_rendered) {
@@ -1061,6 +1499,146 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
+      template_rotation: {
+        enabled: rotation_enabled,
+        seed: rotation_seed,
+        eligible_template_count: sorted_templates.length,
+        rotation_pool_size: rotation_choice.rotation_pool.length,
+        rotation_candidate_template_ids: rotation_choice.rotation_pool
+          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+          .filter(Boolean),
+        excluded_recent_template_ids: recent_template_ids,
+        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+        selected_index: rotation_choice.selected_index,
+      },
+    };
+  }
+
+  if (hasBlankLocationPattern(normalized_rendered)) {
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "template_render_failed",
+      missing_placeholder_reason: "blank_location_placeholder",
+      render_error_message: "blank_location_placeholder",
+      template: selected_template_with_source,
+      template_id: selected_template?.template_id || selected_template?.id || null,
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        podio_template_id: selected_template?.podio_template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+        stage_label: selected_template?.stage_label || null,
+      },
+      template_rotation: {
+        enabled: rotation_enabled,
+        seed: rotation_seed,
+        eligible_template_count: sorted_templates.length,
+        rotation_pool_size: rotation_choice.rotation_pool.length,
+        rotation_candidate_template_ids: rotation_choice.rotation_pool
+          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+          .filter(Boolean),
+        excluded_recent_template_ids: recent_template_ids,
+        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+        selected_index: rotation_choice.selected_index,
+      },
+    };
+  }
+
+  if (
+    isColdOutboundS1OwnershipCheck(selector) &&
+    hasRenderedFullAddressSuffix(
+      normalized_rendered,
+      variable_payload.property_address_full,
+      variable_payload.property_street_address
+    )
+  ) {
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "full_address_rendered_in_cold_sms",
+      template: selected_template_with_source,
+      template_id: selected_template?.template_id || selected_template?.id || null,
+      rendered_preview: normalized_rendered.slice(0, 200),
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      property_address_full: variable_payload.property_address_full,
+      property_street_address: variable_payload.property_street_address,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        podio_template_id: selected_template?.podio_template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+        stage_label: selected_template?.stage_label || null,
+      },
+      template_rotation: {
+        enabled: rotation_enabled,
+        seed: rotation_seed,
+        eligible_template_count: sorted_templates.length,
+        rotation_pool_size: rotation_choice.rotation_pool.length,
+        rotation_candidate_template_ids: rotation_choice.rotation_pool
+          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+          .filter(Boolean),
+        excluded_recent_template_ids: recent_template_ids,
+        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+        selected_index: rotation_choice.selected_index,
+      },
+    };
+  }
+
+  const agent_name_raw = clean(variable_payload.agent_name_raw);
+  const agent_first_name = clean(variable_payload.agent_first_name);
+  const has_full_agent_name = /\s+/.test(agent_name_raw);
+  const rendered_lower = lower(normalized_rendered);
+  if (
+    isColdOutboundS1OwnershipCheck(selector) &&
+    has_full_agent_name &&
+    rendered_lower.includes(lower(agent_name_raw))
+  ) {
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "agent_full_name_rendered",
+      template: selected_template_with_source,
+      template_id: selected_template?.template_id || selected_template?.id || null,
+      rendered_preview: normalized_rendered.slice(0, 200),
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      agent_name_raw,
+      agent_first_name,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        podio_template_id: selected_template?.podio_template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+        stage_label: selected_template?.stage_label || null,
+      },
+      template_rotation: {
+        enabled: rotation_enabled,
+        seed: rotation_seed,
+        eligible_template_count: sorted_templates.length,
+        rotation_pool_size: rotation_choice.rotation_pool.length,
+        rotation_candidate_template_ids: rotation_choice.rotation_pool
+          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+          .filter(Boolean),
+        excluded_recent_template_ids: recent_template_ids,
+        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+        selected_index: rotation_choice.selected_index,
+      },
     };
   }
 
@@ -1081,6 +1659,18 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
       language: selected_template?.language || null,
       stage_code: selected_template?.stage_code || null,
       stage_label: selected_template?.stage_label || null,
+    },
+    template_rotation: {
+      enabled: rotation_enabled,
+      seed: rotation_seed,
+      eligible_template_count: sorted_templates.length,
+      rotation_pool_size: rotation_choice.rotation_pool.length,
+      rotation_candidate_template_ids: rotation_choice.rotation_pool
+        .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+        .filter(Boolean),
+      excluded_recent_template_ids: recent_template_ids,
+      selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+      selected_index: rotation_choice.selected_index,
     },
     stage_code: selected_template?.stage_code || selector.stage_code,
     stage_label: selected_template?.stage_label || selector.stage_label,
@@ -1151,6 +1741,20 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
         source: options.template_source || "supabase",
         use_case: options.template_use_case,
       },
+      template_rotation_enabled: Boolean(options.template_rotation_enabled),
+      template_rotation_seed: clean(options.template_rotation_seed) || null,
+      template_rotation_pool_size: asPositiveInteger(options.template_rotation_pool_size, 0),
+      template_rotation_candidate_ids: Array.isArray(options.template_rotation_candidate_ids)
+        ? options.template_rotation_candidate_ids
+        : [],
+      template_rotation_selected_index: Number.isFinite(Number(options.template_rotation_selected_index))
+        ? Number(options.template_rotation_selected_index)
+        : null,
+      selected_template_id: clean(options.selected_template_id || options.template_id) || null,
+      selected_template_source: clean(options.selected_template_source || options.template_source || "supabase") || "supabase",
+      selected_template_language: clean(options.selected_template_language || options.template_language) || null,
+      selected_template_use_case: clean(options.selected_template_use_case || options.template_use_case) || null,
+      selected_template_stage_code: clean(options.selected_template_stage_code || options.template_stage_code) || null,
     },
   };
 
@@ -1399,6 +2003,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
               missing_variables: rendered.missing_variables || [],
               variable_payload_preview: rendered.variable_payload_preview || {},
               selected_template_preview: rendered.selected_template_preview || null,
+              eligible_template_count: Number(rendered.template_rotation?.eligible_template_count || 0),
+              rotation_pool_size: Number(rendered.template_rotation?.rotation_pool_size || 0),
+              rotation_candidate_template_ids: rendered.template_rotation?.rotation_candidate_template_ids || [],
+              selected_template_id:
+                rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
+              rotation_seed: rendered.template_rotation?.seed || null,
+              excluded_recent_template_ids: rendered.template_rotation?.excluded_recent_template_ids || [],
             }
           : {}),
         ..._preview,
@@ -1418,6 +2029,16 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         template_name: rendered.template?.template_name || null,
         template_stage_code: rendered.stage_code || rendered.template?.stage_code || null,
         template_language: rendered.language || rendered.template?.language || null,
+        template_rotation_enabled: Boolean(rendered.template_rotation?.enabled),
+        template_rotation_seed: rendered.template_rotation?.seed || null,
+        template_rotation_pool_size: rendered.template_rotation?.rotation_pool_size || 0,
+        template_rotation_candidate_ids: rendered.template_rotation?.rotation_candidate_template_ids || [],
+        template_rotation_selected_index: rendered.template_rotation?.selected_index ?? null,
+        selected_template_id: rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
+        selected_template_source: rendered.template?.source || "sms_templates",
+        selected_template_language: rendered.language || rendered.template?.language || null,
+        selected_template_use_case: rendered.template_use_case,
+        selected_template_stage_code: rendered.stage_code || rendered.template?.stage_code || null,
         selected_textgrid_number_id: routing.selected.id,
         selected_textgrid_number: routing.selected.phone_number,
         selected_textgrid_market: routing.selected.market,
@@ -1471,6 +2092,9 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       template_name: rendered.template?.template_name || null,
       stage_code: rendered.stage_code || rendered.template?.stage_code || null,
       language: rendered.language || rendered.template?.language || null,
+      template_rotation_enabled: Boolean(rendered.template_rotation?.enabled),
+      template_rotation_pool_size: Number(rendered.template_rotation?.rotation_pool_size || 0),
+      template_rotation_selected_index: Number(rendered.template_rotation?.selected_index ?? -1),
       rendered_message_preview: clean(rendered.rendered_message_body).slice(0, 160),
       dry_run: options.dry_run,
     });

@@ -363,7 +363,7 @@ export async function validateNoDuplicateReply(
 
     const { data: recent_replies, error } = await supabase
       .from("send_queue")
-      .select("id, metadata, created_at, message_body")
+      .select("id, metadata, created_at, message_body, queue_status")
       .eq("metadata->>inbound_message_event_id", event_id)
       .gt("created_at", since_time)
       .order("created_at", { ascending: false })
@@ -375,6 +375,11 @@ export async function validateNoDuplicateReply(
 
     // Check if exact same reply hash exists
     for (const row of replies) {
+      const queue_status = clean(row.queue_status).toLowerCase();
+      if (["cancelled", "blocked"].includes(queue_status)) {
+        continue;
+      }
+
       const row_meta = ensureObject(row.metadata);
       const row_hash = row_meta.reply_hash || "";
 

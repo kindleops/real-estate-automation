@@ -30,15 +30,12 @@ function actionRow(buttons) {
 
 /**
  * Build action buttons for inbound SMS reply card
- * Includes: Approve Template, Manual Reply, Mark Hot, Suppress
- *
- * Encoded in custom_id as: sms_action:{action_type}:{message_event_id}
- * (message_event_id limited to ~60 chars to fit in 100 max)
+ * Uses compact deterministic sr:* button IDs.
  */
 export function buildSmsReplyActionButtons({
   message_event_id = "",
   suggested_reply = "",
-  from_phone_number = "",
+  review_mode = "full",
 } = {}) {
   if (!message_event_id) {
     return []; // No buttons if no event ID
@@ -46,39 +43,78 @@ export function buildSmsReplyActionButtons({
 
   const safe_event_id = String(message_event_id).slice(0, 35);
 
-  const buttons = [
+  if (clean(review_mode) === "manual_only") {
+    return [
+      actionRow([
+        button({
+          label: "Manual Reply",
+          custom_id: `sr:m:${safe_event_id}`,
+          style: STYLE.PRIMARY,
+        }),
+        button({
+          label: "Approve / Send Now",
+          custom_id: `sr:a:${safe_event_id}`,
+          style: STYLE.SUCCESS,
+          disabled: !clean(suggested_reply),
+        }),
+        button({
+          label: "Wrong Number",
+          custom_id: `sr:wn:${safe_event_id}`,
+          style: STYLE.DANGER,
+        }),
+        button({
+          label: "Not Interested",
+          custom_id: `sr:ni:${safe_event_id}`,
+          style: STYLE.SECONDARY,
+        }),
+        button({
+          label: "Opt Out",
+          custom_id: `sr:oo:${safe_event_id}`,
+          style: STYLE.DANGER,
+        }),
+      ]),
+    ];
+  }
+
+  const primary_buttons = [
     button({
-      label: "✅ Approve Template",
-      custom_id: `sms_action:send_suggested:${safe_event_id}`,
+      label: "Approve / Send Now",
+      custom_id: `sr:a:${safe_event_id}`,
       style: STYLE.SUCCESS,
+      disabled: !clean(suggested_reply),
+    }),
+    button({
+      label: "Manual Reply",
+      custom_id: `sr:m:${safe_event_id}`,
+      style: STYLE.PRIMARY,
+    }),
+    button({
+      label: "Cancel Autopilot",
+      custom_id: `sr:c:${safe_event_id}`,
+      style: STYLE.SECONDARY,
+    }),
+    button({
+      label: "Not Interested",
+      custom_id: `sr:ni:${safe_event_id}`,
+      style: STYLE.SECONDARY,
+    }),
+    button({
+      label: "Wrong Number",
+      custom_id: `sr:wn:${safe_event_id}`,
+      style: STYLE.DANGER,
     }),
   ];
 
-  buttons.push(
-    button({
-      label: "✍️ Manual Reply",
-      custom_id: `sms_action:open_modal:${safe_event_id}`,
-      style: STYLE.PRIMARY,
-    })
-  );
-
-  buttons.push(
-    button({
-      label: "🔥 Hot Lead",
-      custom_id: `sms_action:mark_hot:${safe_event_id}`,
-      style: STYLE.SECONDARY,
-    })
-  );
-
-  buttons.push(
-    button({
-      label: "🚫 Suppress",
-      custom_id: `sms_action:suppress:${safe_event_id}`,
-      style: STYLE.DANGER,
-    })
-  );
-
-  return [actionRow(buttons)];
+  return [
+    actionRow(primary_buttons),
+    actionRow([
+      button({
+        label: "Opt Out",
+        custom_id: `sr:oo:${safe_event_id}`,
+        style: STYLE.DANGER,
+      }),
+    ]),
+  ];
 }
 
 /**
@@ -86,26 +122,15 @@ export function buildSmsReplyActionButtons({
  * Includes: Open Podio, Open Context (if available)
  */
 export function buildInboundContextButtons({
-  podio_item_id = "",
-  master_owner_id = "",
+  message_event_id = "",
 } = {}) {
   const buttons = [];
 
-  if (clean(podio_item_id)) {
+  if (clean(message_event_id)) {
     buttons.push(
       button({
-        label: "📋 Open Podio",
-        custom_id: `context:open_podio:${podio_item_id}`,
-        style: STYLE.SECONDARY,
-      })
-    );
-  }
-
-  if (clean(master_owner_id)) {
-    buttons.push(
-      button({
-        label: "🔍 Context",
-        custom_id: `context:load:${master_owner_id}`,
+        label: "Open Record",
+        custom_id: `context:open_record:${String(message_event_id).slice(0, 35)}`,
         style: STYLE.SECONDARY,
       })
     );
@@ -120,21 +145,16 @@ export function buildInboundContextButtons({
 export function buildInboundSmsActionComponents({
   message_event_id = "",
   suggested_reply = "",
-  from_phone_number = "",
-  podio_item_id = "",
-  master_owner_id = "",
+  review_mode = "full",
 } = {}) {
-  const components = [];
-
   const reply_buttons = buildSmsReplyActionButtons({
     message_event_id,
     suggested_reply,
-    from_phone_number,
+    review_mode,
   });
 
   const context_buttons = buildInboundContextButtons({
-    podio_item_id,
-    master_owner_id,
+    message_event_id,
   });
 
   return [...reply_buttons, ...context_buttons];

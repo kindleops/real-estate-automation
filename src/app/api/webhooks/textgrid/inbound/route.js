@@ -916,7 +916,9 @@ export async function POST(request) {
     const result = await runtimeDeps.handleTextgridInboundImpl(payload, {
       inbound_debug_stage,
       dry_run,
-      auto_reply_enabled: asBool(process.env.UNKNOWN_INBOUND_AUTO_REPLY_ENABLED, true),
+      auto_reply_enabled: asBool(process.env.INBOUND_AUTOPILOT_ENABLED, true),
+      auto_post_discord_card: asBool(process.env.INBOUND_AUTOPILOT_POST_DISCORD_CARD, true),
+      auto_reply_delay_seconds: Number.parseInt(process.env.INBOUND_AUTOPILOT_DELAY_SECONDS || "60", 10) || 60,
       inbound_user_initiated: true,
     });
 

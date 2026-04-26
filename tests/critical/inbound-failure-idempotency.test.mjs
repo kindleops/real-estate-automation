@@ -113,7 +113,7 @@ test("message_event_create failure marks idempotency record as failed", async (t
   assert.ok(failedEntry, "idempotency record must be marked as failed after message_event_create failure");
 });
 
-test("conversation_resolution failure marks idempotency record as failed with skip_content_fields", async (t) => {
+test("conversation_resolution failure degrades to manual review and completes idempotency record", async (t) => {
   const ledger = createInMemoryIdempotencyLedger();
   let failCallArgs = null;
 
@@ -135,22 +135,15 @@ test("conversation_resolution failure marks idempotency record as failed with sk
 
   const result = await handleTextgridInboundWebhook(INBOUND_PAYLOAD);
 
-  assert.equal(result.ok, false);
-  assert.equal(result.error, "textgrid_inbound_failed_conversation_resolution");
+  assert.equal(result.ok, true);
+  assert.equal(result.classification?.source, "inbound_review_fallback");
 
-  // failIdempotentProcessing should have been called
-  assert.ok(failCallArgs, "failIdempotentProcessing must be called on conversation_resolution failure");
-
-  // skip_content_fields should be true because logInboundMessageEvent already succeeded
-  assert.equal(
-    failCallArgs.skip_content_fields,
-    true,
-    "skip_content_fields must be true when enrichment already wrote to the record"
-  );
+  // conversation resolution failures now degrade to manual review instead of failing the idempotency record
+  assert.equal(failCallArgs, null);
 
   const entries = [...ledger.records.values()];
-  const failedEntry = entries.find((e) => e.status === "failed");
-  assert.ok(failedEntry, "idempotency record must be marked as failed");
+  const completedEntry = entries.find((e) => e.status === "completed");
+  assert.ok(completedEntry, "idempotency record must be marked as completed after degraded manual-review handling");
 });
 
 test("brain_lookup failure passes skip_content_fields=false since enrichment never happened", async (t) => {
