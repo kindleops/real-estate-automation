@@ -1,5 +1,6 @@
 // ─── handle-textgrid-inbound.js ──────────────────────────────────────────
 import { loadContext } from "@/lib/domain/context/load-context.js";
+import { loadContextWithFallback } from "@/lib/domain/context/load-context-with-fallback.js";
 import { createBrain } from "@/lib/domain/context/resolve-brain.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
@@ -37,6 +38,7 @@ import { info, warn } from "@/lib/logging/logger.js";
 
 const defaultDeps = {
   loadContext,
+  loadContextWithFallback,
   createBrain,
   classify,
   resolveRoute,
@@ -393,8 +395,9 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // ── SEGMENT: brain_lookup ───────────────────────────────────────────────
     let context;
     try {
-      context = await runtimeDeps.loadContext({
+      context = await runtimeDeps.loadContextWithFallback({
         inbound_from,
+        inbound_to,
         create_brain_if_missing: true,
       });
     } catch (err) {
