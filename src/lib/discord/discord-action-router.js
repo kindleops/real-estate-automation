@@ -3340,6 +3340,43 @@ export async function routeDiscordInteraction(interaction) {
         interaction,
       });
     }
+    const campaign_status_match = custom_id.match(/^campaign:(approve_launch|approve|launch|close):(.+)$/);
+    if (campaign_status_match) {
+      const [, action, ck] = campaign_status_match;
+      const is_close = action === "close";
+      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
+        return ephemeralMessage(
+          is_close
+            ? "🚫 Only **Owner** or **SMS Ops** can close a campaign."
+            : "🚫 Only **Owner** or **SMS Ops** can approve a campaign launch."
+        );
+      }
+      const next_status = is_close ? "closed" : "active";
+      try {
+        const db = getDb();
+        const { error } = await db
+          .from("campaign_targets")
+          .update({ status: next_status, updated_at: new Date().toISOString() })
+          .eq("campaign_key", ck);
+        if (error) throw error;
+        return updateMessage(
+          is_close
+            ? `🔒 Campaign \`${ck}\` closed.`
+            : `✅ Campaign \`${ck}\` approved and set to **active**.`
+        );
+      } catch {
+        return updateMessage(
+          is_close
+            ? `⚠️ Could not close campaign \`${ck}\` — check logs or set manually.`
+            : `⚠️ Could not activate campaign \`${ck}\` — check logs or set manually.`
+        );
+      }
+    }
+    if (custom_id.startsWith("campaign:")) {
+      return ephemeralMessage(
+        `⚠️ Unsupported campaign action: \`${custom_id}\`\nThis campaign button is not yet wired. Please report it to **Tech Ops**.`
+      );
+    }
 
     if (custom_id === "territory:create_target") {
       return cinematicMessage({
@@ -3702,44 +3739,6 @@ export async function routeDiscordInteraction(interaction) {
           embeds:           [pause_embed],
           allowed_mentions: { parse: [] },
         });
-      }
-    }
-
-    // ── campaign:approve_launch ──────────────────────────────────────────────
-    if (custom_id.startsWith("campaign:approve_launch:")) {
-      const ck = custom_id.slice("campaign:approve_launch:".length);
-      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
-        return ephemeralMessage("🚫 Only **Owner** or **SMS Ops** can approve a campaign launch.");
-      }
-      try {
-        const db = getDb();
-        const { error } = await db
-          .from("campaign_targets")
-          .update({ status: "active", updated_at: new Date().toISOString() })
-          .eq("campaign_key", ck);
-        if (error) throw error;
-        return updateMessage(`✅ Campaign \`${ck}\` approved and set to **active**.`);
-      } catch {
-        return updateMessage(`⚠️ Could not activate campaign \`${ck}\` — check logs or set manually.`);
-      }
-    }
-
-    // ── campaign:close ───────────────────────────────────────────────────────
-    if (custom_id.startsWith("campaign:close:")) {
-      const ck = custom_id.slice("campaign:close:".length);
-      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
-        return ephemeralMessage("🚫 Only **Owner** or **SMS Ops** can close a campaign.");
-      }
-      try {
-        const db = getDb();
-        const { error } = await db
-          .from("campaign_targets")
-          .update({ status: "closed", updated_at: new Date().toISOString() })
-          .eq("campaign_key", ck);
-        if (error) throw error;
-        return updateMessage(`🔒 Campaign \`${ck}\` closed.`);
-      } catch {
-        return updateMessage(`⚠️ Could not close campaign \`${ck}\` — check logs or set manually.`);
       }
     }
 

@@ -100,17 +100,26 @@ function makeSlashInteraction({
  * tableMap: { [tableName]: { rows?, count?, error? } }
  */
 function makeSupabaseMock(tableMap = {}) {
-  return {
+  const calls = [];
+  const mock = {
+    _calls: calls,
+    getUpdates(table) {
+      return calls.filter((call) => call.type === "update" && call.table === table);
+    },
     from(table) {
       const spec = tableMap[table] ?? {};
       let _count_mode = false;
+      let _pending_write = null;
 
       const chain = {
         select(fields, opts = {}) {
           _count_mode = !!opts?.count;
           return chain;
         },
-        eq:          () => chain,
+        eq:          (column, value) => {
+          if (_pending_write) _pending_write.filters.push({ op: "eq", column, value });
+          return chain;
+        },
         neq:         () => chain,
         gte:         () => chain,
         lte:         () => chain,
@@ -123,9 +132,19 @@ function makeSupabaseMock(tableMap = {}) {
         not:         () => chain,
         range:       () => chain,
         in:          (...a) => chain,
-        upsert:      () => Promise.resolve({ error: spec.error ?? null }),
-        insert:      () => Promise.resolve({ error: spec.error ?? null }),
-        update:      () => chain,
+        upsert:      (row, options) => {
+          calls.push({ type: "upsert", table, row, options });
+          return Promise.resolve({ error: spec.error ?? null });
+        },
+        insert:      (row) => {
+          calls.push({ type: "insert", table, row });
+          return Promise.resolve({ error: spec.error ?? null });
+        },
+        update:      (values) => {
+          _pending_write = { type: "update", table, values, filters: [] };
+          calls.push(_pending_write);
+          return chain;
+        },
         maybeSingle: () => Promise.resolve({ data: spec.rows?.[0] ?? null, error: spec.error ?? null }),
         then(resolve, reject) {
           if (spec.error) {
@@ -140,6 +159,7 @@ function makeSupabaseMock(tableMap = {}) {
       return chain;
     },
   };
+  return mock;
 }
 
 // Suppress audit log and callInternal noise in tests.
@@ -887,56 +907,72 @@ test("/briefing yesterday returns deferred response (type 5)", async () => {
   }
 });
 
-test("campaign:approve_launch button routes without \'Unknown interaction\'", async () => {
-  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key: "dallas_sfr_absentee" }] } });
-  __setActionRouterDeps({ supabase_override: db });
-  try {
-    const interaction = {
-      id: "btn_al", type: 3, token: "btn_token", guild_id: "guild_5678",
-      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
-      data: { custom_id: "campaign:approve_launch:dallas_sfr_absentee" },
-    };
-    const result = await routeDiscordInteraction(interaction);
-    const content = String(result?.data?.content ?? "");
-    assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
-    assert.ok(!content.toLowerCase().includes("unknown interaction type"), "must not return unknown interaction type");
-  } finally {
-    __resetActionRouterDeps();
-  }
-});
+for (const action of ["approve_launch", "approve", "launch"]) {
+  test(`campaign:${action} button sets campaign target active`, async () => {
+    const campaign_key = "dallas_sfr_absentee";
+    const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key }] } });
+    __setActionRouterDeps({ supabase_override: db });
+    try {
+      const interaction = {
+        id: `btn_${action}`, type: 3, token: "btn_token", guild_id: "guild_5678",
+        member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+        data: { custom_id: `campaign:${action}:${campaign_key}` },
+      };
+      const result = await routeDiscordInteraction(interaction);
+      const content = String(result?.data?.content ?? "");
+      assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
+      assert.ok(!content.toLowerCase().includes("unknown interaction type"), "must not return unknown interaction type");
 
-test("campaign:close button routes without \'Unknown interaction\'", async () => {
-  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key: "dallas_sfr_absentee" }] } });
+      const [update] = db.getUpdates("campaign_targets");
+      assert.equal(update?.values?.status, "active", "campaign_targets status must be set active");
+      assert.deepEqual(update?.filters, [
+        { op: "eq", column: "campaign_key", value: campaign_key },
+      ]);
+    } finally {
+      __resetActionRouterDeps();
+    }
+  });
+}
+
+test("campaign:close button sets campaign target closed", async () => {
+  const campaign_key = "dallas_sfr_absentee";
+  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key }] } });
   __setActionRouterDeps({ supabase_override: db });
   try {
     const interaction = {
       id: "btn_close", type: 3, token: "btn_close_token", guild_id: "guild_5678",
       member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
-      data: { custom_id: "campaign:close:dallas_sfr_absentee" },
+      data: { custom_id: `campaign:close:${campaign_key}` },
     };
     const result = await routeDiscordInteraction(interaction);
     const content = String(result?.data?.content ?? "");
     assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
+
+    const [update] = db.getUpdates("campaign_targets");
+    assert.equal(update?.values?.status, "closed", "campaign_targets status must be set closed");
+    assert.deepEqual(update?.filters, [
+      { op: "eq", column: "campaign_key", value: campaign_key },
+    ]);
   } finally {
     __resetActionRouterDeps();
   }
 });
 
-test("unknown button custom_id returns structured ephemeral diagnostic", async () => {
+test("unknown campaign button action returns structured ephemeral diagnostic", async () => {
   const db = makeSupabaseMock({ discord_command_events: {} });
   __setActionRouterDeps({ supabase_override: db });
   try {
     const interaction = {
-      id: "unknown_btn", type: 3, token: "unknown_btn_token", guild_id: "guild_5678",
+      id: "unknown_campaign_btn", type: 3, token: "unknown_campaign_btn_token", guild_id: "guild_5678",
       member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
-      data: { custom_id: "totally:unknown:custom_id_xyz" },
+      data: { custom_id: "campaign:warp:dallas_sfr_absentee" },
     };
     const result = await routeDiscordInteraction(interaction);
     const content = String(result?.data?.content ?? "");
-    assert.ok(content.includes("Unsupported interaction"), "unknown button must return Unsupported interaction: <custom_id>");
-    assert.ok(content.includes("totally:unknown:custom_id_xyz"), "must include the received custom_id");
+    assert.ok(content.includes("Unsupported campaign action"), "unknown campaign button must return a campaign diagnostic");
+    assert.ok(content.includes("campaign:warp:dallas_sfr_absentee"), "must include the received custom_id");
     const flags = result?.data?.flags ?? 0;
-    assert.ok(flags & 64, "unknown button response must be ephemeral");
+    assert.ok(flags & 64, "unknown campaign button response must be ephemeral");
   } finally {
     __resetActionRouterDeps();
   }
