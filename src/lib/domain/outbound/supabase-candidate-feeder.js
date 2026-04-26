@@ -20,6 +20,7 @@ const CANDIDATE_SOURCE_AVAILABLE_HINT = [
 
 const REASON_CODES = Object.freeze({
   NO_MASTER_OWNER: "NO_MASTER_OWNER",
+  NO_BEST_PHONE: "NO_BEST_PHONE",
   NO_PROPERTY: "NO_PROPERTY",
   NO_PHONE: "NO_PHONE",
   NO_VALID_PHONE: "NO_VALID_PHONE",
@@ -209,16 +210,16 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
   const property_id =
     pick(row.property_id, row.property_export_id, row.property_item_id) || null;
   const property_export_id = pick(row.property_export_id) || null;
-  const phone_id =
-    pick(row.phone_id, row.best_phone_id, row.phone_item_id) || null;
+  const best_phone_id = pick(row.best_phone_id) || null;
+  const phone_id = pick(row.best_phone_id, row.phone_id, row.phone_item_id) || null;
   const primary_prospect_id = pick(row.primary_prospect_id) || null;
   const canonical_prospect_id = pick(row.canonical_prospect_id) || null;
 
   const canonical_e164 =
     normalizePhone(
       pick(
-        row.best_phone_e164,
         row.canonical_e164,
+        row.best_phone_e164,
         row.phone,
         row.best_phone,
         row.phone_e164,
@@ -234,12 +235,23 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
     pick(row.state_code, row.property_address_state, row.property_state, row.seller_state, row.state, defaults.state)
   );
   const owner_display_name = clean(pick(row.owner_display_name, row.display_name, row.owner_name));
+  const phone_full_name = clean(pick(row.phone_full_name, row.seller_full_name));
+  const phone_first_name = clean(
+    pick(
+      row.phone_first_name,
+      row.seller_first_name,
+      phone_full_name ? phone_full_name.split(/\s+/).filter(Boolean)[0] : null
+    )
+  );
+  const seller_first_name = clean(pick(row.seller_first_name, row.phone_first_name, phone_first_name));
+  const seller_full_name = clean(pick(row.seller_full_name, row.phone_full_name, phone_full_name));
 
   return {
     raw: row,
     master_owner_id,
     property_id,
     property_export_id,
+    best_phone_id,
     phone_id,
     primary_prospect_id,
     canonical_prospect_id,
@@ -248,6 +260,12 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
     state,
     state_code: state,
     owner_display_name,
+    display_name: owner_display_name,
+    phone_first_name,
+    phone_full_name,
+    seller_first_name,
+    seller_full_name,
+    joined_property_source: clean(pick(row.joined_property_source, row.property_join_source, "master_owner_property_relation")),
     property_address_full: clean(pick(row.property_address_full, row.property_address, row.address, row.title)),
     property_city: clean(pick(row.property_address_city, row.property_city)),
     property_state: state,
@@ -330,10 +348,16 @@ function mapReasonToDiagnosticCounter(reason) {
 function buildCandidateNormalizedPreview(raw, candidate) {
   return {
     raw_keys: Object.keys(raw || {}).slice(0, 50),
+    best_phone_id: candidate.best_phone_id || null,
     normalized_master_owner_id: candidate.master_owner_id,
     normalized_property_id: candidate.property_id,
     normalized_phone_id: candidate.phone_id,
     normalized_phone_e164: candidate.canonical_e164 || null,
+    phone_first_name: candidate.phone_first_name || null,
+    phone_full_name: candidate.phone_full_name || null,
+    seller_first_name: candidate.seller_first_name || null,
+    seller_full_name: candidate.seller_full_name || null,
+    joined_property_source: candidate.joined_property_source || null,
     normalized_market: candidate.market || null,
     normalized_state: candidate.state || null,
   };
@@ -382,12 +406,16 @@ function isLikelyCorporateName(name = "") {
 }
 
 function deriveSellerFirstName(candidate = {}) {
-  const owner_display_name = clean(
-    pick(candidate.owner_display_name, candidate.raw?.display_name, candidate.raw?.owner_display_name)
-  );
-  if (!owner_display_name || isLikelyCorporateName(owner_display_name)) return "";
-  const parts = owner_display_name.split(/\s+/).filter(Boolean);
-  return clean(parts[0]);
+  const explicit_first = clean(pick(candidate.seller_first_name, candidate.phone_first_name));
+  if (explicit_first) return explicit_first;
+
+  const phone_full_name = clean(pick(candidate.seller_full_name, candidate.phone_full_name));
+  if (phone_full_name) {
+    const parts = phone_full_name.split(/\s+/).filter(Boolean);
+    return clean(parts[0]);
+  }
+
+  return "";
 }
 
 function buildTemplateVariablePayload(candidate = {}) {
@@ -399,6 +427,7 @@ function buildTemplateVariablePayload(candidate = {}) {
     seller_first_name: deriveSellerFirstName(candidate),
     owner_display_name,
     owner_name: owner_display_name || candidate.seller_name || "",
+    seller_full_name: clean(pick(candidate.seller_full_name, candidate.phone_full_name)),
     property_address: clean(candidate.property_address_full),
     property_city: clean(candidate.property_city),
     property_state: clean(candidate.property_state || candidate.state),
@@ -669,8 +698,11 @@ export async function evaluateCandidateEligibility(candidate = {}, options = {},
   if (!candidate.property_id) {
     return { ok: false, reason_code: REASON_CODES.NO_PROPERTY, reason: "missing_property_id" };
   }
+  if (!candidate.best_phone_id && !options.allow_phone_fallback) {
+    return { ok: false, reason_code: REASON_CODES.NO_BEST_PHONE, reason: "missing_best_phone_id" };
+  }
   if (!candidate.phone_id) {
-    return { ok: false, reason_code: REASON_CODES.NO_PHONE, reason: "missing_phone_id" };
+    return { ok: false, reason_code: REASON_CODES.NO_VALID_PHONE, reason: "missing_phone_id" };
   }
   if (!candidate.canonical_e164) {
     return { ok: false, reason_code: REASON_CODES.NO_VALID_PHONE, reason: "missing_phone_e164" };
@@ -1057,10 +1089,11 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
 }
 
 export async function createSendQueueItem(candidate = {}, options = {}, deps = {}) {
+  const effective_phone_id = candidate.best_phone_id || candidate.phone_id;
   const idempotency_key = buildIdempotencyKey({
     master_owner_id: candidate.master_owner_id,
     property_id: candidate.property_id,
-    phone_id: candidate.phone_id,
+    phone_id: effective_phone_id,
     template_use_case: options.template_use_case,
     touch_number: candidate.touch_number,
     campaign_session_id: candidate.campaign_session_id,
@@ -1106,6 +1139,7 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
       candidate_snapshot: {
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        best_phone_id: candidate.best_phone_id,
         phone_id: candidate.phone_id,
         canonical_phone_masked: maskPhone(candidate.canonical_e164),
         seller_market: candidate.market,
@@ -1209,6 +1243,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     market: clean(input.market) || null,
     state: clean(input.state) || null,
     routing_safe_only: asBoolean(input.routing_safe_only, true),
+    allow_phone_fallback: asBoolean(input.allow_phone_fallback, false),
     within_contact_window_now: asBoolean(input.within_contact_window_now, true),
     template_use_case: clean(input.template_use_case) || "ownership_check",
     touch_number: asPositiveInteger(input.touch_number, 1),

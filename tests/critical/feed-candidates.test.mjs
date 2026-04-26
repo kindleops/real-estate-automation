@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createSendQueueItem,
   REASON_CODES,
   chooseTextgridNumber,
   evaluateCandidateEligibility,
@@ -35,6 +36,7 @@ function makeCandidate(id = 1, overrides = {}) {
     master_owner_id: `mo_${String(id).padStart(8, "0")}aabbccdd`,
     property_id: String(id + 2100000000),
     property_export_id: `prop_${String(id).padStart(8, "0")}eeff1122`,
+    best_phone_id: `ph_best_${String(id).padStart(8, "0")}11223344`,
     phone_id: `ph_${String(id).padStart(8, "0")}99887766`,
     canonical_e164: `+12085550${String(100 + id).slice(-3)}`,
     market: "houston",
@@ -331,6 +333,7 @@ test("normalizeCandidateRow maps v_sms_ready_contacts columns correctly", () => 
     master_owner_id: "mo_f3c1cbd62c4a654437347dc4",
     property_id: "2100303759",
     property_export_id: "prop_17f5600c6485298d5ccc8743",
+    best_phone_id: "ph_best_00a",
     phone_id: "ph_a5b7789a97742782ff2d595b",
     canonical_e164: "+19197969608",
     market: "Charlotte, NC",
@@ -365,6 +368,140 @@ test("normalizeCandidateRow maps v_sms_ready_contacts columns correctly", () => 
   assert.equal(candidate.priority_tier, "tier_1");
   assert.equal(candidate.sms_eligible, true);
   assert.equal(candidate.state_code, "NC");
+  assert.equal(candidate.best_phone_id, "ph_best_00a");
+  assert.equal(candidate.phone_id, "ph_best_00a");
+});
+
+test("master_owner.best_phone_id is used over other linked phones", () => {
+  const candidate = normalizeCandidateRow({
+    master_owner_id: "mo_x",
+    property_id: "210000001",
+    best_phone_id: "ph_best_abc",
+    phone_id: "ph_other_xyz",
+    canonical_e164: "+19195550111",
+  });
+
+  assert.equal(candidate.best_phone_id, "ph_best_abc");
+  assert.equal(candidate.phone_id, "ph_best_abc");
+});
+
+test("phone_first_name from best phone becomes seller_first_name", () => {
+  const candidate = normalizeCandidateRow({
+    best_phone_id: "ph_best_1",
+    phone_first_name: "Mia",
+    phone_full_name: "Mia Johnson",
+  });
+
+  assert.equal(candidate.seller_first_name, "Mia");
+  assert.equal(candidate.seller_full_name, "Mia Johnson");
+});
+
+test("phone_full_name fallback derives seller_first_name", () => {
+  const candidate = normalizeCandidateRow({
+    best_phone_id: "ph_best_2",
+    phone_full_name: "Carlos Vega",
+  });
+
+  assert.equal(candidate.seller_first_name, "Carlos");
+});
+
+test("corporate owner display_name is not used when best phone name is missing", async () => {
+  const candidate = normalizeCandidateRow({
+    best_phone_id: "ph_best_3",
+    display_name: "Sunrise Property Holdings LLC",
+    property_address_full: "10 Market St",
+    property_address_state: "TX",
+  });
+
+  const rendered = await renderOutboundTemplate(
+    candidate,
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-corp",
+          use_case: "ownership_check",
+          language: "English",
+          is_active: true,
+          template_body: "Hi {seller_first_name}",
+        },
+      ],
+    }
+  );
+
+  assert.equal(rendered.ok, true);
+  assert.equal(rendered.variable_payload_preview.seller_first_name, "");
+});
+
+test("missing best phone skips with NO_BEST_PHONE unless fallback mode enabled", async () => {
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 1,
+      within_contact_window_now: false,
+    },
+    {
+      supabase: makeSupabaseWithCandidates([
+        makeCandidate(501, {
+          best_phone_id: null,
+          phone_id: "ph_other_501",
+          canonical_e164: "+19195550123",
+        }),
+      ]),
+      hasDuplicateQueueItem: async () => false,
+    }
+  );
+
+  assert.equal(result.skipped_count, 1);
+  assert.equal(result.sample_skips[0].reason_code, REASON_CODES.NO_BEST_PHONE);
+});
+
+test("queue key uses best_phone_id when present", async () => {
+  const candidateA = normalizeCandidateRow({
+    master_owner_id: "mo_qk_1",
+    property_id: "2100009999",
+    best_phone_id: "ph_best_A",
+    phone_id: "ph_other_same",
+    canonical_e164: "+19195550999",
+    touch_number: 1,
+    campaign_session_id: "session-qk",
+  });
+  const candidateB = normalizeCandidateRow({
+    master_owner_id: "mo_qk_1",
+    property_id: "2100009999",
+    best_phone_id: "ph_best_B",
+    phone_id: "ph_other_same",
+    canonical_e164: "+19195550999",
+    touch_number: 1,
+    campaign_session_id: "session-qk",
+  });
+
+  const resultA = await createSendQueueItem(
+    candidateA,
+    {
+      dry_run: true,
+      template_use_case: "ownership_check",
+      rendered_message_body: "hello",
+      selected_textgrid_number: "+18325550101",
+      selected_textgrid_number_id: 1,
+      selected_textgrid_market: "Houston, TX",
+    },
+    {}
+  );
+  const resultB = await createSendQueueItem(
+    candidateB,
+    {
+      dry_run: true,
+      template_use_case: "ownership_check",
+      rendered_message_body: "hello",
+      selected_textgrid_number: "+18325550101",
+      selected_textgrid_number_id: 1,
+      selected_textgrid_market: "Houston, TX",
+    },
+    {}
+  );
+
+  assert.notEqual(resultA.queue_key, resultB.queue_key);
 });
 
 test("runSupabaseCandidateFeeder limit=1 fetches at most 10 candidates from source", async () => {
@@ -437,6 +574,12 @@ test("runSupabaseCandidateFeeder dry_run sample_skips include normalized candida
   assert.ok(Array.isArray(skip.candidate_preview.raw_keys));
   assert.ok("normalized_master_owner_id" in skip.candidate_preview);
   assert.ok("normalized_phone_id" in skip.candidate_preview);
+  assert.ok("best_phone_id" in skip.candidate_preview);
+  assert.ok("phone_first_name" in skip.candidate_preview);
+  assert.ok("phone_full_name" in skip.candidate_preview);
+  assert.ok("seller_first_name" in skip.candidate_preview);
+  assert.ok("seller_full_name" in skip.candidate_preview);
+  assert.ok("joined_property_source" in skip.candidate_preview);
 });
 
 test("chooseTextgridNumber routes Inland Empire, CA to Los Angeles via approved regional fallback", async () => {
