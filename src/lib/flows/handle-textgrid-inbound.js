@@ -34,6 +34,8 @@ import {
   hashIdempotencyPayload,
 } from "@/lib/domain/events/idempotency-ledger.js";
 import { findLatestOpenOffer } from "@/lib/podio/apps/offers.js";
+import { handleUnknownInboundRouter } from "@/lib/domain/inbound/unknown-inbound-router.js";
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 import { info, warn } from "@/lib/logging/logger.js";
 
 const defaultDeps = {
@@ -65,6 +67,8 @@ const defaultDeps = {
   failIdempotentProcessing,
   hashIdempotencyPayload,
   findLatestOpenOffer,
+  handleUnknownInboundRouter,
+  notifyDiscordOps,
   info,
   warn,
 };
@@ -261,7 +265,12 @@ function shouldBypassInboundOfferRouting({ classification = null, route = null }
 }
 
 export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
-  const { inbound_debug_stage = null } = opts;
+  const {
+    inbound_debug_stage = null,
+    dry_run = false,
+    auto_reply_enabled = true,
+    inbound_user_initiated = true,
+  } = opts;
 
   if (inbound_debug_stage === "handler_entry") {
     return { ok: true, stage: "handler_entry" };
@@ -411,27 +420,40 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         reason: context?.reason || "unknown",
       });
 
-      const not_found_result = {
-        ok: false,
-        reason: context?.reason || "context_not_found",
-        inbound_from,
-        context,
-      };
+      let unknown_result;
+      try {
+        unknown_result = await runtimeDeps.handleUnknownInboundRouter({
+          message_id: extracted.message_id,
+          inbound_from,
+          inbound_to,
+          message_body,
+          dry_run: Boolean(dry_run),
+          auto_reply_enabled: Boolean(auto_reply_enabled),
+          inbound_user_initiated: Boolean(inbound_user_initiated),
+        });
+      } catch (err) {
+        return failStepAndReturn("textgrid_inbound_failed_unknown_router", err);
+      }
 
       await runtimeDeps.completeIdempotentProcessing({
         record_item_id: idempotency.record_item_id,
         scope: "textgrid_inbound",
         key: idempotency_key,
-        summary: `Inbound SMS ignored: ${not_found_result.reason}`,
+        summary: `Inbound SMS handled by unknown router: ${unknown_result?.unknown_router?.bucket || "unknown"}`,
         metadata: {
           provider_message_id: clean(extracted.message_id) || null,
           inbound_from,
           inbound_to,
-          result_reason: not_found_result.reason,
+          result_reason: context?.reason || "context_not_found",
+          unknown_inbound: true,
+          unknown_bucket: unknown_result?.unknown_router?.bucket || null,
+          auto_reply_queued: Boolean(unknown_result?.unknown_router?.auto_reply_queued),
+          suppression_applied: Boolean(unknown_result?.unknown_router?.suppression_applied),
+          dry_run: Boolean(dry_run),
         },
       });
 
-      return not_found_result;
+      return unknown_result;
     }
 
     let brain_item = context.items?.brain_item || null;
@@ -978,16 +1000,83 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         offer_routing?.offer_route === "underwriting"
           ? offer_routing?.reason || null
           : null,
-      underwriting_transfer_ok: underwriting_transfer?.ok ?? null,
-      underwriting_transfer_item_id: underwriting_transfer?.underwriting_item_id || null,
-      underwriting_follow_up_queued: Boolean(underwriting_follow_up?.queued),
-      underwriting_follow_up_reason: underwriting_follow_up?.reason || null,
+    });
+
+    await runtimeDeps.notifyDiscordOps({
+      event_type: inbound_is_negative ? "inbound_not_lead" : "inbound_known_reply",
+      severity: inbound_is_negative ? "warning" : "info",
+      domain: "inbound",
+      title: inbound_is_negative ? "Inbound Reply (Not Lead)" : "Inbound Reply (Known Contact)",
+      summary: `from=${inbound_from} stage=${route?.stage || "unknown"}`,
+      fields: [
+        { name: "Route Stage", value: route?.stage || "unknown", inline: true },
+        { name: "Use Case", value: route?.use_case || "unknown", inline: true },
+        { name: "Offer Created", value: String(Boolean(maybe_offer?.created)), inline: true },
+      ],
+      metadata: {
+        message_id: extracted.message_id,
+        master_owner_id,
+        prospect_id,
+        property_id,
+      },
+    });
+
+    if (Boolean(maybe_offer?.created) || Boolean(maybe_offer_progress?.updated) || Boolean(contract?.created)) {
+      await runtimeDeps.notifyDiscordOps({
+        event_type: "inbound_hot_lead",
+        severity: "hot",
+        domain: "deal_flow",
+        title: "Inbound Hot Lead Signal",
+        summary: `Inbound advanced deal flow (offer=${Boolean(maybe_offer?.created)}, progress=${Boolean(maybe_offer_progress?.updated)}, contract=${Boolean(contract?.created)})`,
+        fields: [
+          { name: "From", value: inbound_from, inline: true },
+          { name: "Stage", value: route?.stage || "unknown", inline: true },
+          { name: "Property", value: property_address || "n/a", inline: false },
+        ],
+        metadata: {
+          master_owner_id,
+          prospect_id,
+          property_id,
+        },
+      });
+    }
+
+    if (seller_stage_reply?.plan?.selected_use_case === SELLER_FLOW_STAGES.WRONG_PERSON) {
+      await runtimeDeps.notifyDiscordOps({
+        event_type: "wrong_number",
+        severity: "warning",
+        domain: "inbound",
+        title: "Wrong Number Reply",
+        summary: `Known contact indicated wrong person: ${inbound_from}`,
+        metadata: {
+          message_id: extracted.message_id,
+          route_use_case: seller_stage_reply?.plan?.selected_use_case,
+        },
+      });
+    }
+
+    if (seller_stage_reply?.plan?.selected_use_case === SELLER_FLOW_STAGES.STOP_OR_OPT_OUT) {
+      await runtimeDeps.notifyDiscordOps({
+        event_type: "opt_out",
+        severity: "warning",
+        domain: "inbound",
+        title: "Inbound Opt-Out",
+        summary: `Opt-out detected from ${inbound_from}`,
+        metadata: {
+          message_id: extracted.message_id,
+          route_use_case: seller_stage_reply?.plan?.selected_use_case,
+        },
+      });
+    }
+
+    safeInfo("textgrid.inbound_ops_notified", {
+      message_id: extracted.message_id,
+      inbound_from,
+      route_stage: route?.stage || null,
+      inbound_is_negative,
+      offer_created: Boolean(maybe_offer?.created),
+      offer_progressed: Boolean(maybe_offer_progress?.updated),
       contract_created: Boolean(contract?.created),
-      contract_sent: Boolean(contract?.sent),
-      contract_item_id: contract?.contract_item_id || null,
-      contract_reason: contract?.reason || null,
-      pipeline_item_id: pipeline?.pipeline_item_id || null,
-      pipeline_stage: pipeline?.current_stage || null,
     });
 
     const result = {

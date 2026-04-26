@@ -2,6 +2,7 @@ import { runSupabaseCandidateFeeder } from "@/lib/domain/outbound/supabase-candi
 import { child } from "@/lib/logging/logger.js";
 import { captureRouteException } from "@/lib/monitoring/sentry.js";
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 
 const logger = child({ module: "domain.outbound.feed_candidates_request" });
 
@@ -82,7 +83,42 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
     const body = method === "POST" ? await request.json().catch(() => ({})) : {};
     const normalized = normalizeFeedCandidatesInput(mergeBodyAndQuery(request, method, body));
 
+    await notifyDiscordOps({
+      event_type: "feed_candidates_started",
+      severity: "info",
+      domain: "feeder",
+      title: "Feed Candidates Started",
+      summary: `Feeder scan started (limit=${normalized.limit}, scan_limit=${normalized.scan_limit}, dry_run=${normalized.dry_run})`,
+      fields: [
+        { name: "Market", value: normalized.market || "all", inline: true },
+        { name: "State", value: normalized.state || "all", inline: true },
+        { name: "Dry Run", value: String(Boolean(normalized.dry_run)), inline: true },
+      ],
+      dedupe_key: `feed_candidates_started:${normalized.market || "all"}:${normalized.state || "all"}`,
+      throttle_window_seconds: 60,
+    });
+
     const diagnostics = await runSupabaseCandidateFeeder(normalized, options.deps || {});
+
+    await notifyDiscordOps({
+      event_type: diagnostics.ok === false ? "feed_candidates_failed" : "feed_candidates_completed",
+      severity: diagnostics.ok === false ? "error" : "success",
+      domain: "feeder",
+      title: diagnostics.ok === false ? "Feed Candidates Failed" : "Feed Candidates Completed",
+      summary: diagnostics.ok === false
+        ? `Feeder run failed: ${clean(diagnostics?.reason) || "unknown"}`
+        : `Feeder run completed: scanned=${diagnostics.scanned_count || 0}, eligible=${diagnostics.eligible_count || 0}, queued=${diagnostics.queued_count || 0}`,
+      fields: [
+        { name: "Scanned", value: String(diagnostics.scanned_count || 0), inline: true },
+        { name: "Eligible", value: String(diagnostics.eligible_count || 0), inline: true },
+        { name: "Queued", value: String(diagnostics.queued_count || 0), inline: true },
+      ],
+      metadata: {
+        dry_run: Boolean(normalized.dry_run),
+        result: diagnostics,
+      },
+      should_alert_critical: diagnostics.ok === false,
+    });
 
     return json_response(
       {
@@ -100,6 +136,16 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
       route,
       subsystem: "outbound_feeder",
       context: { method },
+    });
+
+    await notifyDiscordOps({
+      event_type: "feed_candidates_failed",
+      severity: "critical",
+      domain: "feeder",
+      title: "Feed Candidates Request Failed",
+      summary: clean(error?.message) || "feed_candidates_failed",
+      metadata: { route, method },
+      should_alert_critical: true,
     });
 
     return json_response(

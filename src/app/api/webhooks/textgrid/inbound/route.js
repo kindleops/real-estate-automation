@@ -43,6 +43,14 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function asBool(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const normalized = clean(value).toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 function serializeForConsole(value) {
   try {
     return JSON.stringify(value, (_key, val) => {
@@ -169,6 +177,15 @@ export async function POST(request) {
     console.log("INBOUND PAYLOAD KEYS", serializeForConsole({ parsed_body_keys }));
 
     const payload = runtimeDeps.normalizeTextgridInboundPayloadImpl(body, request.headers);
+    const request_url = new URL(request.url);
+    const dry_run = asBool(
+      body?.dry_run ??
+      body?.dryRun ??
+      payload?.dry_run ??
+      request_url.searchParams.get("dry_run") ??
+      request_url.searchParams.get("dryRun"),
+      false
+    );
     console.log("INBOUND BODY SOURCE", serializeForConsole({ body_source: payload?.body_source || null }));
     console.log("INBOUND MESSAGE BODY NORMALIZED", serializeForConsole({ message_body: payload?.message_body ?? null }));
     const signature_verification_mode = getTextgridWebhookSignatureMode();
@@ -896,7 +913,12 @@ export async function POST(request) {
       })
     );
 
-    const result = await runtimeDeps.handleTextgridInboundImpl(payload, { inbound_debug_stage });
+    const result = await runtimeDeps.handleTextgridInboundImpl(payload, {
+      inbound_debug_stage,
+      dry_run,
+      auto_reply_enabled: asBool(process.env.UNKNOWN_INBOUND_AUTO_REPLY_ENABLED, true),
+      inbound_user_initiated: true,
+    });
 
     captureSystemEvent("inbound_sms_classified", {
       provider_message_id: payload?.message_id || null,
@@ -969,6 +991,24 @@ export async function POST(request) {
         },
       })
     );
+
+    if (result?.unknown_router && result?.context?.unknown_inbound) {
+      return NextResponse.json(
+        {
+          ok: result?.ok !== false,
+          route: "webhooks/textgrid/inbound",
+          verification: webhook_verification,
+          buyer_handler_failed,
+          context: result.context,
+          unknown_router: result.unknown_router,
+          result,
+        },
+        {
+          status: main_handler_response_status,
+          headers: response_headers,
+        }
+      );
+    }
 
     return NextResponse.json(
       {

@@ -3330,6 +3330,119 @@ export async function routeDiscordInteraction(interaction) {
       return handleQueueRun({ options_array: [{ name: "limit", value: run_limit }], context: ctx });
     }
 
+    // Ops OS button actions from notify-discord-ops
+    if (custom_id.startsWith("ops_action:")) {
+      const [, action, action_arg] = custom_id.split(":");
+
+      if (action === "show_queue_health") {
+        return handleQueueCockpit(ctx);
+      }
+
+      if (action === "run_queue_dry") {
+        if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+          return deniedResponse("Requires **Tech Ops** or **Owner**.");
+        }
+        return handleQueueRun({
+          options_array: [
+            { name: "limit", value: 25 },
+            { name: "dry_run", value: true },
+          ],
+          context: ctx,
+        });
+      }
+
+      if (action === "run_queue_live") {
+        if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+          return deniedResponse("Requires **Tech Ops** or **Owner**.");
+        }
+        return handleQueueRun({ options_array: [{ name: "limit", value: 25 }], context: ctx });
+      }
+
+      if (action === "sync_podio") {
+        if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+          return deniedResponse("Requires **Tech Ops** or **Owner**.");
+        }
+        return handleSyncPodio({ options_array: [], context: ctx });
+      }
+
+      if (action === "approve_campaign" && action_arg) {
+        return routeDiscordInteraction({
+          ...interaction,
+          data: {
+            ...(interaction?.data || {}),
+            custom_id: `approval:campaign_scale:${action_arg}`,
+          },
+        });
+      }
+
+      if (action === "reject_campaign" && action_arg) {
+        return routeDiscordInteraction({
+          ...interaction,
+          data: {
+            ...(interaction?.data || {}),
+            custom_id: `approval:hold:${action_arg}`,
+          },
+        });
+      }
+
+      return updateMessage(`⚠️ Action not wired yet: ${action || "unknown"}`);
+    }
+
+    // SMS reply action buttons (inbound alert cards)
+    // custom_id format: sms_action:{action_type}:{message_event_id}
+    if (custom_id.startsWith("sms_action:")) {
+      const [, action, message_event_id] = custom_id.split(":");
+
+      // Import handlers
+      const {
+        handleOpenSmsReplyModal,
+        handleSendSuggestedSmsReply,
+        handleManualSmsReply,
+        handleSuppressNumber,
+        handleMarkHotLead,
+      } = await import("@/lib/discord/discord-action-handlers/handle-sms-reply.js").catch(() => ({}));
+
+      if (action === "open_modal" && handleOpenSmsReplyModal) {
+        return await handleOpenSmsReplyModal({
+          interaction,
+          message_event_id,
+        });
+      }
+
+      if (action === "send_suggested" && handleSendSuggestedSmsReply) {
+        // Fetch suggested reply from context/metadata if available
+        return await handleSendSuggestedSmsReply({
+          interaction,
+          message_event_id,
+          suggested_reply: interaction?.data?.suggested_reply || "",
+          discord_user_id: ctx.user_id,
+          channel_id: ctx.channel_id,
+          message_id: interaction?.message?.id,
+        });
+      }
+
+      if (action === "suppress" && handleSuppressNumber) {
+        return await handleSuppressNumber({
+          interaction,
+          message_event_id,
+          from_phone_number: interaction?.data?.from_phone || "",
+          discord_user_id: ctx.user_id,
+          channel_id: ctx.channel_id,
+        });
+      }
+
+      if (action === "mark_hot" && handleMarkHotLead) {
+        return await handleMarkHotLead({
+          interaction,
+          message_event_id,
+          discord_user_id: ctx.user_id,
+          channel_id: ctx.channel_id,
+        });
+      }
+
+      return updateMessage(`⚠️ SMS action not wired yet: ${action || "unknown"}`);
+    }
+
     // Briefing quick-action buttons
     if (custom_id === "briefing:refresh") {
       return handleBriefingToday({ options_array: [], context: ctx, interaction });
@@ -3561,7 +3674,58 @@ export async function routeDiscordInteraction(interaction) {
       }
     }
 
-    return updateMessage("⚠️ Unknown button interaction.");
+  // ── MODAL_SUBMIT (form submission) ────────────────────────────────────────
+  if (interaction.type === 5) {
+    const modal_custom_id = String(interaction?.data?.custom_id ?? "");
+
+    // SMS reply modal submission
+    if (modal_custom_id.startsWith("sms_reply_modal:")) {
+      const { handleSubmitSmsReplyModal } = await import(
+        "@/lib/discord/discord-action-handlers/handle-sms-reply.js"
+      ).catch(() => ({}));
+
+      if (handleSubmitSmsReplyModal) {
+        const result = await handleSubmitSmsReplyModal({
+          interaction,
+          discord_user_id: context.user_id,
+          channel_id: context.channel_id,
+          message_id: interaction?.message?.id,
+        });
+
+        if (result?.bridge_endpoint) {
+          // Bridge to endpoint
+          try {
+            const bridge_response = await callInternal(
+              result.bridge_endpoint,
+              {
+                method: result.method || "POST",
+                body: result.bridge_payload,
+              }
+            );
+
+            if (bridge_response?.ok) {
+              return updateMessage(
+                `✅ Reply queued to ${(
+                  bridge_response?.to_phone_number || ""
+                ).slice(-4).padStart(4, "*")}`
+              );
+            } else {
+              return updateMessage(
+                `🚫 Reply blocked: ${bridge_response?.message || "Unknown reason"}`
+              );
+            }
+          } catch (err) {
+            return updateMessage(`❌ Error queuing reply: ${err?.message}`);
+          }
+        }
+
+        return result;
+      }
+
+      return updateMessage("⚠️ Modal handler not available.");
+    }
+
+    return updateMessage("⚠️ Unknown modal interaction.");
   }
 
   // ── APPLICATION_COMMAND (slash command) ───────────────────────────────────
@@ -3954,6 +4118,28 @@ export async function routeDiscordInteraction(interaction) {
 
     // ── /briefing ─────────────────────────────────────────────────────────────
     } else if (command_name === "briefing") {
+          // ── /reply-sms ────────────────────────────────────────────────────────────
+          } else if (command_name === "reply-sms") {
+            if (!checkPermission(role_ids, ["owner", "sms_ops"])) {
+              response = deniedResponse("Requires **SMS Ops** or **Owner**.");
+            } else {
+              const { handleReplySmsCommand } = await import(
+                "@/lib/discord/discord-slash-commands/reply-sms-command.js"
+              ).catch(() => ({}));
+
+              if (handleReplySmsCommand) {
+                const cmd_opts = {};
+                for (const opt of sub_opts) {
+                  cmd_opts[opt.name] = opt.value;
+                }
+                response = await handleReplySmsCommand(context, cmd_opts);
+              } else {
+                response = errorResponse("Reply command handler not available.");
+              }
+            }
+
+          // ── /briefing ─────────────────────────────────────────────────────────────
+          } else if (command_name === "briefing") {
       if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops", "closings", "acquisitions"])) {
         response = deniedResponse("Requires **Owner**, **Tech Ops**, **SMS Ops**, **Closings**, or **Acquisitions**.");
       } else if (sub_name === "today") {

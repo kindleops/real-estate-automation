@@ -1,3 +1,5 @@
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -80,6 +82,20 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       scope_reason: "supabase_queue_runner",
     });
 
+    await notifyDiscordOps({
+      event_type: "queue_run_started",
+      severity: "info",
+      domain: "queue",
+      title: "Queue Run Started",
+      summary: `Queue run started (limit=${limit}, dry_run=${dry_run})`,
+      fields: [
+        { name: "Limit", value: String(limit), inline: true },
+        { name: "Dry Run", value: String(Boolean(dry_run)), inline: true },
+      ],
+      dedupe_key: `queue_run_started:${dry_run ? "dry" : "live"}`,
+      throttle_window_seconds: 60,
+    });
+
     const result = await run_send_queue({
       limit,
       dry_run,
@@ -121,6 +137,23 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       due_rows: result?.due_rows ?? null,
       future_rows: result?.future_rows ?? null,
       total_rows_loaded: result?.total_rows_loaded ?? null,
+    });
+
+    await notifyDiscordOps({
+      event_type: result?.ok === false ? "queue_run_failed" : "queue_run_completed",
+      severity: result?.ok === false || (result?.failed_count || 0) > 0 ? "error" : "success",
+      domain: "queue",
+      title: result?.ok === false ? "Queue Run Failed" : "Queue Run Completed",
+      summary: result?.ok === false
+        ? clean(result?.reason) || "queue_run_failed"
+        : `Queue run completed: sent=${result?.sent_count || 0}, failed=${result?.failed_count || 0}, blocked=${result?.blocked_count || 0}`,
+      fields: [
+        { name: "Sent", value: String(result?.sent_count || 0), inline: true },
+        { name: "Failed", value: String(result?.failed_count || 0), inline: true },
+        { name: "Blocked", value: String(result?.blocked_count || 0), inline: true },
+      ],
+      metadata: { result },
+      should_alert_critical: result?.ok === false || (result?.failed_count || 0) > 0,
     });
 
     return json_response(
@@ -179,6 +212,16 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
         { status: 200 }
       );
     }
+
+    await notifyDiscordOps({
+      event_type: "queue_run_failed",
+      severity: "critical",
+      domain: "queue",
+      title: "Queue Run Request Failed",
+      summary: diagnostics.message,
+      metadata: diagnostics,
+      should_alert_critical: true,
+    });
 
     return json_response(
       {

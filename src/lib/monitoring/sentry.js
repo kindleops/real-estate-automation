@@ -13,6 +13,7 @@
 
 import * as Sentry from "@sentry/nextjs";
 import { sendSystemErrorAlert } from "@/lib/alerts/discord.js";
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 
 // ---------------------------------------------------------------------------
 // Dependency injection (for tests)
@@ -71,6 +72,21 @@ export function captureRouteException(error, { route, subsystem, context } = {})
     timestamp: new Date().toISOString(),
     footer: { text: subsystem || route || "sentry" },
   });
+
+  // Best-effort Discord Ops OS routing; never blocks primary error handling.
+  notifyDiscordOps({
+    event_type: "sentry_error",
+    severity: "critical",
+    domain: "sentry",
+    title: "Sentry Route Exception",
+    summary: (error?.message || String(error)).slice(0, 240),
+    fields: [
+      ...(route ? [{ name: "Route", value: String(route), inline: true }] : []),
+      ...(subsystem ? [{ name: "Subsystem", value: String(subsystem), inline: true }] : []),
+    ],
+    metadata: context || {},
+    should_alert_critical: true,
+  }).catch(() => {});
 }
 
 /**

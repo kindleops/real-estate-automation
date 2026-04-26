@@ -35,6 +35,7 @@ import {
 import { updateMessageEventStatus } from "@/lib/domain/events/update-message-event-status.js";
 import { updateBrainAfterDelivery } from "@/lib/domain/brain/update-brain-after-delivery.js";
 import { info, warn } from "@/lib/logging/logger.js";
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 import { normalizeTextgridDeliveryPayload } from "@/lib/webhooks/textgrid-delivery-normalize.js";
 
 const QUEUE_FIELDS = {
@@ -75,6 +76,7 @@ const defaultDeps = {
   // logDeliveryEvent removed — delivery callbacks update existing events only
   updateMessageEventStatus,
   updateBrainAfterDelivery,
+  notifyDiscordOps,
   info,
   warn,
 };
@@ -807,6 +809,27 @@ export async function handleTextgridDeliveryWebhook(payload = {}) {
       results,
       idempotency_key,
     };
+
+    await runtimeDeps.notifyDiscordOps({
+      event_type: normalized_state === "Delivered" ? "sms_delivered" : normalized_state === "Failed" ? "sms_failed" : "debug_log",
+      severity: normalized_state === "Failed" ? "warning" : "info",
+      domain: "textgrid",
+      title: `TextGrid Delivery ${normalized_state}`,
+      summary: `message_id=${extracted.message_id || "n/a"} status=${extracted.status || "n/a"}`,
+      fields: [
+        { name: "From", value: extracted.from || "n/a", inline: true },
+        { name: "To", value: extracted.to || "n/a", inline: true },
+        { name: "Matched Events", value: String(linked_events.length), inline: true },
+      ],
+      metadata: {
+        normalized_state,
+        failure_bucket,
+        correlation_mode,
+      },
+      should_alert_critical: normalized_state === "Failed" && linked_events.length === 0,
+      dedupe_key: extracted.message_id ? `delivery:${extracted.message_id}:${normalized_state}` : null,
+      throttle_window_seconds: 300,
+    });
 
     return result;
   } catch (error) {

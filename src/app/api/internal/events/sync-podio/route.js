@@ -10,6 +10,7 @@ import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
 import { syncSupabaseMessageEventsToPodio } from "@/lib/domain/events/sync-supabase-message-events-to-podio.js";
 import { captureRouteException } from "@/lib/monitoring/sentry.js";
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -88,6 +89,21 @@ async function handle(request) {
       method: request.method,
     });
 
+    await notifyDiscordOps({
+      event_type: result?.failed_count > 0 ? "podio_sync_failed" : "podio_sync_success",
+      severity: result?.failed_count > 0 ? "warning" : "success",
+      domain: "podio",
+      title: result?.failed_count > 0 ? "Podio Sync Completed With Failures" : "Podio Sync Completed",
+      summary: `loaded=${result.loaded_count || 0}, synced=${result.synced_count || 0}, failed=${result.failed_count || 0}`,
+      fields: [
+        { name: "Loaded", value: String(result.loaded_count || 0), inline: true },
+        { name: "Synced", value: String(result.synced_count || 0), inline: true },
+        { name: "Failed", value: String(result.failed_count || 0), inline: true },
+      ],
+      metadata: { method: request.method, limit },
+      should_alert_critical: (result?.failed_count || 0) > 0,
+    });
+
     return NextResponse.json({ ok: true, ...result }, { status: 200 });
   } catch (err) {
     if (isPodioRateLimitError(err)) {
@@ -104,6 +120,16 @@ async function handle(request) {
     captureRouteException(err, {
       route: "internal/events/sync-podio",
       subsystem: "podio_sync",
+    });
+
+    await notifyDiscordOps({
+      event_type: "podio_sync_failed",
+      severity: "critical",
+      domain: "podio",
+      title: "Podio Sync Failed",
+      summary: err?.message || "podio_sync_failed",
+      metadata: { error: serializePodioError(err) },
+      should_alert_critical: true,
     });
 
     return NextResponse.json(
