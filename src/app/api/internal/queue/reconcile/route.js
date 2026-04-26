@@ -9,6 +9,7 @@ import {
 } from "@/lib/providers/podio.js";
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import { runQueueReconcileRunner } from "@/lib/workers/queue-reconcile-runner.js";
+import { reconcileSupabaseDeliveryStatuses } from "@/lib/domain/events/normalize-delivery-status.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,6 +66,13 @@ export async function GET(request) {
       master_owner_id: master_owner_scope.effective_id,
     });
 
+    const supabase_delivery_result = await reconcileSupabaseDeliveryStatuses({
+      limit,
+    }).catch((err) => {
+      logger.warn("queue_reconcile.supabase_delivery_reconcile_failed", { error: err?.message });
+      return { ok: false, total_normalized: 0 };
+    });
+
     logger.info("queue_reconcile.completed", {
       method: "GET",
       ok: result?.ok !== false,
@@ -82,6 +90,7 @@ export async function GET(request) {
         ok: result?.ok !== false,
         route: "internal/queue/reconcile",
         result,
+        supabase_delivery_reconcile: supabase_delivery_result,
       },
       { status: statusForResult(result) }
     );
@@ -165,6 +174,13 @@ export async function POST(request) {
       master_owner_id: master_owner_scope.effective_id,
     });
 
+    const supabase_delivery_result = await reconcileSupabaseDeliveryStatuses({
+      limit,
+    }).catch((err) => {
+      logger.warn("queue_reconcile.supabase_delivery_reconcile_failed", { error: err?.message });
+      return { ok: false, total_normalized: 0 };
+    });
+
     logger.info("queue_reconcile.completed", {
       method: "POST",
       ok: result?.ok !== false,
@@ -182,6 +198,7 @@ export async function POST(request) {
         ok: result?.ok !== false,
         route: "internal/queue/reconcile",
         result,
+        supabase_delivery_reconcile: supabase_delivery_result,
       },
       { status: statusForResult(result) }
     );
