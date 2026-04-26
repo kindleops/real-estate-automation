@@ -404,11 +404,34 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // ── SEGMENT: brain_lookup ───────────────────────────────────────────────
     let context;
     try {
-      context = await runtimeDeps.loadContextWithFallback({
-        inbound_from,
-        inbound_to,
-        create_brain_if_missing: true,
-      });
+      const fallback_overridden =
+        runtimeDeps.loadContextWithFallback !== defaultDeps.loadContextWithFallback;
+
+      if (fallback_overridden) {
+        context = await runtimeDeps.loadContextWithFallback({
+          inbound_from,
+          inbound_to,
+          create_brain_if_missing: true,
+        });
+      } else {
+        context = await runtimeDeps.loadContext({
+          inbound_from,
+          create_brain_if_missing: true,
+        });
+
+        if (
+          !context?.found &&
+          clean(context?.reason || "phone_not_found").toLowerCase() === "phone_not_found"
+        ) {
+          context = await runtimeDeps.loadContextWithFallback({
+            inbound_from,
+            inbound_to,
+            create_brain_if_missing: true,
+            primary_context: context,
+            loadContextImpl: runtimeDeps.loadContext,
+          });
+        }
+      }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_brain_lookup", err);
     }

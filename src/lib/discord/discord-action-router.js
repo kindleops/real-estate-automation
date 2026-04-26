@@ -1433,7 +1433,38 @@ async function handleHotleads({ options_array, context }) {
 
 async function handleAlertsMode({ options_array, context }) {
   const mode = String(getOption(options_array, "mode") ?? "").trim().toLowerCase();
-  if (!mode) return errorResponse("mode is required (e.g. normal, quiet, verbose).");
+  if (!mode) {
+    // No mode provided — show current mode and a selector.
+    const db = getDb();
+    let current_mode = "normal";
+    try {
+      const { data } = await db
+        .from("app_config")
+        .select("value")
+        .eq("key", "alert_mode")
+        .limit(1)
+        .maybeSingle();
+      if (data?.value) current_mode = String(data.value);
+    } catch { /* non-fatal */ }
+    return cinematicMessage({
+      embeds: [{
+        title:       "Alerts Mode",
+        description: `Current mode: **${current_mode}**\n\nSelect a mode using the buttons below or \`/alerts mode:{normal|quiet|verbose}\`.`,
+        color:       0x5865F2,
+      }],
+      components: [
+        {
+          type: 1,
+          components: [
+            { type: 2, style: 1, label: "Normal",  custom_id: "alerts:mode:normal",  disabled: false },
+            { type: 2, style: 2, label: "Quiet",   custom_id: "alerts:mode:quiet",   disabled: false },
+            { type: 2, style: 2, label: "Verbose", custom_id: "alerts:mode:verbose", disabled: false },
+          ],
+        },
+      ],
+      ephemeral: true,
+    });
+  }
 
   const db = getDb();
 
@@ -3410,11 +3441,11 @@ export async function routeDiscordInteraction(interaction) {
       }
 
       if (action === "send_suggested" && handleSendSuggestedSmsReply) {
-        // Fetch suggested reply from context/metadata if available
+        // Approve template-based reply by message_event_id; endpoint performs selection/render.
         return await handleSendSuggestedSmsReply({
           interaction,
           message_event_id,
-          suggested_reply: interaction?.data?.suggested_reply || "",
+          template_id: interaction?.data?.template_id || "",
           discord_user_id: ctx.user_id,
           channel_id: ctx.channel_id,
           message_id: interaction?.message?.id,
@@ -3673,6 +3704,101 @@ export async function routeDiscordInteraction(interaction) {
         });
       }
     }
+
+    // ── campaign:approve_launch ──────────────────────────────────────────────
+    if (custom_id.startsWith("campaign:approve_launch:")) {
+      const ck = custom_id.slice("campaign:approve_launch:".length);
+      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
+        return ephemeralMessage("🚫 Only **Owner** or **SMS Ops** can approve a campaign launch.");
+      }
+      try {
+        const db = getDb();
+        const { error } = await db
+          .from("campaign_targets")
+          .update({ status: "active", updated_at: new Date().toISOString() })
+          .eq("campaign_key", ck);
+        if (error) throw error;
+        return updateMessage(`✅ Campaign \`${ck}\` approved and set to **active**.`);
+      } catch {
+        return updateMessage(`⚠️ Could not activate campaign \`${ck}\` — check logs or set manually.`);
+      }
+    }
+
+    // ── campaign:close ───────────────────────────────────────────────────────
+    if (custom_id.startsWith("campaign:close:")) {
+      const ck = custom_id.slice("campaign:close:".length);
+      if (!checkPermission(ctx.role_ids, ["owner", "sms_ops"])) {
+        return ephemeralMessage("🚫 Only **Owner** or **SMS Ops** can close a campaign.");
+      }
+      try {
+        const db = getDb();
+        const { error } = await db
+          .from("campaign_targets")
+          .update({ status: "closed", updated_at: new Date().toISOString() })
+          .eq("campaign_key", ck);
+        if (error) throw error;
+        return updateMessage(`🔒 Campaign \`${ck}\` closed.`);
+      } catch {
+        return updateMessage(`⚠️ Could not close campaign \`${ck}\` — check logs or set manually.`);
+      }
+    }
+
+    // ── alerts mode buttons ───────────────────────────────────────────────────
+    if (custom_id.startsWith("alerts:mode:")) {
+      const mode = custom_id.slice("alerts:mode:".length);
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return ephemeralMessage("🚫 Requires **Tech Ops** or **Owner**.");
+      }
+      return handleAlertsMode({ options_array: [{ name: "mode", value: mode }], context: ctx });
+    }
+
+    // ── morning check-in buttons ───────────────────────────────────────────
+    if (custom_id.startsWith("checkin:")) {
+      const action = custom_id.slice("checkin:".length);
+      if (action === "review_hot_leads") {
+        return handleHotleads({ options_array: [], context: ctx });
+      }
+      if (action === "run_feeder_dry_run") {
+        return handleFeederScan({ options_array: [{ name: "limit", value: 10 }], context: ctx, interaction });
+      }
+      if (action === "scale_winning_campaign") {
+        return cinematicMessage({
+          embeds: [buildSuccessEmbed({ title: "Scale Campaign", description: "Use `/campaign scale` with a campaign key to increase the daily cap." })],
+          ephemeral: true,
+        });
+      }
+      if (action === "hold_outreach") {
+        return cinematicMessage({
+          embeds: [buildSuccessEmbed({ title: "Hold Outreach Today", description: "Post a `/queue status` check and set campaigns to paused via `/campaign pause` to hold outreach for today." })],
+          ephemeral: true,
+        });
+      }
+      if (action === "approve_suggested_move") {
+        return cinematicMessage({
+          embeds: [buildSuccessEmbed({ title: "Approve Suggested Move", description: "Review the recommended next moves above and use the appropriate command to execute." })],
+          ephemeral: true,
+        });
+      }
+      return ephemeralMessage(`⚠️ Unknown check-in action: \`${action}\``);
+    }
+
+    // ── Unknown button — structured diagnostic ephemeral ─────────────────────
+    warn("discord.button.unknown_custom_id", { custom_id, user_id: ctx.user_id });
+    try {
+      await supabase.from("discord_command_events").insert({
+        created_at:     new Date().toISOString(),
+        guild_id:       ctx.guild_id,
+        channel_id:     ctx.channel_id,
+        user_id:        ctx.user_id,
+        username:       ctx.username,
+        command_name:   "button",
+        subcommand:     custom_id,
+        action_outcome: "unknown_button",
+        result_summary: null,
+      });
+    } catch { /* non-fatal */ }
+    return ephemeralMessage(`⚠️ Unsupported interaction: \`${custom_id}\`\nThis button is not yet wired. Please report it to **Tech Ops**.`);
+  }
 
   // ── MODAL_SUBMIT (form submission) ────────────────────────────────────────
   if (interaction.type === 5) {
@@ -4118,28 +4244,6 @@ export async function routeDiscordInteraction(interaction) {
 
     // ── /briefing ─────────────────────────────────────────────────────────────
     } else if (command_name === "briefing") {
-          // ── /reply-sms ────────────────────────────────────────────────────────────
-          } else if (command_name === "reply-sms") {
-            if (!checkPermission(role_ids, ["owner", "sms_ops"])) {
-              response = deniedResponse("Requires **SMS Ops** or **Owner**.");
-            } else {
-              const { handleReplySmsCommand } = await import(
-                "@/lib/discord/discord-slash-commands/reply-sms-command.js"
-              ).catch(() => ({}));
-
-              if (handleReplySmsCommand) {
-                const cmd_opts = {};
-                for (const opt of sub_opts) {
-                  cmd_opts[opt.name] = opt.value;
-                }
-                response = await handleReplySmsCommand(context, cmd_opts);
-              } else {
-                response = errorResponse("Reply command handler not available.");
-              }
-            }
-
-          // ── /briefing ─────────────────────────────────────────────────────────────
-          } else if (command_name === "briefing") {
       if (!checkPermission(role_ids, ["owner", "tech_ops", "sms_ops", "closings", "acquisitions"])) {
         response = deniedResponse("Requires **Owner**, **Tech Ops**, **SMS Ops**, **Closings**, or **Acquisitions**.");
       } else if (sub_name === "today") {
@@ -4154,6 +4258,26 @@ export async function routeDiscordInteraction(interaction) {
         response = handleBriefingAgent({ options_array: sub_opts, context, interaction });
       } else {
         response = errorResponse(`Unknown /briefing subcommand: ${sub_name}`);
+      }
+
+    // ── /reply-sms ────────────────────────────────────────────────────────────
+    } else if (command_name === "reply-sms") {
+      if (!checkPermission(role_ids, ["owner", "sms_ops"])) {
+        response = deniedResponse("Requires **SMS Ops** or **Owner**.");
+      } else {
+        const { handleReplySmsCommand } = await import(
+          "@/lib/discord/discord-slash-commands/reply-sms-command.js"
+        ).catch(() => ({}));
+
+        if (handleReplySmsCommand) {
+          const cmd_opts = {};
+          for (const opt of sub_opts) {
+            cmd_opts[opt.name] = opt.value;
+          }
+          response = await handleReplySmsCommand(context, cmd_opts);
+        } else {
+          response = errorResponse("Reply command handler not available.");
+        }
       }
 
     } else {

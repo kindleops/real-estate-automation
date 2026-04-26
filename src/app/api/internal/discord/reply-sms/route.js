@@ -2,17 +2,19 @@
  * Discord SMS Reply Endpoint
  * POST /api/internal/discord/reply-sms
  *
- * Receives Discord reply request, validates safety, queues through send_queue
+ * Resolves reply content by reply_mode (auto_template | template | manual),
+ * validates safety, then queues through send_queue.
  */
 
 import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
+
 import { child } from "@/lib/logging/logger.js";
 import { captureRouteException } from "@/lib/monitoring/sentry.js";
-import { getDefaultSupabaseClient } from "@/lib/supabase/default-client.js";
-import { requireInternalSecret } from "@/lib/security/internal-secret.js";
+import supabaseClient from "@/lib/supabase/client.js";
 import {
   runReplySmsSafetyChecks,
-  generateReplyHash,
+  validateInboundMessageEvent,
 } from "@/lib/discord/reply-sms-safety-checks.js";
 import {
   auditReplyQueued,
@@ -21,40 +23,473 @@ import {
 import { normalizePhone } from "@/lib/utils/phones.js";
 import { clean } from "@/lib/utils/strings.js";
 import { nowIso } from "@/lib/utils/dates.js";
+import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
+import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
+import { classify } from "@/lib/domain/classification/classify.js";
+import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
+import { mapNextAction, ACTIONS } from "@/lib/sms/flow_map.js";
+import { loadTemplate } from "@/lib/domain/templates/load-template.js";
+import { personalizeTemplate } from "@/lib/sms/personalize_template.js";
+import { prepareRenderedSmsForQueue } from "@/lib/sms/sanitize.js";
+
+const logger = child({ module: "api.internal.discord.reply_sms" });
+const SEND_QUEUE_TABLE = "send_queue";
+const REPLY_MODES = new Set(["auto_template", "template", "manual"]);
 
 function ensureObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-import { v4 as uuid } from "uuid";
-import { linkMessageEventToBrain } from "@/lib/domain/brain/link-message-event-to-brain.js";
-import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 
-const logger = child({ module: "api.internal.discord.reply_sms" });
-const SEND_QUEUE_TABLE = "send_queue";
-
-function ensureObject(value) {
-  if (typeof value === "object" && value !== null) return value;
-  return {};
+function normalizeReplyMode(value) {
+  const mode = clean(value).toLowerCase();
+  return REPLY_MODES.has(mode) ? mode : "auto_template";
 }
 
-/**
- * Insert queued reply into send_queue
- */
+function requireInternalSecret(request) {
+  const expected = process.env.INTERNAL_API_SECRET || "";
+  const provided =
+    request.headers.get("x-internal-api-secret") ||
+    request.headers.get("x-api-secret") ||
+    "";
+
+  if (!expected || provided !== expected) {
+    return {
+      ok: false,
+      error: "invalid_internal_api_secret_token",
+      status: 401,
+    };
+  }
+
+  return { ok: true };
+}
+
+function resolveInboundSeedMessage(inbound_event = {}) {
+  const metadata = ensureObject(inbound_event.metadata);
+  return (
+    clean(inbound_event.message_body) ||
+    clean(inbound_event.message_text) ||
+    clean(metadata.message_text) ||
+    clean(metadata.inbound_message_text) ||
+    clean(metadata.inbound_text) ||
+    ""
+  );
+}
+
+function buildTemplateRenderContext(inbound_event = {}) {
+  const metadata = ensureObject(inbound_event.metadata);
+  const summary = ensureObject(metadata.summary);
+
+  return {
+    seller_first_name:
+      clean(summary.seller_first_name) ||
+      clean(metadata.seller_first_name) ||
+      clean(metadata.owner_first_name) ||
+      "",
+    agent_name:
+      clean(summary.agent_name) ||
+      clean(metadata.agent_name) ||
+      clean(process.env.SMS_AGENT_NAME) ||
+      "",
+    property_address:
+      clean(summary.property_address) ||
+      clean(metadata.property_address) ||
+      "",
+    property_city:
+      clean(summary.property_city) ||
+      clean(metadata.property_city) ||
+      "",
+    city:
+      clean(summary.property_city) ||
+      clean(metadata.property_city) ||
+      "",
+    offer_price:
+      summary.offer_price ?? metadata.offer_price ?? metadata.smart_cash_offer_display ?? null,
+    repair_cost:
+      summary.repair_cost ?? metadata.repair_cost ?? metadata.estimated_repair_cost ?? null,
+    unit_count:
+      summary.unit_count ?? metadata.unit_count ?? null,
+  };
+}
+
+function previewText(value, max = 120) {
+  return clean(value).slice(0, max);
+}
+
+async function fetchTemplateById(template_id = "", supabase = null) {
+  const wanted = clean(template_id);
+  if (!wanted || !supabase) return null;
+
+  const select_fields = [
+    "id",
+    "template_id",
+    "podio_template_id",
+    "template_name",
+    "template_body",
+    "use_case",
+    "stage_code",
+    "language",
+    "is_active",
+    "metadata",
+  ].join(",");
+
+  const by_id = await supabase
+    .from("sms_templates")
+    .select(select_fields)
+    .eq("id", wanted)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (!by_id?.error && by_id?.data) {
+    return {
+      ...by_id.data,
+      source: "supabase_sms_templates",
+      template_resolution_source: "supabase_sms_templates",
+      item_id: by_id.data.template_id || by_id.data.id,
+      text: clean(by_id.data.template_body),
+      template_text: clean(by_id.data.template_body),
+    };
+  }
+
+  const by_template_id = await supabase
+    .from("sms_templates")
+    .select(select_fields)
+    .eq("template_id", wanted)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (!by_template_id?.error && by_template_id?.data) {
+    return {
+      ...by_template_id.data,
+      source: "supabase_sms_templates",
+      template_resolution_source: "supabase_sms_templates",
+      item_id: by_template_id.data.template_id || by_template_id.data.id,
+      text: clean(by_template_id.data.template_body),
+      template_text: clean(by_template_id.data.template_body),
+    };
+  }
+
+  return null;
+}
+
+function renderTemplateMessage(template = {}, inbound_event = {}) {
+  const template_text =
+    clean(template.template_text) ||
+    clean(template.text) ||
+    clean(template.template_body);
+
+  if (!template_text) {
+    return {
+      ok: false,
+      reason: "missing_rendered_template",
+      message: "Selected template has empty body",
+      details: {
+        selected_template_id: template.id || template.item_id || null,
+      },
+    };
+  }
+
+  const rendered = personalizeTemplate(template_text, buildTemplateRenderContext(inbound_event));
+
+  if (!rendered?.ok || !clean(rendered?.text)) {
+    return {
+      ok: false,
+      reason: "missing_rendered_template",
+      message: rendered?.reason || "Template render failed",
+      details: {
+        selected_template_id: template.id || template.item_id || null,
+        missing_placeholders: rendered?.missing || [],
+      },
+    };
+  }
+
+  const template_source =
+    clean(template.template_resolution_source) ||
+    clean(template.selected_template_source) ||
+    clean(template.source) ||
+    "unknown";
+
+  const prepared = prepareRenderedSmsForQueue({
+    rendered_message_text: rendered.text,
+    template_id: template.id || template.item_id || null,
+    template_source,
+  });
+
+  if (!prepared?.ok || !clean(prepared?.text)) {
+    return {
+      ok: false,
+      reason: "missing_rendered_template",
+      message: prepared?.reason || "Rendered template invalid",
+      details: prepared?.diagnostics || {},
+    };
+  }
+
+  return {
+    ok: true,
+    rendered_text: clean(prepared.text),
+    rendered_preview: previewText(prepared.text),
+    template_source,
+  };
+}
+
+async function resolveAutoTemplateReply({ inbound_event = {} } = {}) {
+  const inbound_message = resolveInboundSeedMessage(inbound_event);
+
+  const classification = await classify(inbound_message, null).catch((err) => {
+    logger.warn("auto_template_classification_failed", { error: err?.message });
+    return {
+      message: inbound_message,
+      language: clean(inbound_event?.metadata?.language) || "English",
+      emotion: "calm",
+      stage_hint: clean(inbound_event?.metadata?.current_stage) || "Ownership Confirmation",
+      compliance_flag: null,
+      positive_signals: [],
+      confidence: 1,
+      source: "discord_auto_template_fallback",
+    };
+  });
+
+  const route = resolveRoute({
+    classification,
+    brain_item: null,
+    phone_item: null,
+    message: inbound_message,
+  });
+
+  const flow = mapNextAction({
+    classify_result: classification,
+    brain_state: {
+      conversation_stage:
+        clean(inbound_event?.metadata?.current_stage) || clean(route?.stage) || null,
+      close_sub_stage: null,
+    },
+    property_context: {
+      property_type: clean(inbound_event?.metadata?.property_type) || null,
+      owner_type: clean(inbound_event?.metadata?.owner_type) || null,
+      is_first_touch: false,
+      touch_number: 2,
+      is_multifamily: Boolean(route?.is_multifamily_like),
+    },
+  });
+
+  if (flow?.action && flow.action !== ACTIONS.QUEUE_REPLY && flow.action !== ACTIONS.AI_FREEFORM) {
+    return {
+      ok: false,
+      reason: "missing_rendered_template",
+      message: `Reply flow action ${flow.action} is not queueable for template approval`,
+      details: { flow_action: flow.action, flow_reason: flow.reason || null },
+    };
+  }
+
+  const selected_use_case = clean(flow?.use_case) || clean(route?.use_case) || "ownership_check";
+  const selected_stage_code =
+    clean(flow?.stage_code) || clean(route?.stage) || clean(inbound_event?.metadata?.current_stage) || null;
+  const selected_language =
+    clean(classification?.language) || clean(route?.language) || clean(inbound_event?.metadata?.language) || "English";
+
+  const template = await loadTemplate({
+    template_selector: route?.template_selector || null,
+    category: route?.primary_category || "Residential",
+    secondary_category: route?.secondary_category || null,
+    use_case: selected_use_case,
+    variant_group: route?.variant_group || null,
+    tone: route?.tone || null,
+    language: selected_language,
+    sequence_position: route?.sequence_position || null,
+    paired_with_agent_type: route?.template_filters?.paired_with_agent_type || "Warm Professional",
+    fallback_agent_type: route?.template_filters?.fallback_agent_type || "Warm Professional",
+    touch_type: route?.template_selector?.touch_type || null,
+    touch_number: 2,
+    message_type: "Follow-Up",
+    property_type_scope: route?.template_filters?.category || route?.primary_category || null,
+    deal_strategy: route?.template_selector?.deal_strategy || null,
+    context: { summary: buildTemplateRenderContext(inbound_event), route },
+  });
+
+  if (!template) {
+    return {
+      ok: false,
+      reason: "missing_rendered_template",
+      message: "No template selected by auto_template flow",
+      details: {
+        use_case: selected_use_case,
+        stage_code: selected_stage_code,
+        language: selected_language,
+      },
+    };
+  }
+
+  const rendered = renderTemplateMessage(template, inbound_event);
+  if (!rendered.ok) return rendered;
+
+  const template_source = rendered.template_source;
+  if (!template_source.includes("supabase")) {
+    return {
+      ok: false,
+      reason: "missing_rendered_template",
+      message: "Auto-selected template did not come from Supabase sms_templates",
+      details: {
+        template_source,
+        selected_template_id: template.id || template.item_id || null,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    reply_text: rendered.rendered_text,
+    rendered_message_preview: rendered.rendered_preview,
+    selected_template_id: template.id || template.item_id || null,
+    selected_template_use_case: clean(template.use_case) || selected_use_case,
+    stage_code: clean(template.stage_code) || selected_stage_code,
+    language: clean(template.language) || selected_language,
+    template_source,
+  };
+}
+
+function buildManualResult(reply_text = "") {
+  const trimmed = clean(reply_text);
+  if (!trimmed) {
+    return {
+      ok: false,
+      reason: "reply_text_invalid",
+      message: "Manual reply_text is required",
+      details: { mode: "manual" },
+    };
+  }
+
+  return {
+    ok: true,
+    reply_text: trimmed,
+    rendered_message_preview: previewText(trimmed),
+    selected_template_id: null,
+    selected_template_use_case: null,
+    stage_code: null,
+    language: null,
+    template_source: "manual",
+  };
+}
+
+export async function resolveReplyContentForMode(
+  {
+    message_event_id = "",
+    reply_mode = "auto_template",
+    reply_text = "",
+    template_id = "",
+    supabase = null,
+  } = {},
+  deps = {}
+) {
+  const {
+    inbound_event_override = null,
+    fetchTemplateByIdImpl = fetchTemplateById,
+    resolveAutoTemplateReplyImpl = resolveAutoTemplateReply,
+    renderTemplateMessageImpl = renderTemplateMessage,
+  } = ensureObject(deps);
+
+  let inbound_event = inbound_event_override;
+
+  if (!inbound_event) {
+    const inbound_check = await validateInboundMessageEvent(message_event_id, supabase);
+    if (!inbound_check.valid) {
+      return {
+        ok: false,
+        reason: "inbound_event_invalid",
+        message: inbound_check.message,
+        details: inbound_check,
+      };
+    }
+    inbound_event = inbound_check.event;
+  }
+
+  const normalized_mode = normalizeReplyMode(reply_mode);
+  const manual_fallback = buildManualResult(reply_text);
+
+  if (normalized_mode === "manual") {
+    if (!manual_fallback.ok) return manual_fallback;
+    return { ok: true, reply_mode: "manual", inbound_event, ...manual_fallback };
+  }
+
+  if (normalized_mode === "template") {
+    const selected_template = await fetchTemplateByIdImpl(template_id, supabase);
+
+    if (!selected_template) {
+      if (manual_fallback.ok) {
+        return { ok: true, reply_mode: "manual", inbound_event, ...manual_fallback };
+      }
+      return {
+        ok: false,
+        reason: "invalid_template_id",
+        message: "template_id was not found in active sms_templates",
+        details: { template_id: clean(template_id) || null },
+      };
+    }
+
+    const rendered = renderTemplateMessageImpl(selected_template, inbound_event);
+    if (!rendered.ok) {
+      if (manual_fallback.ok) {
+        return { ok: true, reply_mode: "manual", inbound_event, ...manual_fallback };
+      }
+      return rendered;
+    }
+
+    const template_source = rendered.template_source;
+    if (!template_source.includes("supabase")) {
+      if (manual_fallback.ok) {
+        return { ok: true, reply_mode: "manual", inbound_event, ...manual_fallback };
+      }
+      return {
+        ok: false,
+        reason: "invalid_template_id",
+        message: "template_id resolved outside supabase sms_templates",
+        details: { template_id: clean(template_id) || null, template_source },
+      };
+    }
+
+    return {
+      ok: true,
+      reply_mode: "template",
+      inbound_event,
+      reply_text: rendered.rendered_text,
+      rendered_message_preview: rendered.rendered_preview,
+      selected_template_id: selected_template.id || selected_template.item_id || null,
+      selected_template_use_case: clean(selected_template.use_case) || null,
+      stage_code: clean(selected_template.stage_code) || null,
+      language: clean(selected_template.language) || null,
+      template_source,
+    };
+  }
+
+  const auto_result = await resolveAutoTemplateReplyImpl({ inbound_event, supabase });
+  if (auto_result.ok) {
+    return { ok: true, reply_mode: "auto_template", inbound_event, ...auto_result };
+  }
+
+  if (manual_fallback.ok) {
+    return { ok: true, reply_mode: "manual", inbound_event, ...manual_fallback };
+  }
+
+  return auto_result;
+}
+
 async function queueReplyWhenSmsSendQueue(
   {
     message_event_id = "",
     inbound_event = {},
     reply_text = "",
     reply_hash = "",
-    action_type = "send_suggested_sms_reply",
+    action_type = "approve_template_sms_reply",
+    reply_mode = "auto_template",
+    selected_template_id = null,
+    selected_template_use_case = null,
+    selected_stage_code = null,
+    selected_language = null,
+    template_source = null,
+    rendered_message_preview = null,
     discord_user_id = "",
-    channel_id = "",
-    message_id = "",
     source_channel_id = "",
     source_message_id = "",
-    mode = "queue",
-    textgrid_number_id = null,
     send_now = false,
+    textgrid_number_id = null,
   } = {},
   supabase = null
 ) {
@@ -63,10 +498,9 @@ async function queueReplyWhenSmsSendQueue(
   }
 
   const now = nowIso();
-  const queue_key = uuid();
-  const queue_id = uuid();
+  const queue_key = randomUUID();
+  const queue_id = randomUUID();
 
-  // Phone swapping: reply goes FROM inbound.to_phone TO inbound.from_phone
   const to_phone = normalizePhone(inbound_event.from_phone_number);
   const from_phone = normalizePhone(inbound_event.to_phone_number);
 
@@ -74,18 +508,19 @@ async function queueReplyWhenSmsSendQueue(
     throw new Error("missing_phone_numbers_in_inbound_event");
   }
 
-  const message_type = action_type === "send_suggested_sms_reply"
-    ? "Discord Suggested Reply"
-    : "Discord Manual Reply";
+  const message_type =
+    reply_mode === "manual"
+      ? "Discord Manual Reply"
+      : reply_mode === "template"
+        ? "Discord Template Reply"
+        : "Discord Auto Template Reply";
 
-  const use_case_template = "discord_sms_reply";
+  const use_case_template = clean(selected_template_use_case) || "discord_sms_reply";
 
-  // Determine touch number from conversation history
   let touch_number = 1;
   if (inbound_event.metadata?.touch_number) {
     touch_number = Number(inbound_event.metadata.touch_number) || 2;
   } else {
-    // Count previous messages in conversation
     const { data: previous, error: prev_err } = await supabase
       .from("message_events")
       .select("id")
@@ -110,7 +545,7 @@ async function queueReplyWhenSmsSendQueue(
     scheduled_for_local: now,
     created_at: now,
     updated_at: now,
-    send_priority: send_now ? 10 : 5, // Higher priority if send_now
+    send_priority: send_now ? 10 : 5,
     message_body: reply_text,
     message_text: reply_text,
     to_phone_number: to_phone,
@@ -131,67 +566,43 @@ async function queueReplyWhenSmsSendQueue(
       approved_by_discord_user_id: discord_user_id,
       inbound_message_event_id: message_event_id,
       action_type,
+      reply_mode,
       reply_hash,
+      selected_template_id,
+      selected_template_use_case,
+      stage_code: selected_stage_code,
+      language: selected_language,
+      rendered_message_preview,
+      template_source,
       conversation_brain_id: inbound_event.conversation_brain_id,
       stage_before: inbound_event.metadata?.current_stage || null,
-      stage_after: inbound_event.metadata?.current_stage || null,
+      stage_after: selected_stage_code || inbound_event.metadata?.current_stage || null,
       ...ensureObject(inbound_event.metadata),
     },
   };
 
-  // Insert into send_queue
   const { data: queue_row, error: queue_error } = await supabase
     .from(SEND_QUEUE_TABLE)
     .insert(payload)
     .select()
     .maybeSingle();
 
-  if (queue_error) {
-    logger.error("queue_insert_failed", {
-      error: queue_error?.message,
-      to_phone,
-      from_phone,
-    });
-    throw queue_error;
-  }
+  if (queue_error) throw queue_error;
+  if (!queue_row) throw new Error("queue_row_insert_returned_no_data");
 
-  if (!queue_row) {
-    throw new Error("queue_row_insert_returned_no_data");
-  }
-
-  logger.info("reply_queued", {
-    queue_id: queue_row.id,
-    message_event_id,
-    to_phone: to_phone.slice(-4),
-  });
-
-  return {
-    queue_row,
-    queue_id: queue_row.id,
-  };
+  return { queue_row, queue_id: queue_row.id };
 }
 
-/**
- * Append reply to AI conversation brain
- */
 async function appendToBrain(
   {
     conversation_brain_id = "",
-    reply_text = "",
     inbound_message_event_id = "",
     message_event_id = "",
-  } = {},
-  supabase = null
+  } = {}
 ) {
-  if (!supabase || !conversation_brain_id) {
-    logger.debug("brain_sync_skipped", {
-      reason: !supabase ? "no_supabase" : "no_brain_id",
-    });
-    return { ok: false, reason: "missing_prereq" };
-  }
+  if (!conversation_brain_id) return { ok: false, reason: "no_brain_id" };
 
   try {
-    // Link both inbound and outbound events to brain for context
     if (inbound_message_event_id) {
       await linkMessageEventToBrain({
         brain_id: conversation_brain_id,
@@ -206,32 +617,12 @@ async function appendToBrain(
       });
     }
 
-    logger.info("brain_updated", {
-      conversation_brain_id,
-      inbound_event: !!inbound_message_event_id,
-      outbound_event: !!message_event_id,
-    });
-
-    return {
-      ok: true,
-      reason: "brain_updated",
-    };
-  } catch (err) {
-    logger.warn("brain_update_failed", {
-      error: err?.message,
-      conversation_brain_id,
-    });
-    return {
-      ok: false,
-      reason: "brain_update_error",
-      error: err?.message,
-    };
+    return { ok: true, reason: "brain_updated" };
+  } catch {
+    return { ok: false, reason: "brain_update_error" };
   }
 }
 
-/**
- * Notify Discord ops of reply action
- */
 async function notifyOpsOfReply(
   {
     status = "queued",
@@ -240,6 +631,8 @@ async function notifyOpsOfReply(
     reply_text = "",
     discord_user_id = "",
     reason = "",
+    reply_mode = "auto_template",
+    selected_template_id = null,
   } = {}
 ) {
   try {
@@ -248,13 +641,13 @@ async function notifyOpsOfReply(
 
     const fields = {
       From: `+1${safe_phone}`,
-      Reply: reply_text.slice(0, 100),
+      Reply: previewText(reply_text, 100),
+      "Reply Mode": reply_mode,
       User: discord_user_id || "api_call",
     };
 
-    if (reason) {
-      fields["Block Reason"] = reason;
-    }
+    if (selected_template_id) fields["Template ID"] = String(selected_template_id);
+    if (reason) fields["Block Reason"] = reason;
 
     await notifyDiscordOps({
       event_type: status === "queued" ? "discord_sms_reply_queued" : "discord_sms_reply_blocked",
@@ -268,67 +661,52 @@ async function notifyOpsOfReply(
         message_event_id: inbound_event.id,
         send_queue_id,
         discord_user_id,
+        reply_mode,
+        selected_template_id,
       },
       should_alert_critical: false,
-    }).catch((err) => {
-      logger.warn("ops_notification_failed", { error: err?.message });
-    });
-  } catch (err) {
-    logger.warn("ops_notify_exception", { error: err?.message });
-  }
+    }).catch(() => {});
+  } catch {}
 }
 
-/**
- * POST /api/internal/discord/reply-sms
- */
 export async function POST(request) {
   const start_ms = Date.now();
+  let body = {};
 
   try {
-    // Verify internal API secret
     const auth_check = requireInternalSecret(request);
-    if (!auth_check.authorized) {
-      return NextResponse.json(auth_check, { status: 401 });
+    if (!auth_check.ok) {
+      return NextResponse.json(
+        { ok: false, error: auth_check.error || "invalid_internal_api_secret_token" },
+        { status: auth_check.status || 401 }
+      );
     }
 
-    // Parse body
-    const body = await request.json().catch(() => ({}));
+    body = await request.json().catch(() => ({}));
 
     const {
       message_event_id = "",
       reply_text = "",
-      mode = "queue",
+      reply_mode = "auto_template",
+      template_id = "",
       send_now = false,
       approved_by_discord_user_id = "",
       source_channel_id = "",
       source_message_id = "",
-      action_type = "send_suggested_sms_reply",
+      action_type = "approve_template_sms_reply",
     } = body;
 
-    logger.debug("reply_sms_request", {
-      message_event_id: message_event_id.slice(0, 8),
-      reply_length: (reply_text || "").length,
-      action_type,
+    const supabase = supabaseClient;
+
+    const resolved = await resolveReplyContentForMode({
+      message_event_id,
+      reply_mode,
+      reply_text,
+      template_id,
+      supabase,
     });
 
-    const supabase = getDefaultSupabaseClient();
-
-    // Comprehensive safety checks
-    const safety_result = await runReplySmsSafetyChecks(
-      {
-        message_event_id,
-        reply_text,
-        supabase,
-      }
-    );
-
-    if (!safety_result.safe) {
-      logger.warn("safety_check_failed", {
-        reason: safety_result.reason,
-        message_event_id: message_event_id.slice(0, 8),
-      });
-
-      // Audit blocked reply
+    if (!resolved.ok) {
       await auditReplyBlocked(
         {
           discord_user_id: approved_by_discord_user_id,
@@ -337,22 +715,64 @@ export async function POST(request) {
           message_event_id,
           reply_text,
           action_type,
-          block_reason: safety_result.reason,
-          details: safety_result.details,
+          block_reason: resolved.reason,
+          details: resolved.details,
         },
         supabase
       ).catch(() => {});
 
-      // Notify ops of block
-      await notifyOpsOfReply(
+      return NextResponse.json(
         {
+          ok: false,
           status: "blocked",
-          inbound_event: safety_result.verified_event || {},
-          discord_user_id: approved_by_discord_user_id,
-          reply_text,
-          reason: safety_result.message,
-        }
+          reason: resolved.reason,
+          message: resolved.message,
+          details: resolved.details || {},
+        },
+        { status: 400 }
       );
+    }
+
+    const safety_result = await runReplySmsSafetyChecks({
+      message_event_id,
+      reply_text: resolved.reply_text,
+      supabase,
+      inbound_event_override: resolved.inbound_event,
+    });
+
+    if (!safety_result.safe) {
+      await auditReplyBlocked(
+        {
+          discord_user_id: approved_by_discord_user_id,
+          channel_id: source_channel_id,
+          message_id: source_message_id,
+          message_event_id,
+          reply_text: resolved.reply_text,
+          action_type,
+          block_reason: safety_result.reason,
+          details: {
+            ...ensureObject(safety_result.details),
+            reply_mode: resolved.reply_mode,
+            selected_template_id: resolved.selected_template_id,
+            selected_template_use_case: resolved.selected_template_use_case,
+            stage_code: resolved.stage_code,
+            language: resolved.language,
+            rendered_message_preview: resolved.rendered_message_preview,
+            template_source: resolved.template_source,
+          },
+        },
+        supabase
+      ).catch(() => {});
+
+      await notifyOpsOfReply({
+        status: "blocked",
+        inbound_event: safety_result.verified_event || resolved.inbound_event || {},
+        discord_user_id: approved_by_discord_user_id,
+        reply_text: resolved.reply_text,
+        reason: safety_result.message,
+        reply_mode: resolved.reply_mode,
+        selected_template_id: resolved.selected_template_id,
+      });
 
       return NextResponse.json(
         {
@@ -361,28 +781,29 @@ export async function POST(request) {
           reason: safety_result.reason,
           message: safety_result.message,
           details: safety_result.details,
+          reply_mode: resolved.reply_mode,
         },
         { status: 400 }
       );
     }
 
-    const verified_event = safety_result.verified_event;
-    const reply_hash = safety_result.reply_hash;
-
-    // Queue reply
     const queue_result = await queueReplyWhenSmsSendQueue(
       {
         message_event_id,
-        inbound_event: verified_event,
-        reply_text,
-        reply_hash,
+        inbound_event: safety_result.verified_event,
+        reply_text: resolved.reply_text,
+        reply_hash: safety_result.reply_hash,
         action_type,
+        reply_mode: resolved.reply_mode,
+        selected_template_id: resolved.selected_template_id,
+        selected_template_use_case: resolved.selected_template_use_case,
+        selected_stage_code: resolved.stage_code,
+        selected_language: resolved.language,
+        template_source: resolved.template_source,
+        rendered_message_preview: resolved.rendered_message_preview,
         discord_user_id: approved_by_discord_user_id,
-        channel_id: source_channel_id,
-        message_id: source_message_id,
         source_channel_id,
         source_message_id,
-        mode,
         send_now,
         textgrid_number_id: safety_result.textgrid_number_id,
       },
@@ -390,18 +811,13 @@ export async function POST(request) {
     );
 
     const queue_id = queue_result.queue_id;
+    const verified_event = safety_result.verified_event;
 
-    // Link to brain (best-effort)
-    await appendToBrain(
-      {
-        conversation_brain_id: verified_event.conversation_brain_id,
-        reply_text,
-        inbound_message_event_id: message_event_id,
-      },
-      supabase
-    ).catch(() => {});
+    await appendToBrain({
+      conversation_brain_id: verified_event.conversation_brain_id,
+      inbound_message_event_id: message_event_id,
+    }).catch(() => {});
 
-    // Audit success
     await auditReplyQueued(
       {
         discord_user_id: approved_by_discord_user_id,
@@ -409,28 +825,29 @@ export async function POST(request) {
         message_id: source_message_id,
         message_event_id,
         send_queue_id: queue_id,
-        reply_text,
+        reply_text: resolved.reply_text,
         action_type,
+        metadata: {
+          reply_mode: resolved.reply_mode,
+          selected_template_id: resolved.selected_template_id,
+          selected_template_use_case: resolved.selected_template_use_case,
+          stage_code: resolved.stage_code,
+          language: resolved.language,
+          rendered_message_preview: resolved.rendered_message_preview,
+          template_source: resolved.template_source,
+        },
       },
       supabase
     ).catch(() => {});
 
-    // Notify ops of success
-    await notifyOpsOfReply(
-      {
-        status: "queued",
-        inbound_event: verified_event,
-        send_queue_id: queue_id,
-        reply_text,
-        discord_user_id: approved_by_discord_user_id,
-      }
-    );
-
-    const elapsed_ms = Date.now() - start_ms;
-    logger.info("reply_sms_success", {
-      queue_id: queue_id.slice(0, 8),
-      to_phone: verified_event.from_phone_number.slice(-4),
-      elapsed_ms,
+    await notifyOpsOfReply({
+      status: "queued",
+      inbound_event: verified_event,
+      send_queue_id: queue_id,
+      reply_text: resolved.reply_text,
+      discord_user_id: approved_by_discord_user_id,
+      reply_mode: resolved.reply_mode,
+      selected_template_id: resolved.selected_template_id,
     });
 
     return NextResponse.json(
@@ -440,22 +857,27 @@ export async function POST(request) {
         queue_id,
         message_event_id,
         to_phone_number: verified_event.from_phone_number,
-        preview: reply_text.slice(0, 50),
+        preview: previewText(resolved.reply_text, 50),
+        reply_mode: resolved.reply_mode,
+        selected_template_id: resolved.selected_template_id,
+        selected_template_use_case: resolved.selected_template_use_case,
+        stage_code: resolved.stage_code,
+        language: resolved.language,
+        rendered_message_preview: resolved.rendered_message_preview,
+        template_source: resolved.template_source,
         queued_at: nowIso(),
       },
       { status: 200 }
     );
   } catch (err) {
-    logger.error("reply_sms_exception", {
-      error: err?.message,
-      stack: err?.stack,
-    });
+    logger.error("reply_sms_exception", { error: err?.message, stack: err?.stack });
 
     captureRouteException(err, {
       route: "api.internal.discord.reply_sms",
       subsystem: "discord_sms_reply",
       context: {
         message_event_id: clean(body?.message_event_id).slice(0, 8),
+        reply_mode: normalizeReplyMode(body?.reply_mode),
       },
     });
 

@@ -143,6 +143,7 @@ export async function handleSubmitSmsReplyModal({
     bridge_endpoint: "/api/internal/discord/reply-sms",
     bridge_payload: {
       message_event_id,
+      reply_mode: "manual",
       reply_text,
       approved_by_discord_user_id: discord_user_id,
       source_channel_id: channel_id,
@@ -160,35 +161,36 @@ export async function handleSubmitSmsReplyModal({
 export async function handleSendSuggestedSmsReply({
   interaction = {},
   message_event_id = "",
-  suggested_reply = "",
+  template_id = "",
   discord_user_id = "",
   channel_id = "",
   message_id = "",
 }) {
-  if (!message_event_id || !suggested_reply) {
+  if (!message_event_id) {
     return {
       ok: false,
-      error: "missing_message_event_or_reply",
+      error: "missing_message_event_id",
       ephemeral: true,
     };
   }
 
   logger.info("suggested_reply_handler", {
     message_event_id: message_event_id.slice(0, 8),
-    reply_length: suggested_reply.length,
+    reply_mode: template_id ? "template" : "auto_template",
   });
 
-  // Bridge to endpoint
+  // Bridge to endpoint (server selects/renders template by message_event_id)
   return {
     ok: true,
     bridge_endpoint: "/api/internal/discord/reply-sms",
     bridge_payload: {
       message_event_id,
-      reply_text: suggested_reply,
+      reply_mode: template_id ? "template" : "auto_template",
+      template_id: clean(template_id) || undefined,
       approved_by_discord_user_id: discord_user_id,
       source_channel_id: channel_id,
       source_message_id: message_id,
-      action_type: "send_suggested_sms_reply",
+      action_type: "approve_template_sms_reply",
     },
     method: "POST",
   };

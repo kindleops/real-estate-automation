@@ -30,7 +30,7 @@ function actionRow(buttons) {
 
 /**
  * Build action buttons for inbound SMS reply card
- * Includes: Send Suggested Reply, Edit Reply, Manual Reply, Mark Hot, Suppress
+ * Includes: Approve Template, Manual Reply, Mark Hot, Suppress
  *
  * Encoded in custom_id as: sms_action:{action_type}:{message_event_id}
  * (message_event_id limited to ~60 chars to fit in 100 max)
@@ -45,23 +45,18 @@ export function buildSmsReplyActionButtons({
   }
 
   const safe_event_id = String(message_event_id).slice(0, 35);
-  const has_suggestion = clean(suggested_reply).length > 0;
 
-  const buttons = [];
-
-  if (has_suggestion) {
-    buttons.push(
-      button({
-        label: "✅ Send Suggested",
-        custom_id: `sms_action:send_suggested:${safe_event_id}`,
-        style: STYLE.SUCCESS,
-      })
-    );
-  }
+  const buttons = [
+    button({
+      label: "✅ Approve Template",
+      custom_id: `sms_action:send_suggested:${safe_event_id}`,
+      style: STYLE.SUCCESS,
+    }),
+  ];
 
   buttons.push(
     button({
-      label: has_suggestion ? "✏️ Edit" : "✍️ Manual Reply",
+      label: "✍️ Manual Reply",
       custom_id: `sms_action:open_modal:${safe_event_id}`,
       style: STYLE.PRIMARY,
     })

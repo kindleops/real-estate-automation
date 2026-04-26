@@ -36,6 +36,9 @@ export async function loadContextWithFallback({
   inbound_from,
   inbound_to,
   create_brain_if_missing = true,
+  primary_context = null,
+  loadContextImpl = loadContext,
+  findRecentOutboundContextPairImpl = findRecentOutboundContextPair,
 } = {}) {
   const lookup_sources_tried = ["phone"];
   let fallback_pair_match = false;
@@ -43,13 +46,28 @@ export async function loadContextWithFallback({
   let fallback_match_data = null;
 
   // Step 1: Try primary phone lookup
-  let context = await loadContext({
-    inbound_from,
-    create_brain_if_missing,
-  });
+  let context = primary_context;
+  if (!context) {
+    context = await loadContextImpl({
+      inbound_from,
+      create_brain_if_missing,
+    });
+  }
 
   if (context?.found) {
     // Phone found, return immediately with diagnostics
+    return {
+      ...context,
+      lookup_sources_tried,
+      fallback_pair_match: false,
+      fallback_match_source: null,
+      fallback_match_id: null,
+      fallback_match_data: null,
+    };
+  }
+
+  const primary_reason = clean(context?.reason || "phone_not_found").toLowerCase();
+  if (primary_reason !== "phone_not_found") {
     return {
       ...context,
       lookup_sources_tried,
@@ -69,7 +87,7 @@ export async function loadContextWithFallback({
 
   lookup_sources_tried.push("fallback_outbound_pair");
 
-  const fallback_result = await findRecentOutboundContextPair(
+  const fallback_result = await findRecentOutboundContextPairImpl(
     inbound_from,
     inbound_to
   );

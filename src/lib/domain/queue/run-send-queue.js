@@ -3,6 +3,7 @@ import {
   processSendQueueItem,
 } from "@/lib/domain/queue/process-send-queue.js";
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
+import { isRevisionLimitExceeded } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
 import { hasSupabaseConfig } from "@/lib/supabase/client.js";
 import {
@@ -78,6 +79,19 @@ function getDateLike(record = null, key = "", fallback = null) {
   return clean(values[0]?.start ?? getPlainValue(values[0])) || fallback;
 }
 
+function getNumberLike(record = null, key = "", fallback = null) {
+  const values = getRecordFieldValues(record, key);
+  if (!values.length) return fallback;
+  const parsed = Number(getPlainValue(values[0]));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getAppRefLike(record = null, key = "", fallback = null) {
+  const values = getRecordFieldValues(record, key);
+  if (!values.length) return fallback;
+  return asPositiveInteger(getPlainValue(values[0]), fallback);
+}
+
 function toTimestamp(value) {
   if (!value) return null;
   const parsed = new Date(value).getTime();
@@ -104,6 +118,59 @@ function getScheduledAt(row = null) {
     clean(getDateLike(row, "scheduled-for-local", null)) ||
     null
   );
+}
+
+function getMasterOwnerId(row = null) {
+  return asPositiveInteger(
+    row?.master_owner_id ??
+      row?.master_owner_item_id ??
+      getAppRefLike(row, "master-owner", null),
+    null
+  );
+}
+
+function getPhoneItemId(row = null) {
+  return asPositiveInteger(
+    row?.phone_item_id ??
+      row?.phone_number_item_id ??
+      getAppRefLike(row, "phone-number", null),
+    null
+  );
+}
+
+function getTouchNumber(row = null) {
+  return asPositiveInteger(
+    row?.touch_number ?? row?.touch ?? getNumberLike(row, "touch-number", null),
+    null
+  );
+}
+
+function dedupeRowsByOwnerPhoneTouch(rows = []) {
+  const seen = new Set();
+  const deduped = [];
+  const duplicates = [];
+
+  for (const row of rows) {
+    const owner_id = getMasterOwnerId(row);
+    const phone_id = getPhoneItemId(row);
+    const touch_number = getTouchNumber(row);
+
+    if (!owner_id || !phone_id || !touch_number) {
+      deduped.push(row);
+      continue;
+    }
+
+    const key = `${owner_id}:${phone_id}:${touch_number}`;
+    if (seen.has(key)) {
+      duplicates.push(row);
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(row);
+  }
+
+  return { deduped, duplicates };
 }
 
 function isRunnableStatus(row = null) {
@@ -286,28 +353,22 @@ export async function runSendQueue(
   deps = {}
 ) {
   const with_run_lock = deps.withRunLock || withRunLock;
+  const build_podio_cooldown_skip_result =
+    typeof deps.buildPodioCooldownSkipResult === "function"
+      ? deps.buildPodioCooldownSkipResult
+      : null;
   const process_send_queue_item =
     deps.processSendQueueItem || processSendQueueItem;
   const fail_queue_item = deps.failQueueItem || failQueueItem;
   const claim_send_queue_row = deps.claimSendQueueRow || claimSendQueueRow;
+  const record_system_alert = deps.recordSystemAlert || (async () => ({}));
+  const resolve_system_alert = deps.resolveSystemAlert || (async () => ({}));
   const log_info = deps.info || info;
   const log_warn = deps.warn || warn;
   const run_started_at = now;
 
-  return with_run_lock({
-    scope: QUEUE_RUN_LOCK_SCOPE,
-    owner: "queue_runner",
-    metadata: {
-      limit,
-      dry_run,
-      run_started_at,
-    },
-    onLocked: async (lock) => ({
-      ok: true,
-      skipped: true,
-      reason: "queue_runner_lock_active",
-      dry_run,
-      lock,
+  if (!dry_run && build_podio_cooldown_skip_result) {
+    const cooldown_skip = await build_podio_cooldown_skip_result({
       attempted_count: 0,
       claimed_count: 0,
       started_count: 0,
@@ -321,11 +382,93 @@ export async function runSendQueue(
       queued_rows_loaded: 0,
       due_rows: 0,
       future_rows: 0,
-      batch_duration_ms: 0,
       run_started_at,
       results: [],
-    }),
+    });
+
+    if (cooldown_skip?.skipped && cooldown_skip?.reason === "podio_rate_limit_cooldown_active") {
+      log_warn("queue.run_skipped_podio_cooldown", {
+        reason: cooldown_skip.reason,
+        retry_after_seconds: cooldown_skip.retry_after_seconds || null,
+        retry_after_at: cooldown_skip.retry_after_at || null,
+      });
+      return cooldown_skip;
+    }
+  }
+
+  return with_run_lock({
+    scope: QUEUE_RUN_LOCK_SCOPE,
+    enabled: !dry_run,
+    owner: "queue_runner",
+    metadata: {
+      limit,
+      dry_run,
+      run_started_at,
+    },
+    onLocked: async (lock) => {
+      const lock_meta = lock?.meta || {};
+      log_warn("queue.run_skipped_lock_active", {
+        reason: "queue_runner_lock_active",
+        lock_scope: lock?.scope || QUEUE_RUN_LOCK_SCOPE,
+        lock_record_item_id: lock?.record_item_id || null,
+        lock_lease_token: lock_meta?.lease_token || lock?.lease_token || null,
+        lock_expires_at: lock_meta?.expires_at || null,
+        lock_owner: lock_meta?.owner || null,
+        lock_acquired_at: lock_meta?.acquired_at || null,
+        lock_acquisition_count: lock_meta?.acquisition_count || null,
+        recovery_hint: "If stale, run forceReleaseStaleLock for queue-run and retry.",
+      });
+
+      try {
+        await record_system_alert({
+          code: "queue_run_lock_active",
+          affected_ids: [lock?.record_item_id || null].filter(Boolean),
+          metadata: {
+            scope: lock?.scope || QUEUE_RUN_LOCK_SCOPE,
+            reason: "queue_runner_lock_active",
+          },
+        });
+        await resolve_system_alert({ code: "queue_run_started" }).catch(() => {});
+      } catch (_) {
+        // Non-fatal for lock-skipped response.
+      }
+
+      return {
+        ok: true,
+        skipped: true,
+        reason: "queue_runner_lock_active",
+        dry_run,
+        lock,
+        attempted_count: 0,
+        claimed_count: 0,
+        started_count: 0,
+        processed_count: 0,
+        sent_count: 0,
+        failed_count: 0,
+        blocked_count: 0,
+        skipped_count: 0,
+        duplicate_locked_count: 0,
+        total_rows_loaded: 0,
+        queued_rows_loaded: 0,
+        due_rows: 0,
+        future_rows: 0,
+        batch_duration_ms: 0,
+        run_started_at,
+        results: [],
+      };
+    },
     fn: async () => {
+      log_info("queue.run_started", {
+        limit,
+        dry_run,
+        now_utc: now,
+      });
+
+      log_info("queue.run_fetch_started", {
+        limit,
+        dry_run,
+      });
+
       console.log("QUEUE START");
       console.log("ENV CHECK", {
         supabase_configured: hasSupabaseConfig(),
@@ -335,7 +478,9 @@ export async function runSendQueue(
 
       const started_at_ms = Date.now();
       const candidate_summary = await buildQueueCandidates(limit, now, deps);
-      const rows = candidate_summary.rows;
+      const { deduped: rows, duplicates } = dedupeRowsByOwnerPhoneTouch(
+        candidate_summary.rows
+      );
 
       console.log("ROWS LOADED", {
         total_rows_loaded: candidate_summary.total_rows_loaded,
@@ -354,6 +499,16 @@ export async function runSendQueue(
         first_10_filter_excluded: candidate_summary.first_10_excluded,
       });
 
+      if (duplicates.length > 0) {
+        log_warn("queue.run_batch_duplicates_suppressed", {
+          duplicate_count: duplicates.length,
+          suppressed_queue_item_ids: duplicates
+            .map((row) => getQueueRowId(row))
+            .filter(Boolean)
+            .slice(0, 20),
+        });
+      }
+
       const results = [];
       const skipped_reasons = [];
       let attempted_count = 0;
@@ -370,6 +525,21 @@ export async function runSendQueue(
       let first_failing_reason = null;
       let first_failure_queue_item_id = null;
       let first_failure_reason = null;
+
+      for (const duplicate of duplicates) {
+        const queue_item_id = getQueueRowId(duplicate);
+        skipped_count += 1;
+        skipped_reasons.push(
+          buildSkippedSummary(queue_item_id, "queue_batch_duplicate_suppressed")
+        );
+        results.push({
+          ok: true,
+          skipped: true,
+          reason: "queue_batch_duplicate_suppressed",
+          queue_item_id,
+          queue_row_id: queue_item_id,
+        });
+      }
 
       for (const row of rows) {
         const queue_item_id = getQueueRowId(row);
@@ -496,6 +666,48 @@ export async function runSendQueue(
               queue_item_id,
           });
         } catch (error) {
+          if (isRevisionLimitExceeded(error)) {
+            processed_count += 1;
+            skipped_count += 1;
+            skipped_reasons.push(
+              buildSkippedSummary(queue_item_id, "queue_item_revision_limit_exceeded")
+            );
+
+            log_warn("queue.run_item_skipped_revision_limit", {
+              queue_item_id,
+              failure_bucket: "revision_limit_exceeded",
+              manual_review_required: true,
+              message: clean(error?.message) || null,
+            });
+
+            try {
+              await record_system_alert({
+                code: "revision_limit_exceeded",
+                affected_ids: [queue_item_id],
+                metadata: {
+                  failure_bucket: "revision_limit_exceeded",
+                  recovery: "manual_review_required",
+                },
+              });
+              await resolve_system_alert({
+                code: "revision_limit_exceeded",
+                affected_ids: [queue_item_id],
+              }).catch(() => {});
+            } catch (_) {
+              // Non-fatal alerting failure.
+            }
+
+            results.push({
+              queue_item_id,
+              ok: true,
+              skipped: true,
+              reason: "queue_item_revision_limit_exceeded",
+              failure_bucket: "revision_limit_exceeded",
+              manual_review_required: true,
+            });
+            continue;
+          }
+
           partial = true;
           processed_count += 1;
           failed_count += 1;
@@ -559,7 +771,7 @@ export async function runSendQueue(
         ok: true,
         partial,
         dry_run,
-        skipped: false,
+        skipped: undefined,
         reason: null,
         attempted_count,
         claimed_count,

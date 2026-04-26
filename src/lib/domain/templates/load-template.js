@@ -573,6 +573,15 @@ function evaluateTemplateCandidate(
     rejection_reasons.push("touch_type_mismatch");
   }
 
+  if (
+    strict_touch_one_podio_only &&
+    clean(selector_input?.language) &&
+    clean(template?.language) &&
+    !safeCategoryEquals(template?.language, selector_input?.language)
+  ) {
+    rejection_reasons.push("language_mismatch");
+  }
+
   if (!property_type_scope_compatibility.compatible) {
     rejection_reasons.push("property_type_scope_incompatible");
   }

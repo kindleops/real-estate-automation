@@ -22,6 +22,7 @@ import {
   buildInboundSmsActionComponents,
   buildSuggestedReplyPreview,
 } from "@/lib/discord/discord-components/sms-reply-components.js";
+import { resolveReplyContentForMode } from "@/lib/discord/reply-sms-content-resolver.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Safety Checks Tests
@@ -167,7 +168,7 @@ describe("Discord SMS Reply — Safety Checks", () => {
       const result = await validateInboundMessageEvent("event-123", mock_supabase);
       assert.strictEqual(result.valid, true);
       assert.strictEqual(result.event.id, "event-123");
-      assert.strictEqual(result.event.direction, "inbound");
+      assert.strictEqual(result.reason, "inbound_event_valid");
     });
   });
 
@@ -176,7 +177,7 @@ describe("Discord SMS Reply — Safety Checks", () => {
       const result = await validateRecipientNotSuppressed(
         "+16025551234",
         { event_type: "opt_out" },
-        null
+        { from: () => ({ select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }) }) }
       );
       assert.strictEqual(result.valid, false);
       assert.strictEqual(result.reason, "recipient_opted_out");
@@ -186,7 +187,7 @@ describe("Discord SMS Reply — Safety Checks", () => {
       const result = await validateRecipientNotSuppressed(
         "+16025551234",
         { event_type: "wrong_number" },
-        null
+        { from: () => ({ select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }) }) }
       );
       assert.strictEqual(result.valid, false);
       assert.strictEqual(result.reason, "wrong_number_scenario");
@@ -196,10 +197,12 @@ describe("Discord SMS Reply — Safety Checks", () => {
       const mock_supabase = {
         from: () => ({
           select: () => ({
-            eq: (col, val) => ({
-              maybeSingle: async () => ({
-                data: null,
-                error: null,
+            eq: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: null,
+                  error: null,
+                }),
               }),
             }),
           }),
@@ -301,20 +304,45 @@ describe("Discord SMS Reply — Safety Checks", () => {
       const mock_supabase = {
         from: (table) => ({
           select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: table === "message_events" ? inbound_event : null,
-                error: null,
-              }),
-              gt: () => ({
-                order: () => ({
-                  limit: () => ({
-                    maybeSingle: async () => ({
-                      data: null,
-                      error: null,
-                    }),
+            eq: () => {
+              if (table === "message_events") {
+                return {
+                  maybeSingle: async () => ({ data: { ...inbound_event, direction: "inbound" }, error: null }),
+                };
+              }
+              if (table === "sms_suppression_list") {
+                return {
+                  eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }),
+                };
+              }
+              if (table === "textgrid_numbers") {
+                return {
+                  maybeSingle: async () => ({
+                    data: { id: "tgn-1", phone_number: "+14155552345", status: "active" },
+                    error: null,
+                  }),
+                };
+              }
+              return {
+                gt: () => ({
+                  order: () => ({
+                    limit: async () => ({ data: [], error: null }),
                   }),
                 }),
+              };
+            },
+            or: () => ({
+              lt: () => ({
+                order: () => ({
+                  limit: async () => ({ data: [], error: null }),
+                }),
+              }),
+            }),
+          }),
+          or: () => ({
+            lt: () => ({
+              order: () => ({
+                limit: async () => ({ data: [], error: null }),
               }),
             }),
           }),
@@ -376,6 +404,156 @@ describe("Discord SMS Reply — Safety Checks", () => {
   });
 });
 
+describe("Discord SMS Reply — Reply Mode Resolution", () => {
+  const inbound_event = {
+    id: "event-123",
+    direction: "inbound",
+    from_phone_number: "+16025551234",
+    to_phone_number: "+14155552345",
+    master_owner_id: "owner-1",
+    metadata: { current_stage: "S2" },
+    created_at: new Date().toISOString(),
+  };
+
+  it("supports auto_template success", async () => {
+    const result = await resolveReplyContentForMode(
+      {
+        message_event_id: "event-123",
+        reply_mode: "auto_template",
+        supabase: null,
+      },
+      {
+        inbound_event_override: inbound_event,
+        resolveAutoTemplateReplyImpl: async () => ({
+          ok: true,
+          reply_text: "Auto template rendered",
+          rendered_message_preview: "Auto template rendered",
+          selected_template_id: "tmpl-1",
+          selected_template_use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+          template_source: "supabase_sms_templates",
+        }),
+      }
+    );
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.reply_mode, "auto_template");
+    assert.strictEqual(result.selected_template_id, "tmpl-1");
+    assert.strictEqual(result.template_source, "supabase_sms_templates");
+  });
+
+  it("falls back to manual when auto_template cannot render", async () => {
+    const result = await resolveReplyContentForMode(
+      {
+        message_event_id: "event-123",
+        reply_mode: "auto_template",
+        reply_text: "Manual fallback text",
+        supabase: null,
+      },
+      {
+        inbound_event_override: inbound_event,
+        resolveAutoTemplateReplyImpl: async () => ({
+          ok: false,
+          reason: "missing_rendered_template",
+          message: "No template selected",
+        }),
+      }
+    );
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.reply_mode, "manual");
+    assert.strictEqual(result.reply_text, "Manual fallback text");
+  });
+
+  it("rejects invalid template_id without manual fallback", async () => {
+    const result = await resolveReplyContentForMode(
+      {
+        message_event_id: "event-123",
+        reply_mode: "template",
+        template_id: "bad-id",
+        reply_text: "",
+        supabase: null,
+      },
+      {
+        inbound_event_override: inbound_event,
+        fetchTemplateByIdImpl: async () => null,
+      }
+    );
+
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.reason, "invalid_template_id");
+  });
+
+  it("rejects missing rendered template when template render fails and no manual fallback", async () => {
+    const result = await resolveReplyContentForMode(
+      {
+        message_event_id: "event-123",
+        reply_mode: "template",
+        template_id: "tmpl-1",
+        reply_text: "",
+        supabase: null,
+      },
+      {
+        inbound_event_override: inbound_event,
+        fetchTemplateByIdImpl: async () => ({
+          id: "tmpl-1",
+          template_body: "{{seller_first_name}}",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+        }),
+        renderTemplateMessageImpl: () => ({
+          ok: false,
+          reason: "missing_rendered_template",
+          message: "missing_placeholder_values",
+        }),
+      }
+    );
+
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.reason, "missing_rendered_template");
+  });
+
+  it("blocks duplicate reply hashes", async () => {
+    const dup_hash = generateReplyHash("Duplicate text", "event-123");
+
+    const mock_supabase = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            gt: () => ({
+              order: () => ({
+                limit: async () => ({
+                  data: [
+                    {
+                      id: "q-1",
+                      metadata: { reply_hash: dup_hash },
+                      created_at: new Date().toISOString(),
+                      message_body: "Duplicate text",
+                    },
+                  ],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    };
+
+    const result = await validateNoDuplicateReply(
+      "event-123",
+      "Duplicate text",
+      mock_supabase,
+      10
+    );
+
+    assert.strictEqual(result.valid, false);
+    assert.strictEqual(result.reason, "duplicate_reply_detected");
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Component Builder Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,23 +565,23 @@ describe("Discord SMS Reply Components", () => {
       assert.strictEqual(buttons.length, 0);
     });
 
-    it("includes Send Suggested button when suggestion provided", () => {
+    it("includes Approve Template button", () => {
       const buttons = buildSmsReplyActionButtons({
         message_event_id: "event-123",
         suggested_reply: "Call us at 555-1234",
       });
 
       assert.ok(buttons.length > 0);
-      assert.ok(buttons[0].components.some((b) => b.label.includes("Send Suggested")));
+      assert.ok(buttons[0].components.some((b) => b.label.includes("Approve Template")));
     });
 
-    it("includes Edit/Manual Reply button", () => {
+    it("includes Manual Reply button", () => {
       const buttons = buildSmsReplyActionButtons({
         message_event_id: "event-123",
         suggested_reply: "Test suggestion",
       });
 
-      assert.ok(buttons[0].components.some((b) => b.label.includes("Edit")));
+      assert.ok(buttons[0].components.some((b) => b.label.includes("Manual Reply")));
     });
 
     it("includes hot lead and suppress buttons", () => {

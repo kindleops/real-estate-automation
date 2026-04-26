@@ -367,41 +367,6 @@ test("/templates audit reads sms_templates and builds embed", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. /templates stage1
-// ---------------------------------------------------------------------------
-
-test("/templates stage1 counts active first-touch and ownership templates", async () => {
-  const mockRows = [
-    { id: 1, is_active: true,  language: "en", use_case: "ownership_check", stage_code: "S1", is_first_touch: true,  template_body: "Hi" },
-    { id: 2, is_active: true,  language: "es", use_case: "ownership_check", stage_code: "S1", is_first_touch: false, template_body: "Hola" },
-    { id: 3, is_active: true,  language: "en", use_case: "follow_up",       stage_code: "S2", is_first_touch: false, template_body: "Follow up" },
-    { id: 4, is_active: false, language: "en", use_case: "ownership_check", stage_code: "S1", is_first_touch: true,  template_body: "Inactive" },
-  ];
-
-  const mock = makeSupabaseMock({
-    sms_templates: { rows: mockRows, count: mockRows.length },
-    discord_command_events: { rows: [] },
-  });
-  __setActionRouterDeps({ supabase_override: mock });
-
-  try {
-    const interaction = makeSlashInteraction({
-      command:    "templates",
-      subcommand: "stage1",
-      role_ids:   ["owner_role"],
-    });
-
-    const response = await routeDiscordInteraction(interaction);
-
-    assert.ok(response, "got a response");
-    assert.equal(response.type, 4, "type 4");
-    assert.ok(response.data?.embeds?.length > 0 || response.data?.content, "has content or embeds");
-  } finally {
-    __resetActionRouterDeps();
-  }
-});
-
-// ---------------------------------------------------------------------------
 // 7. /mission status handles missing optional tables gracefully
 // ---------------------------------------------------------------------------
 
@@ -828,4 +793,331 @@ test("/replay inbound deferred handler calls editInteractionResponse on callInte
   } finally {
     __resetActionRouterDeps();
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// New tests: fixes for routing, buttons, alerts mode, channel router
+// ---------------------------------------------------------------------------
+
+test("/templates stage1 counts active first-touch and ownership templates", async () => {
+  const mockRows = [
+    { id: 1, is_active: true,  language: "en", use_case: "ownership_check", stage_code: "S1", is_first_touch: true,  template_body: "Hi" },
+    { id: 2, is_active: true,  language: "es", use_case: "ownership_check", stage_code: "S1", is_first_touch: false, template_body: "Hola" },
+    { id: 3, is_active: true,  language: "en", use_case: "follow_up",       stage_code: "S2", is_first_touch: false, template_body: "Follow up" },
+    { id: 4, is_active: false, language: "en", use_case: "ownership_check", stage_code: "S1", is_first_touch: true,  template_body: "Inactive" },
+  ];
+  const mock = makeSupabaseMock({
+    sms_templates: { rows: mockRows, count: mockRows.length },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "templates",
+      subcommand: "stage1",
+      role_ids:   ["owner_role"],
+    });
+    const response = await routeDiscordInteraction(interaction);
+    assert.ok(response, "got a response");
+    assert.equal(response.type, 4, "type 4");
+    assert.ok(response.data?.embeds?.length > 0 || response.data?.content, "has content or embeds");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/alerts mode without argument returns mode selector, not error", async () => {
+  const db = makeSupabaseMock({
+    app_config: { rows: [{ key: "alert_mode", value: "normal" }] },
+  });
+  __setActionRouterDeps({ supabase_override: db });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "alerts",
+      subcommand: "mode",
+      options:    [],
+      role_ids:   ["owner_role"],
+    });
+    const result = await routeDiscordInteraction(interaction);
+    const content = result?.data?.content ?? "";
+    assert.ok(!content.toLowerCase().includes("mode is required"), "/alerts mode with no arg must not return \'mode is required\'");
+    const embeds = result?.data?.embeds ?? [];
+    assert.ok(embeds.length > 0, "must return an embed for mode selector");
+    const components = result?.data?.components ?? [];
+    assert.ok(components.length > 0, "must return buttons for mode selector");
+    const button_ids = components.flatMap(r => r.components ?? []).map(b => b.custom_id);
+    assert.ok(button_ids.some(id => id === "alerts:mode:normal"),  "must include alerts:mode:normal button");
+    assert.ok(button_ids.some(id => id === "alerts:mode:quiet"),   "must include alerts:mode:quiet button");
+    assert.ok(button_ids.some(id => id === "alerts:mode:verbose"), "must include alerts:mode:verbose button");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/briefing today returns deferred response (type 5)", async () => {
+  __setActionRouterDeps({ editInteractionResponse_override: async () => {} });
+  try {
+    const interaction = {
+      id: "brief_interaction", type: 2, token: "brief_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { name: "briefing", options: [{ type: 1, name: "today", options: [] }] },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    assert.equal(result?.type, 5, "/briefing today must return deferred response (type 5)");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/briefing yesterday returns deferred response (type 5)", async () => {
+  __setActionRouterDeps({ editInteractionResponse_override: async () => {} });
+  try {
+    const interaction = {
+      id: "brief_y", type: 2, token: "brief_token_y", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { name: "briefing", options: [{ type: 1, name: "yesterday", options: [] }] },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    assert.equal(result?.type, 5, "/briefing yesterday must return deferred response (type 5)");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("campaign:approve_launch button routes without \'Unknown interaction\'", async () => {
+  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key: "dallas_sfr_absentee" }] } });
+  __setActionRouterDeps({ supabase_override: db });
+  try {
+    const interaction = {
+      id: "btn_al", type: 3, token: "btn_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { custom_id: "campaign:approve_launch:dallas_sfr_absentee" },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    const content = String(result?.data?.content ?? "");
+    assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
+    assert.ok(!content.toLowerCase().includes("unknown interaction type"), "must not return unknown interaction type");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("campaign:close button routes without \'Unknown interaction\'", async () => {
+  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key: "dallas_sfr_absentee" }] } });
+  __setActionRouterDeps({ supabase_override: db });
+  try {
+    const interaction = {
+      id: "btn_close", type: 3, token: "btn_close_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { custom_id: "campaign:close:dallas_sfr_absentee" },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    const content = String(result?.data?.content ?? "");
+    assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("unknown button custom_id returns structured ephemeral diagnostic", async () => {
+  const db = makeSupabaseMock({ discord_command_events: {} });
+  __setActionRouterDeps({ supabase_override: db });
+  try {
+    const interaction = {
+      id: "unknown_btn", type: 3, token: "unknown_btn_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { custom_id: "totally:unknown:custom_id_xyz" },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    const content = String(result?.data?.content ?? "");
+    assert.ok(content.includes("Unsupported interaction"), "unknown button must return Unsupported interaction: <custom_id>");
+    assert.ok(content.includes("totally:unknown:custom_id_xyz"), "must include the received custom_id");
+    const flags = result?.data?.flags ?? 0;
+    assert.ok(flags & 64, "unknown button response must be ephemeral");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("channel router resolves event types to channel keys", async () => {
+  const { resolveChannelForEvent, getChannelKeyForEvent } = await import(
+    "@/lib/discord/discord-channel-router.js"
+  );
+  assert.equal(getChannelKeyForEvent("inbound_sms_reply"), "inbound_replies");
+  assert.equal(getChannelKeyForEvent("campaign_create"),   "mission_control");
+  assert.equal(getChannelKeyForEvent("hot_lead"),          "hot_leads");
+  assert.equal(getChannelKeyForEvent("feeder_run"),        "feeder_runs");
+  assert.equal(getChannelKeyForEvent("opt_out"),           "opt_outs");
+  assert.equal(getChannelKeyForEvent("debug_log"),         "debug_logs");
+  assert.equal(getChannelKeyForEvent("unknown_xyz"),       null);
+
+  const result = resolveChannelForEvent("inbound_sms_reply", { env: {} });
+  assert.ok(result, "resolveChannelForEvent must return a result object");
+  assert.equal(result.fallback, true, "must indicate fallback when no env var set");
+});
+
+
+// ---------------------------------------------------------------------------
+// New tests: routing fixes, button handlers, alerts mode, channel router
+// ---------------------------------------------------------------------------
+
+test("/templates stage1 counts active first-touch and ownership templates", async () => {
+  const mockRows = [
+    { id: 1, is_active: true,  language: "en", use_case: "ownership_check", stage_code: "S1", is_first_touch: true,  template_body: "Hi" },
+    { id: 2, is_active: true,  language: "es", use_case: "ownership_check", stage_code: "S1", is_first_touch: false, template_body: "Hola" },
+    { id: 3, is_active: true,  language: "en", use_case: "follow_up",       stage_code: "S2", is_first_touch: false, template_body: "Follow up" },
+    { id: 4, is_active: false, language: "en", use_case: "ownership_check", stage_code: "S1", is_first_touch: true,  template_body: "Inactive" },
+  ];
+  const mock = makeSupabaseMock({
+    sms_templates: { rows: mockRows, count: mockRows.length },
+    discord_command_events: { rows: [] },
+  });
+  __setActionRouterDeps({ supabase_override: mock });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "templates",
+      subcommand: "stage1",
+      role_ids:   ["owner_role"],
+    });
+    const response = await routeDiscordInteraction(interaction);
+    assert.ok(response, "got a response");
+    assert.equal(response.type, 4, "type 4");
+    assert.ok(response.data?.embeds?.length > 0 || response.data?.content, "has content or embeds");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/alerts mode without argument returns mode selector, not error", async () => {
+  const db = makeSupabaseMock({
+    app_config: { rows: [{ key: "alert_mode", value: "normal" }] },
+  });
+  __setActionRouterDeps({ supabase_override: db });
+
+  try {
+    const interaction = makeSlashInteraction({
+      command:    "alerts",
+      subcommand: "mode",
+      options:    [],
+      role_ids:   ["owner_role"],
+    });
+    const result = await routeDiscordInteraction(interaction);
+    const content = result?.data?.content ?? "";
+    assert.ok(!content.toLowerCase().includes("mode is required"), "must not return mode is required");
+    const embeds = result?.data?.embeds ?? [];
+    assert.ok(embeds.length > 0, "must return an embed for mode selector");
+    const components = result?.data?.components ?? [];
+    assert.ok(components.length > 0, "must return buttons for mode selector");
+    const button_ids = components.flatMap(r => r.components ?? []).map(b => b.custom_id);
+    assert.ok(button_ids.some(id => id === "alerts:mode:normal"),  "must include alerts:mode:normal button");
+    assert.ok(button_ids.some(id => id === "alerts:mode:quiet"),   "must include alerts:mode:quiet button");
+    assert.ok(button_ids.some(id => id === "alerts:mode:verbose"), "must include alerts:mode:verbose button");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/briefing today returns deferred response (type 5)", async () => {
+  __setActionRouterDeps({ editInteractionResponse_override: async () => {} });
+  try {
+    const interaction = {
+      id: "brief_interaction", type: 2, token: "brief_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { name: "briefing", options: [{ type: 1, name: "today", options: [] }] },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    assert.equal(result?.type, 5, "/briefing today must return deferred response (type 5)");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("/briefing yesterday returns deferred response (type 5)", async () => {
+  __setActionRouterDeps({ editInteractionResponse_override: async () => {} });
+  try {
+    const interaction = {
+      id: "brief_y", type: 2, token: "brief_token_y", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { name: "briefing", options: [{ type: 1, name: "yesterday", options: [] }] },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    assert.equal(result?.type, 5, "/briefing yesterday must return deferred response (type 5)");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("campaign:approve_launch button routes without Unknown interaction", async () => {
+  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key: "dallas_sfr_absentee" }] } });
+  __setActionRouterDeps({ supabase_override: db });
+  try {
+    const interaction = {
+      id: "btn_al", type: 3, token: "btn_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { custom_id: "campaign:approve_launch:dallas_sfr_absentee" },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    const content = String(result?.data?.content ?? "");
+    assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("campaign:close button routes without Unknown interaction", async () => {
+  const db = makeSupabaseMock({ campaign_targets: { rows: [{ campaign_key: "dallas_sfr_absentee" }] } });
+  __setActionRouterDeps({ supabase_override: db });
+  try {
+    const interaction = {
+      id: "btn_close", type: 3, token: "btn_close_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { custom_id: "campaign:close:dallas_sfr_absentee" },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    const content = String(result?.data?.content ?? "");
+    assert.ok(!content.toLowerCase().includes("unsupported interaction"), "must not return Unsupported interaction");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("unknown button custom_id returns structured ephemeral diagnostic", async () => {
+  const db = makeSupabaseMock({ discord_command_events: {} });
+  __setActionRouterDeps({ supabase_override: db });
+  try {
+    const interaction = {
+      id: "unknown_btn", type: 3, token: "unknown_btn_token", guild_id: "guild_5678",
+      member: { user: { id: "user_1234", username: "TestUser" }, roles: ["owner_role"] },
+      data: { custom_id: "totally:unknown:custom_id_xyz" },
+    };
+    const result = await routeDiscordInteraction(interaction);
+    const content = String(result?.data?.content ?? "");
+    assert.ok(content.includes("Unsupported interaction"), "unknown button must return Unsupported interaction: <custom_id>");
+    assert.ok(content.includes("totally:unknown:custom_id_xyz"), "must include the received custom_id");
+    const flags = result?.data?.flags ?? 0;
+    assert.ok(flags & 64, "unknown button response must be ephemeral");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("channel router resolves event types to channel keys", async () => {
+  const { resolveChannelForEvent, getChannelKeyForEvent } = await import(
+    "@/lib/discord/discord-channel-router.js"
+  );
+  assert.equal(getChannelKeyForEvent("inbound_sms_reply"), "inbound_replies");
+  assert.equal(getChannelKeyForEvent("campaign_create"),   "mission_control");
+  assert.equal(getChannelKeyForEvent("hot_lead"),          "hot_leads");
+  assert.equal(getChannelKeyForEvent("feeder_run"),        "feeder_runs");
+  assert.equal(getChannelKeyForEvent("opt_out"),           "opt_outs");
+  assert.equal(getChannelKeyForEvent("debug_log"),         "debug_logs");
+  assert.equal(getChannelKeyForEvent("unknown_xyz"),       null);
+
+  const result = resolveChannelForEvent("inbound_sms_reply", { env: {} });
+  assert.ok(result, "resolveChannelForEvent must return a result object");
+  assert.equal(result.fallback, true, "must indicate fallback when no env var set");
 });
