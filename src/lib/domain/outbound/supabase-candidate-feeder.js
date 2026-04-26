@@ -1,7 +1,5 @@
 import crypto from "node:crypto";
 
-import { renderTemplate } from "@/lib/domain/templates/render-template.js";
-import { loadBestSupabaseSmsTemplate } from "@/lib/domain/master-owners/supabase-feeder-support.js";
 import { child } from "@/lib/logging/logger.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/client.js";
@@ -192,6 +190,19 @@ function buildQueueKeyFromIdempotencyKey(idempotency_key) {
 }
 
 export function normalizeCandidateRow(row = {}, defaults = {}) {
+  const normalized_touch_number = asPositiveInteger(
+    pick(row.touch_number, row.next_touch_number, defaults.touch_number),
+    1
+  );
+  const template_lookup_use_case =
+    clean(pick(row.template_use_case, row.use_case, row.selected_use_case, defaults.template_use_case)) ||
+    "ownership_check";
+  const stage_code = clean(pick(row.stage_code, defaults.stage_code, "S1")) || "S1";
+  const stage_label =
+    clean(pick(row.stage_label, defaults.stage_label, "Ownership Confirmation")) ||
+    "Ownership Confirmation";
+  const is_first_touch = normalized_touch_number === 1;
+
   // Accept any non-empty string for IDs (mo_..., prop_..., ph_..., numeric, etc.)
   const master_owner_id =
     pick(row.master_owner_id, row.owner_id, row.owner_podio_item_id) || null;
@@ -251,10 +262,13 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
     ),
     active_opt_out: asBoolean(pick(row.active_opt_out, row.opt_out_active, row.is_opted_out), false),
     pending_prior_touch: asBoolean(pick(row.pending_prior_touch), false),
-    template_use_case:
-      clean(pick(row.template_use_case, row.use_case, row.selected_use_case, defaults.template_use_case)) ||
-      "ownership_check",
-    touch_number: asPositiveInteger(pick(row.touch_number, row.next_touch_number, defaults.touch_number), 1),
+    template_use_case: template_lookup_use_case,
+    template_lookup_use_case,
+    stage_code,
+    stage_label,
+    touch_number: normalized_touch_number,
+    is_first_touch,
+    is_follow_up: !is_first_touch,
     campaign_session_id:
       clean(pick(row.campaign_session_id, defaults.campaign_session_id)) ||
       `session-${new Date().toISOString().slice(0, 10)}`,
@@ -334,6 +348,146 @@ function buildTemplateContext(candidate = {}) {
     market_name: candidate.market || null,
     state: candidate.state || null,
   };
+}
+
+function decodeBasicHtmlEntities(text = "") {
+  return String(text)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+}
+
+function stripHtml(text = "") {
+  return String(text).replace(/<[^>]*>/g, " ");
+}
+
+function formatCurrency(value) {
+  const numeric = asNumber(value, null);
+  if (!Number.isFinite(numeric)) return "";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(numeric);
+}
+
+function isLikelyCorporateName(name = "") {
+  const normalized = lower(name);
+  return ["llc", "inc", "property", "management", "trust", "holdings"].some((token) =>
+    normalized.includes(token)
+  );
+}
+
+function deriveSellerFirstName(candidate = {}) {
+  const owner_display_name = clean(
+    pick(candidate.owner_display_name, candidate.raw?.display_name, candidate.raw?.owner_display_name)
+  );
+  if (!owner_display_name || isLikelyCorporateName(owner_display_name)) return "";
+  const parts = owner_display_name.split(/\s+/).filter(Boolean);
+  return clean(parts[0]);
+}
+
+function buildTemplateVariablePayload(candidate = {}) {
+  const owner_display_name = clean(
+    pick(candidate.raw?.display_name, candidate.owner_display_name, candidate.raw?.owner_display_name)
+  );
+  const language = clean(pick(candidate.best_language, candidate.language, "English")) || "English";
+  const payload = {
+    seller_first_name: deriveSellerFirstName(candidate),
+    owner_display_name,
+    owner_name: owner_display_name || candidate.seller_name || "",
+    property_address: clean(candidate.property_address_full),
+    property_city: clean(candidate.property_city),
+    property_state: clean(candidate.property_state || candidate.state),
+    property_zip: clean(candidate.property_zip),
+    offer_price: formatCurrency(candidate.cash_offer),
+    cash_offer: candidate.cash_offer,
+    agent_name: clean(pick(candidate.agent_persona, candidate.raw?.agent_name, "Alex")) || "Alex",
+    language,
+    market: clean(candidate.market),
+  };
+
+  return payload;
+}
+
+function applyTemplatePlaceholders(template_text = "", payload = {}) {
+  const missing = new Set();
+
+  const resolveKey = (key) => {
+    const normalized_key = clean(key);
+    if (!normalized_key) return "";
+    const value = payload[normalized_key];
+    if (value === null || value === undefined || clean(value) === "") {
+      missing.add(normalized_key);
+      return "";
+    }
+    return String(value);
+  };
+
+  let rendered = String(template_text || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => resolveKey(key));
+  rendered = rendered.replace(/\{\s*([a-zA-Z0-9_]+)\s*\}/g, (_, key) => resolveKey(key));
+
+  return {
+    rendered_text: rendered,
+    missing_variables: [...missing],
+  };
+}
+
+function scoreTemplateCandidate(template = {}, selector = {}) {
+  const preferred_language = lower(selector.preferred_language || "English");
+  const template_language = lower(template.language || "English");
+  const preferred_persona = lower(selector.preferred_agent_persona || "");
+  const template_persona = lower(template.agent_persona || "");
+  const persona_exact = Boolean(preferred_persona) && template_persona === preferred_persona;
+  const persona_null = !clean(template.agent_persona);
+  const use_case_exact = lower(template.use_case) === lower(selector.use_case);
+  const language_exact = template_language === preferred_language;
+  const language_english = template_language === "english";
+
+  let ranking_group = 7;
+  if (use_case_exact && language_exact && persona_exact) ranking_group = 1;
+  else if (use_case_exact && language_exact && persona_null) ranking_group = 2;
+  else if (use_case_exact && language_exact) ranking_group = 3;
+  else if (use_case_exact && language_english && persona_exact) ranking_group = 4;
+  else if (use_case_exact && language_english && persona_null) ranking_group = 5;
+  else if (use_case_exact && language_english) ranking_group = 6;
+
+  const stage_bonus =
+    lower(selector.use_case) === "ownership_check" && lower(selector.stage_code) === lower(template.stage_code)
+      ? 1
+      : 0;
+  const touch_bonus = selector.is_first_touch
+    ? asBoolean(template.is_first_touch, false)
+      ? 1
+      : 0
+    : asBoolean(template.is_follow_up, false)
+      ? 1
+      : 0;
+
+  return {
+    ranking_group,
+    stage_bonus,
+    touch_bonus,
+    success_rate: asNumber(template.success_rate, 0),
+    usage_count: asNumber(template.usage_count, 0),
+    version: asNumber(template.version, 0),
+    updated_at_ts: new Date(template.updated_at || template.created_at || 0).getTime() || 0,
+  };
+}
+
+function sortTemplateCandidates(left, right, selector) {
+  const l = scoreTemplateCandidate(left, selector);
+  const r = scoreTemplateCandidate(right, selector);
+  if (l.ranking_group !== r.ranking_group) return l.ranking_group - r.ranking_group;
+  if (l.stage_bonus !== r.stage_bonus) return r.stage_bonus - l.stage_bonus;
+  if (l.touch_bonus !== r.touch_bonus) return r.touch_bonus - l.touch_bonus;
+  if (l.success_rate !== r.success_rate) return r.success_rate - l.success_rate;
+  if (l.usage_count !== r.usage_count) return r.usage_count - l.usage_count;
+  if (l.version !== r.version) return r.version - l.version;
+  return r.updated_at_ts - l.updated_at_ts;
 }
 
 function parseWindowTime(value) {
@@ -759,49 +913,146 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
   }
 
   const selector = {
-    use_case: options.template_use_case || candidate.template_use_case || "ownership_check",
-    touch_type: Number(candidate.touch_number || 1) <= 1 ? "First Touch" : "Follow-Up",
-    language: candidate.language || "English",
+    use_case: clean(options.template_use_case || candidate.template_lookup_use_case || candidate.template_use_case) || "ownership_check",
+    stage_code: clean(candidate.stage_code) || "S1",
+    stage_label: clean(candidate.stage_label) || "Ownership Confirmation",
+    touch_number: asPositiveInteger(candidate.touch_number, 1),
+    is_first_touch: Number(candidate.touch_number || 1) === 1,
+    preferred_language: clean(pick(candidate.best_language, candidate.language, "English")) || "English",
+    preferred_agent_persona: clean(candidate.agent_persona) || "",
     property_type_scope: clean(candidate.raw?.property_type_scope) || null,
     deal_strategy: clean(candidate.raw?.deal_strategy) || null,
   };
 
-  const template = await loadBestSupabaseSmsTemplate(selector, deps);
-  if (!template?.text) {
+  let templates = [];
+  if (typeof deps.fetchSmsTemplates === "function") {
+    templates = await deps.fetchSmsTemplates(selector, candidate, options);
+  } else {
+    const supabase = getSupabase(deps);
+    const { data, error } = await supabase
+      .from("sms_templates")
+      .select("*")
+      .eq("is_active", true)
+      .eq("use_case", selector.use_case)
+      .limit(200);
+
+    if (error) {
+      return {
+        ok: false,
+        reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+        reason: "template_query_failed",
+        render_error_message: error?.message || String(error),
+        template: null,
+        rendered_message_body: null,
+        missing_variables: [],
+        variable_payload_preview: {},
+        selected_template_preview: null,
+      };
+    }
+
+    templates = Array.isArray(data) ? data : [];
+
+    if (!templates.length) {
+      const fallback_any_use_case = await supabase
+        .from("sms_templates")
+        .select("*")
+        .eq("is_active", true)
+        .limit(200);
+
+      templates = Array.isArray(fallback_any_use_case?.data) ? fallback_any_use_case.data : [];
+    }
+  }
+
+  if (!templates.length) {
     return {
       ok: false,
       reason_code: REASON_CODES.NO_TEMPLATE,
-      reason: "no_renderable_template",
+      reason: "no_template_found",
       template: null,
       rendered_message_body: null,
+      missing_variables: [],
+      variable_payload_preview: buildTemplateVariablePayload(candidate),
+      selected_template_preview: null,
     };
   }
 
-  const rendered = renderTemplate({
-    template_text: template.text,
-    context: buildTemplateContext(candidate),
-    use_case: selector.use_case,
-    variant_group: template.variant_group || null,
-  });
+  const selected_template = [...templates].sort((left, right) => sortTemplateCandidates(left, right, selector))[0] || null;
+  const selected_template_with_source = selected_template
+    ? { ...selected_template, source: "sms_templates" }
+    : null;
+  const source_body = clean(pick(selected_template?.template_body, selected_template?.english_translation));
 
-  if (!rendered.ok || !clean(rendered.rendered_text)) {
+  if (!source_body) {
     return {
       ok: false,
       reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
-      reason: "template_render_failed",
-      template,
-      render_result: rendered,
+      reason: "rendered_message_empty",
+      render_error_message: "rendered_message_empty",
+      template: selected_template_with_source,
       rendered_message_body: null,
+      missing_variables: [],
+      variable_payload_preview: buildTemplateVariablePayload(candidate),
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        podio_template_id: selected_template?.podio_template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+        stage_label: selected_template?.stage_label || null,
+      },
+    };
+  }
+
+  const variable_payload = buildTemplateVariablePayload(candidate);
+  const rendered = applyTemplatePlaceholders(source_body, variable_payload);
+  const normalized_rendered = clean(decodeBasicHtmlEntities(stripHtml(rendered.rendered_text || "")));
+
+  if (!normalized_rendered) {
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "rendered_message_empty",
+      render_error_message: "rendered_message_empty",
+      template: selected_template_with_source,
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        podio_template_id: selected_template?.podio_template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+        stage_label: selected_template?.stage_label || null,
+      },
     };
   }
 
   return {
     ok: true,
     reason_code: "OK",
-    template,
+    template: selected_template_with_source,
     template_use_case: selector.use_case,
-    rendered_message_body: rendered.rendered_text,
-    render_result: rendered,
+    rendered_message_body: normalized_rendered,
+    missing_variables: rendered.missing_variables,
+    variable_payload_preview: variable_payload,
+    selected_template_preview: {
+      id: selected_template?.id || null,
+      template_id: selected_template?.template_id || null,
+      podio_template_id: selected_template?.podio_template_id || null,
+      template_name: selected_template?.template_name || null,
+      use_case: selected_template?.use_case || null,
+      language: selected_template?.language || null,
+      stage_code: selected_template?.stage_code || null,
+      stage_label: selected_template?.stage_label || null,
+    },
+    stage_code: selected_template?.stage_code || selector.stage_code,
+    stage_label: selected_template?.stage_label || selector.stage_label,
+    language: selected_template?.language || selector.preferred_language,
   };
 }
 
@@ -929,6 +1180,8 @@ export function buildFeederDiagnostics(summary = {}) {
     pending_prior_touch_block_count: Number(summary.pending_prior_touch_block_count || 0),
     duplicate_queue_block_count: Number(summary.duplicate_queue_block_count || 0),
     template_block_count: Number(summary.template_block_count || 0),
+    no_template_count: Number(summary.no_template_count || 0),
+    template_render_failed_count: Number(summary.template_render_failed_count || 0),
     error: clean(summary.error) || null,
     candidate_source_error: clean(summary.candidate_source_error) || null,
     available_hint: Array.isArray(summary.available_hint) ? summary.available_hint : undefined,
@@ -960,6 +1213,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     template_use_case: clean(input.template_use_case) || "ownership_check",
     touch_number: asPositiveInteger(input.touch_number, 1),
     campaign_session_id: clean(input.campaign_session_id) || `session-${now.slice(0, 10)}`,
+    debug_templates: asBoolean(input.debug_templates, false),
     now,
   };
 
@@ -983,6 +1237,8 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       pending_prior_touch_block_count: 0,
       duplicate_queue_block_count: 0,
       template_block_count: 0,
+      no_template_count: 0,
+      template_render_failed_count: 0,
       selected_textgrid_market_counts: {},
       routing_tier_counts: {},
       sample_created_queue_items: [],
@@ -1011,6 +1267,8 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     pending_prior_touch_block_count: 0,
     duplicate_queue_block_count: 0,
     template_block_count: 0,
+    no_template_count: 0,
+    template_render_failed_count: 0,
     selected_textgrid_market_counts: {},
     routing_tier_counts: {},
     sample_created_queue_items: [],
@@ -1080,11 +1338,34 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     if (!rendered.ok) {
       summary.skipped_count += 1;
       summary.template_block_count += 1;
+      if (rendered.reason_code === REASON_CODES.NO_TEMPLATE) {
+        summary.no_template_count += 1;
+      }
+      if (rendered.reason_code === REASON_CODES.TEMPLATE_RENDER_FAILED) {
+        summary.template_render_failed_count += 1;
+      }
       summary.sample_skips.push({
         reason_code: rendered.reason_code,
         reason: rendered.reason,
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        ...(options.dry_run && options.debug_templates
+          ? {
+              template_lookup_use_case: candidate.template_lookup_use_case || candidate.template_use_case || null,
+              template_id: rendered.template?.template_id || rendered.template?.id || null,
+              podio_template_id: rendered.template?.podio_template_id || null,
+              template_source: "sms_templates",
+              template_name: rendered.template?.template_name || null,
+              stage_code: rendered.template?.stage_code || candidate.stage_code || null,
+              stage_label: rendered.template?.stage_label || candidate.stage_label || null,
+              touch_number: candidate.touch_number,
+              language: rendered.template?.language || candidate.best_language || candidate.language || "English",
+              render_error_message: rendered.render_error_message || rendered.reason || null,
+              missing_variables: rendered.missing_variables || [],
+              variable_payload_preview: rendered.variable_payload_preview || {},
+              selected_template_preview: rendered.selected_template_preview || null,
+            }
+          : {}),
         ..._preview,
       });
       continue;
@@ -1099,6 +1380,9 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         template_id: rendered.template?.template_id || rendered.template?.item_id || null,
         template_source: rendered.template?.source || "supabase",
         template_use_case: rendered.template_use_case,
+        template_name: rendered.template?.template_name || null,
+        template_stage_code: rendered.stage_code || rendered.template?.stage_code || null,
+        template_language: rendered.language || rendered.template?.language || null,
         selected_textgrid_number_id: routing.selected.id,
         selected_textgrid_number: routing.selected.phone_number,
         selected_textgrid_market: routing.selected.market,
@@ -1148,6 +1432,11 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       routing_allowed: true,
       routing_block_reason: null,
       template_use_case: rendered.template_use_case,
+      template_id: rendered.template?.template_id || rendered.template?.id || null,
+      template_name: rendered.template?.template_name || null,
+      stage_code: rendered.stage_code || rendered.template?.stage_code || null,
+      language: rendered.language || rendered.template?.language || null,
+      rendered_message_preview: clean(rendered.rendered_message_body).slice(0, 160),
       dry_run: options.dry_run,
     });
   }

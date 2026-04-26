@@ -35,6 +35,7 @@ export function normalizeFeedCandidatesInput(input = {}) {
     template_use_case: clean(input.template_use_case) || "ownership_check",
     touch_number: asPositiveInteger(input.touch_number, 1),
     campaign_session_id: clean(input.campaign_session_id) || null,
+    debug_templates: asBoolean(input.debug_templates, false),
   };
 }
 
@@ -54,6 +55,7 @@ function mergeBodyAndQuery(request, method, body = {}) {
     "template_use_case",
     "touch_number",
     "campaign_session_id",
+    "debug_templates",
   ]) {
     const value = search_params.get(key);
     if (value !== null) merged[key] = value;

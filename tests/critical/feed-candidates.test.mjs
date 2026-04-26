@@ -5,6 +5,7 @@ import {
   REASON_CODES,
   chooseTextgridNumber,
   evaluateCandidateEligibility,
+  renderOutboundTemplate,
   runSupabaseCandidateFeeder,
   normalizeCandidateRow,
 } from "@/lib/domain/outbound/supabase-candidate-feeder.js";
@@ -586,5 +587,247 @@ test("chooseTextgridNumber blocks random nationwide fallback when routing_safe_o
   assert.equal(result.ok, false);
   assert.equal(result.routing_allowed, false);
   assert.equal(result.routing_block_reason, "NO_APPROVED_ROUTING_PATH");
+});
+
+test("v_sms_ready_contacts candidate without template fields selects ownership_check S1", async () => {
+  const candidate = normalizeCandidateRow({
+    display_name: "Jane Seller",
+    property_address_full: "123 Main St",
+    property_address_city: "Charlotte",
+    property_address_state: "NC",
+    property_address_zip: "28202",
+    market: "Charlotte, NC",
+    language: "English",
+    cash_offer: 120000,
+  });
+
+  let captured_selector = null;
+  const result = await renderOutboundTemplate(
+    candidate,
+    {},
+    {
+      fetchSmsTemplates: async (selector) => {
+        captured_selector = selector;
+        return [
+          {
+            id: "tpl-1",
+            template_id: "ownership-s1-en",
+            use_case: "ownership_check",
+            stage_code: "S1",
+            stage_label: "Ownership Confirmation",
+            language: "English",
+            is_active: true,
+            template_body: "Hi {{owner_display_name}}, is this still your property at {property_address}?",
+          },
+        ];
+      },
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(captured_selector.use_case, "ownership_check");
+  assert.equal(captured_selector.stage_code, "S1");
+  assert.equal(captured_selector.is_first_touch, true);
+});
+
+test("Spanish candidate selects Spanish ownership_check template when available", async () => {
+  const candidate = normalizeCandidateRow({
+    display_name: "Maria Lopez",
+    best_language: "Spanish",
+    property_address_full: "456 Elm St",
+    property_address_state: "TX",
+  });
+
+  const result = await renderOutboundTemplate(
+    candidate,
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-en",
+          template_id: "ownership-s1-en",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+          is_active: true,
+          template_body: "Hello {owner_display_name}",
+        },
+        {
+          id: "tpl-es",
+          template_id: "ownership-s1-es",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "Spanish",
+          is_active: true,
+          template_body: "Hola {owner_display_name}",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template.template_id, "ownership-s1-es");
+  assert.equal(result.language, "Spanish");
+});
+
+test("Persona mismatch falls back to null persona template", async () => {
+  const candidate = normalizeCandidateRow({
+    display_name: "Taylor Owner",
+    language: "English",
+    agent_persona: "Alex",
+    property_address_full: "789 Oak Ave",
+    property_address_state: "FL",
+  });
+
+  const result = await renderOutboundTemplate(
+    candidate,
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-persona-other",
+          template_id: "tpl-other",
+          use_case: "ownership_check",
+          language: "English",
+          agent_persona: "Jordan",
+          is_active: true,
+          template_body: "Hello from Jordan",
+        },
+        {
+          id: "tpl-persona-null",
+          template_id: "tpl-null",
+          use_case: "ownership_check",
+          language: "English",
+          agent_persona: null,
+          is_active: true,
+          template_body: "Hello from neutral",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template.template_id, "tpl-null");
+});
+
+test("No template rows return NO_TEMPLATE", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({ display_name: "No Template" }),
+    {},
+    { fetchSmsTemplates: async () => [] }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason_code, REASON_CODES.NO_TEMPLATE);
+});
+
+test("Empty template body returns TEMPLATE_RENDER_FAILED rendered_message_empty", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({ display_name: "Empty Body" }),
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-empty",
+          use_case: "ownership_check",
+          language: "English",
+          is_active: true,
+          template_body: "",
+          english_translation: "",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason_code, REASON_CODES.TEMPLATE_RENDER_FAILED);
+  assert.equal(result.reason, "rendered_message_empty");
+});
+
+test("Template rendering supports both {{property_address}} and {property_address}", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      display_name: "Dual Placeholder",
+      property_address_full: "1 Sunset Blvd",
+      property_address_state: "CA",
+    }),
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-placeholders",
+          use_case: "ownership_check",
+          language: "English",
+          is_active: true,
+          template_body: "A: {{property_address}} | B: {property_address}",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(result.rendered_message_body.includes("A: 1 Sunset Blvd"));
+  assert.ok(result.rendered_message_body.includes("B: 1 Sunset Blvd"));
+});
+
+test("Template rendering strips HTML content", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({ display_name: "HTML Owner", property_address_full: "3 Pine St", property_address_state: "GA" }),
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-html",
+          use_case: "ownership_check",
+          language: "English",
+          is_active: true,
+          template_body: "<p>Hello <strong>{owner_display_name}</strong>&nbsp;</p>",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.rendered_message_body.includes("<"), false);
+  assert.ok(result.rendered_message_body.includes("Hello"));
+  assert.ok(result.rendered_message_body.includes("HTML"));
+});
+
+test("debug_templates=true includes template diagnostics in dry-run sample_skips", async () => {
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      debug_templates: true,
+      limit: 1,
+      scan_limit: 10,
+      within_contact_window_now: false,
+    },
+    {
+      supabase: makeSupabaseWithCandidates([
+        makeCandidate(77, { market: "Houston, TX", property_address_state: "TX", property_address_full: "500 Main" }),
+      ]),
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        routing_rule_name: "exact_market_match",
+        selected: { id: 1, phone_number: "+18325550111", market: "Houston, TX" },
+      }),
+      fetchSmsTemplates: async () => [],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.no_template_count, 1);
+  assert.equal(result.template_render_failed_count, 0);
+  assert.ok(result.sample_skips.length > 0);
+  const skip = result.sample_skips[0];
+  assert.equal(skip.template_source, "sms_templates");
+  assert.ok("template_lookup_use_case" in skip);
+  assert.ok("missing_variables" in skip);
+  assert.ok("variable_payload_preview" in skip);
+  assert.ok("selected_template_preview" in skip);
 });
 
