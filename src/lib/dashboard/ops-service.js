@@ -8,7 +8,7 @@ import { UNDERWRITING_FIELDS, findUnderwritingItems } from "@/lib/podio/apps/und
 import { CONTRACT_FIELDS, findContractItems } from "@/lib/podio/apps/contracts.js";
 import { TITLE_ROUTING_FIELDS, findTitleRoutingItems } from "@/lib/podio/apps/title-routing.js";
 import { CLOSING_FIELDS, findClosingItems } from "@/lib/podio/apps/closings.js";
-import { runMasterOwnerOutboundFeeder } from "@/lib/domain/master-owners/run-master-owner-outbound-feeder.js";
+import { runSupabaseCandidateFeeder } from "@/lib/domain/outbound/supabase-candidate-feeder.js";
 import {
   getCategoryValue,
   getDateValue,
@@ -79,6 +79,14 @@ function parsePositiveInteger(value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.floor(parsed);
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const normalized = lower(value);
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
 function toTimestamp(value) {
@@ -175,6 +183,12 @@ export function parseOpsFilters(input = {}) {
       DEFAULT_FEEDER_SCAN_LIMIT
     ),
     feeder_limit: parsePositiveInteger(input?.limit, DEFAULT_FEEDER_LIMIT),
+    candidate_source: clean(input?.candidate_source) || "v_sms_ready_contacts",
+    routing_safe_only: parseBoolean(input?.routing_safe_only, true),
+    legacy_feeder: parseBoolean(
+      input?.legacy ?? input?.legacy_feeder ?? input?.use_legacy_podio_feeder,
+      false
+    ),
   };
 }
 
@@ -198,7 +212,23 @@ function serializeFeederFilterKey(filters = {}) {
     source_view_name: filters.source_view_name || null,
     feeder_scan_limit: filters.feeder_scan_limit || DEFAULT_FEEDER_SCAN_LIMIT,
     feeder_limit: filters.feeder_limit || DEFAULT_FEEDER_LIMIT,
+    candidate_source: filters.candidate_source || "v_sms_ready_contacts",
+    routing_safe_only: filters.routing_safe_only !== false,
+    legacy_feeder: Boolean(filters.legacy_feeder),
   });
+}
+
+function summarizeSkipReasonCounts(sample_skips = []) {
+  const counts = new Map();
+  for (const item of Array.isArray(sample_skips) ? sample_skips : []) {
+    const key = clean(item?.reason_code || item?.reason || "unknown") || "unknown";
+    counts.set(key, Number(counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].map(([reason, count]) => ({ reason, count }));
+}
+
+function isLegacyPodioFeederEnabled() {
+  return parseBoolean(process.env.LEGACY_PODIO_FEEDER_ENABLED, false);
 }
 
 function getItemCreatedAt(item) {
@@ -1314,14 +1344,17 @@ export async function getOpsQueueSnapshot(input = {}) {
   );
 }
 
-export async function getOpsFeederSnapshot(input = {}) {
+export async function getOpsFeederSnapshot(input = {}, deps = {}) {
   const filters = parseOpsFilters(input);
+  const readCache = deps.readThroughCache || readThroughCache;
+  const getFilterOptions = deps.getOpsFilterOptions || getOpsFilterOptions;
+  const runSupabaseFeeder = deps.runSupabaseCandidateFeeder || runSupabaseCandidateFeeder;
 
-  return readThroughCache(
+  return readCache(
     `dashboard:ops:feeder:${serializeFeederFilterKey(filters)}`,
     FEEDER_TTL_MS,
     async () => {
-      const options = await getOpsFilterOptions();
+      const options = await getFilterOptions();
       const source_view =
         options.views.find(
           (view) =>
@@ -1329,39 +1362,93 @@ export async function getOpsFeederSnapshot(input = {}) {
             lower(view.name) === lower(filters.source_view_name)
         ) || pickDefaultFeederView(options.views);
 
-      if (!source_view?.view_id && !source_view?.name) {
+      if (filters.legacy_feeder && !isLegacyPodioFeederEnabled()) {
         return {
           generated_at: new Date().toISOString(),
           filters,
           ok: false,
-          reason: "no_master_owner_views_available",
+          dry_run: true,
+          error: "LEGACY_PODIO_FEEDER_DISABLED",
+          message: "Dashboard feeder actions now use Supabase candidate feeder.",
+          loaded_count: 0,
+          eligible_count: 0,
+          inserted_count: 0,
+          queued_count: 0,
+          skipped_count: 0,
+          sample_skips: [],
+          selected_textgrid_market_counts: {},
+          routing_tier_counts: {},
+          source_view: {
+            view_id: source_view?.view_id ?? null,
+            name: source_view?.name ?? null,
+          },
           view_options: options.views,
         };
       }
 
-      const feeder_result = await runMasterOwnerOutboundFeeder({
-        dry_run: true,
-        source_view_id: source_view?.view_id || null,
-        source_view_name: source_view?.name || null,
-        scan_limit: filters.feeder_scan_limit,
-        limit: filters.feeder_limit,
-      });
+      let feeder_result;
+
+      if (filters.legacy_feeder && isLegacyPodioFeederEnabled()) {
+        const legacyModule = await import("@/lib/domain/master-owners/run-master-owner-outbound-feeder.js");
+        feeder_result = await legacyModule.runMasterOwnerOutboundFeeder({
+          dry_run: true,
+          source_view_id: source_view?.view_id || null,
+          source_view_name: source_view?.name || null,
+          scan_limit: filters.feeder_scan_limit,
+          limit: filters.feeder_limit,
+        });
+      } else {
+        feeder_result = await runSupabaseFeeder({
+          dry_run: true,
+          candidate_source: filters.candidate_source || "v_sms_ready_contacts",
+          routing_safe_only: filters.routing_safe_only !== false,
+          scan_limit: filters.feeder_scan_limit,
+          limit: filters.feeder_limit,
+        });
+      }
+
+      const loaded_count = Number(
+        feeder_result?.loaded_count ?? feeder_result?.fetched_candidate_count ?? feeder_result?.scanned_count ?? 0
+      );
+      const eligible_count = Number(
+        feeder_result?.eligible_count ?? feeder_result?.eligible_owner_count ?? 0
+      );
+      const queued_count = Number(
+        feeder_result?.queued_count ?? feeder_result?.inserted_count ?? 0
+      );
+      const skipped_count = Number(feeder_result?.skipped_count ?? 0);
+      const sample_skips = Array.isArray(feeder_result?.sample_skips) ? feeder_result.sample_skips : [];
+      const sample_created_queue_items = Array.isArray(feeder_result?.sample_created_queue_items)
+        ? feeder_result.sample_created_queue_items
+        : [];
 
       return {
         generated_at: new Date().toISOString(),
         filters,
         ok: feeder_result?.ok !== false,
+        dry_run: feeder_result?.dry_run !== false,
+        error: feeder_result?.error || null,
+        message: feeder_result?.message || null,
         source_view: {
           view_id: source_view?.view_id ?? null,
           name: source_view?.name ?? null,
         },
-        raw_items_pulled: feeder_result?.raw_items_pulled ?? 0,
-        eligible_owner_count: feeder_result?.eligible_owner_count ?? 0,
-        queued_count: feeder_result?.queued_count ?? 0,
-        queued_owner_ids: feeder_result?.queued_owner_ids ?? [],
-        skip_reason_counts: feeder_result?.skip_reason_counts ?? [],
+        candidate_source: feeder_result?.candidate_source || filters.candidate_source || "v_sms_ready_contacts",
+        loaded_count,
+        eligible_count,
+        inserted_count: queued_count,
+        queued_count,
+        skipped_count,
+        sample_skips,
+        selected_textgrid_market_counts: feeder_result?.selected_textgrid_market_counts || {},
+        routing_tier_counts: feeder_result?.routing_tier_counts || {},
+        raw_items_pulled: feeder_result?.raw_items_pulled ?? loaded_count,
+        eligible_owner_count: feeder_result?.eligible_owner_count ?? eligible_count,
+        queued_owner_ids:
+          feeder_result?.queued_owner_ids ?? sample_created_queue_items.map((item) => item?.master_owner_id).filter(Boolean),
+        skip_reason_counts: feeder_result?.skip_reason_counts ?? summarizeSkipReasonCounts(sample_skips),
         deferred_resolution: feeder_result?.deferred_resolution ?? null,
-        reason: feeder_result?.reason ?? null,
+        reason: feeder_result?.reason ?? feeder_result?.error ?? null,
         view_options: options.views,
       };
     }

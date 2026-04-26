@@ -101,7 +101,72 @@ function getSupabase(deps = {}) {
 }
 
 function normalizeMarket(value) {
-  return lower(value).replace(/\s+/g, "_");
+  return lower(value)
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const REGIONAL_ROUTING_RULES = [
+  {
+    name: "ca_to_los_angeles",
+    states: ["ca"],
+    target_markets: ["Los Angeles, CA"],
+  },
+  {
+    name: "west_mountain_to_los_angeles",
+    states: ["or", "wa", "nv", "az", "id", "ut"],
+    target_markets: ["Los Angeles, CA"],
+  },
+  {
+    name: "midwest_to_minneapolis",
+    states: ["mn", "wi", "ia", "nd", "sd", "ne", "il", "in", "mi", "oh", "mo"],
+    target_markets: ["Minneapolis, MN"],
+  },
+  {
+    name: "southern_plains_to_dallas",
+    states: ["ok", "ar", "ks"],
+    target_markets: ["Dallas, TX"],
+  },
+  {
+    name: "louisiana_to_houston",
+    states: ["la"],
+    target_markets: ["Houston, TX"],
+  },
+  {
+    name: "texas_to_dallas_then_houston",
+    states: ["tx"],
+    target_markets: ["Dallas, TX", "Houston, TX"],
+  },
+  {
+    name: "georgia_to_atlanta",
+    states: ["ga"],
+    target_markets: ["Atlanta, GA"],
+  },
+  {
+    name: "carolinas_to_charlotte",
+    states: ["nc", "sc"],
+    target_markets: ["Charlotte, NC"],
+  },
+  {
+    name: "florida_to_jacksonville_then_miami",
+    states: ["fl"],
+    target_markets: ["Jacksonville, FL", "Miami, FL"],
+  },
+  {
+    name: "northeast_to_miami",
+    states: ["ny", "nj", "pa", "md", "va", "dc", "de", "ct", "ri", "ma", "nh", "vt", "me"],
+    target_markets: ["Miami, FL"],
+  },
+  {
+    name: "southeast_inland_to_atlanta_then_charlotte",
+    states: ["al", "ms", "tn", "ky"],
+    target_markets: ["Atlanta, GA", "Charlotte, NC"],
+  },
+];
+
+function findRegionalRoutingRule(state) {
+  const normalized_state = lower(state);
+  return REGIONAL_ROUTING_RULES.find((rule) => rule.states.includes(normalized_state)) || null;
 }
 
 function buildIdempotencyKey({
@@ -528,6 +593,34 @@ function normalizeTextgridNumberRow(row = {}) {
   };
 }
 
+function buildRoutingSelection({
+  selected,
+  routing_tier,
+  selection_reason,
+  routing_rule_name = null,
+  seller_market = null,
+  seller_state = null,
+} = {}) {
+  return {
+    ok: true,
+    reason_code: "OK",
+    routing_allowed: true,
+    routing_tier,
+    selection_reason,
+    routing_rule_name,
+    selected_textgrid_market: selected?.market || null,
+    selected_textgrid_number: selected?.phone_number || null,
+    seller_market: seller_market || null,
+    seller_state: seller_state || null,
+    routing_block_reason: null,
+    selected: {
+      id: selected?.id || null,
+      phone_number: selected?.phone_number || null,
+      market: selected?.market || null,
+    },
+  };
+}
+
 function byUsageThenRecency(left, right) {
   const left_sent = asNumber(left.messages_sent_today, 0);
   const right_sent = asNumber(right.messages_sent_today, 0);
@@ -561,7 +654,13 @@ export async function chooseTextgridNumber(candidate = {}, options = {}, deps = 
       reason_code: REASON_CODES.NO_VALID_TEXTGRID_NUMBER,
       routing_allowed: false,
       routing_tier: "none",
-      routing_block_reason: "no_active_textgrid_numbers",
+      selection_reason: null,
+      routing_rule_name: null,
+      selected_textgrid_market: null,
+      selected_textgrid_number: null,
+      seller_market: candidate.market || null,
+      seller_state: candidate.state || null,
+      routing_block_reason: "NO_ACTIVE_TEXTGRID_NUMBERS",
       selected: null,
     };
   }
@@ -573,59 +672,85 @@ export async function chooseTextgridNumber(candidate = {}, options = {}, deps = 
   const alias = numbers
     .filter((row) => row.aliases.includes(seller_market) && row.market_normalized !== seller_market)
     .sort(byUsageThenRecency);
-  const cluster = numbers
-    .filter((row) => row.allow_cluster_fallback && row.state_aliases.includes(seller_state))
-    .sort(byUsageThenRecency);
+  const regional_rule = findRegionalRoutingRule(seller_state);
+  const regional = regional_rule
+    ? regional_rule.target_markets
+        .map((target_market) => {
+          const target_market_normalized = normalizeMarket(target_market);
+          const candidates = numbers
+            .filter((row) => row.market_normalized === target_market_normalized)
+            .sort(byUsageThenRecency);
+          return candidates.length
+            ? {
+                target_market,
+                selected: candidates[0],
+              }
+            : null;
+        })
+        .filter(Boolean)
+    : [];
   const nationwide = numbers
     .filter((row) => row.is_nationwide && row.allow_nationwide_fallback)
     .sort(byUsageThenRecency);
 
-  let selected = null;
-  let routing_tier = "none";
-  let selection_reason = "none";
-
   if (exact.length) {
-    selected = exact[0];
-    routing_tier = "exact_market_match";
-    selection_reason = "exact_market_match";
-  } else if (alias.length) {
-    selected = alias[0];
-    routing_tier = "approved_market_alias";
-    selection_reason = "approved_market_alias";
-  } else if (!options.routing_safe_only && cluster.length) {
-    selected = cluster[0];
-    routing_tier = "approved_cluster_fallback";
-    selection_reason = "approved_cluster_fallback";
-  } else if (!options.routing_safe_only && nationwide.length) {
-    selected = nationwide[0];
-    routing_tier = "approved_nationwide_fallback";
-    selection_reason = "approved_nationwide_fallback";
+    return buildRoutingSelection({
+      selected: exact[0],
+      routing_tier: "exact_market_match",
+      selection_reason: "exact_market_match",
+      routing_rule_name: "exact_market_match",
+      seller_market: candidate.market,
+      seller_state: candidate.state,
+    });
   }
 
-  if (!selected) {
-    return {
+  if (alias.length) {
+    return buildRoutingSelection({
+      selected: alias[0],
+      routing_tier: "approved_alias_match",
+      selection_reason: "approved_alias_match",
+      routing_rule_name: "approved_alias_match",
+      seller_market: candidate.market,
+      seller_state: candidate.state,
+    });
+  }
+
+  if (regional.length) {
+    return buildRoutingSelection({
+      selected: regional[0].selected,
+      routing_tier: "approved_regional_fallback",
+      selection_reason: `approved_regional_fallback:${regional[0].target_market}`,
+      routing_rule_name: regional_rule?.name || null,
+      seller_market: candidate.market,
+      seller_state: candidate.state,
+    });
+  }
+
+  if (!options.routing_safe_only && nationwide.length) {
+    return buildRoutingSelection({
+      selected: nationwide[0],
+      routing_tier: "approved_nationwide_fallback",
+      selection_reason: "approved_nationwide_fallback",
+      routing_rule_name: "approved_nationwide_fallback",
+      seller_market: candidate.market,
+      seller_state: candidate.state,
+    });
+  }
+
+  return {
       ok: false,
       reason_code: REASON_CODES.ROUTING_BLOCKED,
       routing_allowed: false,
       routing_tier: "blocked",
-      routing_block_reason: "no_approved_routing_path",
+      selection_reason: null,
+      routing_rule_name: regional_rule?.name || null,
+      selected_textgrid_market: null,
+      selected_textgrid_number: null,
+      seller_market: candidate.market || null,
+      seller_state: candidate.state || null,
+      routing_block_reason: "NO_APPROVED_ROUTING_PATH",
       selected: null,
     };
-  }
-
-  return {
-    ok: true,
-    reason_code: "OK",
-    routing_allowed: true,
-    routing_tier,
-    selection_reason,
-    routing_block_reason: null,
-    selected: {
-      id: selected.id,
-      phone_number: selected.phone_number,
-      market: selected.market,
-    },
-  };
 }
 
 export async function renderOutboundTemplate(candidate = {}, options = {}, deps = {}) {
@@ -937,6 +1062,15 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         reason: routing.routing_block_reason,
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        routing_allowed: false,
+        routing_tier: routing.routing_tier,
+        selection_reason: routing.selection_reason,
+        routing_rule_name: routing.routing_rule_name,
+        selected_textgrid_market: routing.selected_textgrid_market,
+        selected_textgrid_number: routing.selected_textgrid_number,
+        seller_market: routing.seller_market || candidate.market,
+        seller_state: routing.seller_state || candidate.state,
+        routing_block_reason: routing.routing_block_reason,
         ..._preview,
       });
       continue;
@@ -1010,6 +1144,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       seller_state: candidate.state,
       routing_tier: routing.routing_tier,
       selection_reason: routing.selection_reason,
+      routing_rule_name: routing.routing_rule_name,
       routing_allowed: true,
       routing_block_reason: null,
       template_use_case: rendered.template_use_case,

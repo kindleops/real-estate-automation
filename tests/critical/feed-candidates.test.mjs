@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   REASON_CODES,
+  chooseTextgridNumber,
   evaluateCandidateEligibility,
   runSupabaseCandidateFeeder,
   normalizeCandidateRow,
@@ -43,6 +44,36 @@ function makeCandidate(id = 1, overrides = {}) {
   };
 }
 
+function makeTextgridNumber(id, market, overrides = {}) {
+  return {
+    id,
+    market,
+    phone_number: `+1832555${String(1000 + id).slice(-4)}`,
+    status: "active",
+    messages_sent_today: 0,
+    ...overrides,
+  };
+}
+
+function makeTextgridSupabase(numbers = []) {
+  return {
+    from(table) {
+      return {
+        select() {
+          return {
+            limit() {
+              if (table === "textgrid_numbers") {
+                return Promise.resolve({ data: numbers, error: null });
+              }
+              return Promise.resolve({ data: [], error: null });
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
 test("runSupabaseCandidateFeeder dry_run returns diagnostics without queue mutation", async () => {
   let create_calls = 0;
 
@@ -64,6 +95,7 @@ test("runSupabaseCandidateFeeder dry_run returns diagnostics without queue mutat
         routing_allowed: true,
         routing_tier: "exact_market_match",
         selection_reason: "exact_market_match",
+        routing_rule_name: "exact_market_match",
         selected: {
           id: 10,
           phone_number: "+18325550101",
@@ -91,6 +123,9 @@ test("runSupabaseCandidateFeeder dry_run returns diagnostics without queue mutat
   assert.equal(result.fetched_candidate_count, 1);
   assert.equal(result.scanned_count, 1);
   assert.equal(result.queued_count, 1);
+  assert.equal(result.sample_created_queue_items[0].routing_rule_name, "exact_market_match");
+  assert.equal(result.sample_created_queue_items[0].selected_textgrid_market, "houston");
+  assert.equal(result.sample_created_queue_items[0].selected_textgrid_number, "+18325550101");
   assert.equal(create_calls, 0);
 });
 
@@ -155,7 +190,15 @@ test("runSupabaseCandidateFeeder reports routing diagnostics for blocked routing
       chooseTextgridNumber: async () => ({
         ok: false,
         reason_code: REASON_CODES.ROUTING_BLOCKED,
-        routing_block_reason: "no_approved_routing_path",
+        routing_allowed: false,
+        routing_tier: "blocked",
+        selection_reason: null,
+        routing_rule_name: null,
+        selected_textgrid_market: null,
+        selected_textgrid_number: null,
+        seller_market: "Inland Empire, CA",
+        seller_state: "CA",
+        routing_block_reason: "NO_APPROVED_ROUTING_PATH",
       }),
     }
   );
@@ -163,6 +206,9 @@ test("runSupabaseCandidateFeeder reports routing diagnostics for blocked routing
   assert.equal(result.routing_block_count, 1);
   assert.equal(result.queued_count, 0);
   assert.equal(result.sample_skips[0].reason_code, REASON_CODES.ROUTING_BLOCKED);
+  assert.equal(result.sample_skips[0].routing_block_reason, "NO_APPROVED_ROUTING_PATH");
+  assert.equal(result.sample_skips[0].seller_market, "Inland Empire, CA");
+  assert.equal(result.sample_skips[0].seller_state, "CA");
 });
 
 test("runSupabaseCandidateFeeder returns structured source unavailable error", async () => {
@@ -390,5 +436,155 @@ test("runSupabaseCandidateFeeder dry_run sample_skips include normalized candida
   assert.ok(Array.isArray(skip.candidate_preview.raw_keys));
   assert.ok("normalized_master_owner_id" in skip.candidate_preview);
   assert.ok("normalized_phone_id" in skip.candidate_preview);
+});
+
+test("chooseTextgridNumber routes Inland Empire, CA to Los Angeles via approved regional fallback", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Inland Empire, CA", state: "CA" },
+    { routing_safe_only: true },
+    {
+      supabase: makeTextgridSupabase([
+        makeTextgridNumber(1, "Los Angeles, CA"),
+        makeTextgridNumber(2, "Dallas, TX"),
+      ]),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.routing_tier, "approved_regional_fallback");
+  assert.equal(result.routing_rule_name, "ca_to_los_angeles");
+  assert.equal(result.selected_textgrid_market, "Los Angeles, CA");
+  assert.equal(result.routing_allowed, true);
+});
+
+test("chooseTextgridNumber routes Stockton, CA to Los Angeles", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Stockton, CA", state: "CA" },
+    { routing_safe_only: true },
+    { supabase: makeTextgridSupabase([makeTextgridNumber(1, "Los Angeles, CA")]) }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selected_textgrid_market, "Los Angeles, CA");
+  assert.equal(result.routing_tier, "approved_regional_fallback");
+});
+
+test("chooseTextgridNumber routes Boise, ID to Los Angeles", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Boise, ID", state: "ID" },
+    { routing_safe_only: true },
+    { supabase: makeTextgridSupabase([makeTextgridNumber(1, "Los Angeles, CA")]) }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selected_textgrid_market, "Los Angeles, CA");
+  assert.equal(result.routing_rule_name, "west_mountain_to_los_angeles");
+});
+
+test("chooseTextgridNumber routes Tulsa, OK to Dallas or Houston per approved regional rule", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Tulsa, OK", state: "OK" },
+    { routing_safe_only: true },
+    {
+      supabase: makeTextgridSupabase([
+        makeTextgridNumber(1, "Dallas, TX"),
+        makeTextgridNumber(2, "Houston, TX"),
+      ]),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.routing_tier, "approved_regional_fallback");
+  assert.ok(["Dallas, TX", "Houston, TX"].includes(result.selected_textgrid_market));
+  assert.equal(result.routing_rule_name, "southern_plains_to_dallas");
+});
+
+test("chooseTextgridNumber routes Illinois to Minneapolis", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Peoria, IL", state: "IL" },
+    { routing_safe_only: true },
+    { supabase: makeTextgridSupabase([makeTextgridNumber(1, "Minneapolis, MN")]) }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selected_textgrid_market, "Minneapolis, MN");
+  assert.equal(result.routing_rule_name, "midwest_to_minneapolis");
+});
+
+test("chooseTextgridNumber routes New York to Miami", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Albany, NY", state: "NY" },
+    { routing_safe_only: true },
+    { supabase: makeTextgridSupabase([makeTextgridNumber(1, "Miami, FL")]) }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selected_textgrid_market, "Miami, FL");
+  assert.equal(result.routing_rule_name, "northeast_to_miami");
+});
+
+test("chooseTextgridNumber routes Florida to Jacksonville before Miami", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Tampa, FL", state: "FL" },
+    { routing_safe_only: true },
+    {
+      supabase: makeTextgridSupabase([
+        makeTextgridNumber(1, "Miami, FL"),
+        makeTextgridNumber(2, "Jacksonville, FL"),
+      ]),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.selected_textgrid_market, "Jacksonville, FL");
+  assert.equal(result.routing_rule_name, "florida_to_jacksonville_then_miami");
+});
+
+test("chooseTextgridNumber blocks unknown state with no approved routing rule", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Anchorage, AK", state: "AK" },
+    { routing_safe_only: true },
+    { supabase: makeTextgridSupabase([makeTextgridNumber(1, "Los Angeles, CA")]) }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.routing_allowed, false);
+  assert.equal(result.routing_block_reason, "NO_APPROVED_ROUTING_PATH");
+});
+
+test("chooseTextgridNumber allows approved regional fallback when routing_safe_only=true", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Birmingham, AL", state: "AL" },
+    { routing_safe_only: true },
+    {
+      supabase: makeTextgridSupabase([
+        makeTextgridNumber(1, "Atlanta, GA"),
+        makeTextgridNumber(2, "Charlotte, NC"),
+      ]),
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.routing_tier, "approved_regional_fallback");
+  assert.equal(result.selected_textgrid_market, "Atlanta, GA");
+});
+
+test("chooseTextgridNumber blocks random nationwide fallback when routing_safe_only=true", async () => {
+  const result = await chooseTextgridNumber(
+    { market: "Anchorage, AK", state: "AK" },
+    { routing_safe_only: true },
+    {
+      supabase: makeTextgridSupabase([
+        makeTextgridNumber(1, "Miami, FL", {
+          is_nationwide: true,
+          allow_nationwide_fallback: true,
+        }),
+      ]),
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.routing_allowed, false);
+  assert.equal(result.routing_block_reason, "NO_APPROVED_ROUTING_PATH");
 });
 
