@@ -9,13 +9,15 @@ import { evaluateContactWindow, insertSupabaseSendQueueRow } from "@/lib/supabas
 
 const SEND_QUEUE_TABLE = "send_queue";
 const TEXTGRID_NUMBERS_TABLE = "textgrid_numbers";
-const FEEDER_SOURCE_CANDIDATE_TABLES = [
+const DEFAULT_CANDIDATE_SOURCE = "v_sms_campaign_queue_candidates";
+const ALLOWED_CANDIDATE_SOURCE_OVERRIDES = new Set([
   "outbound_candidate_snapshot",
-  "outbound_candidates",
-  "vw_outbound_candidates",
-  "v_outbound_candidates",
-  "master_owner_outbound_candidates",
-  "master_owners",
+  "v_sms_ready_contacts",
+]);
+const CANDIDATE_SOURCE_AVAILABLE_HINT = [
+  "v_sms_campaign_queue_candidates",
+  "v_sms_ready_contacts",
+  "v_launch_sms_tier1",
 ];
 
 const REASON_CODES = Object.freeze({
@@ -279,6 +281,7 @@ function computeNextSchedulableTime(candidate = {}, now_iso = new Date().toISOSt
 export async function getSupabaseFeederCandidates(
   {
     scan_limit = 500,
+    candidate_source = null,
     market = null,
     state = null,
     template_use_case = null,
@@ -289,45 +292,69 @@ export async function getSupabaseFeederCandidates(
 ) {
   const supabase = getSupabase(deps);
 
-  for (const source_name of FEEDER_SOURCE_CANDIDATE_TABLES) {
-    const { data, error } = await supabase
-      .from(source_name)
-      .select("*")
-      .limit(Math.max(1, Math.min(asPositiveInteger(scan_limit, 500), 5000)));
+  const requested_source = clean(candidate_source);
+  let source_name = DEFAULT_CANDIDATE_SOURCE;
 
-    if (error) {
-      if (error.code === "42P01") continue;
-      throw error;
-    }
+  if (requested_source && ALLOWED_CANDIDATE_SOURCE_OVERRIDES.has(requested_source)) {
+    source_name = requested_source;
+  }
 
-    const rows = Array.isArray(data) ? data : [];
-    const normalized = rows
-      .map((row) =>
-        normalizeCandidateRow(row, {
-          template_use_case,
-          touch_number,
-          campaign_session_id,
-          market,
-          state,
-        })
-      )
-      .filter((row) => {
-        if (market && normalizeMarket(row.market) !== normalizeMarket(market)) return false;
-        if (state && lower(row.state) !== lower(state)) return false;
-        return true;
-      });
-
+  if (requested_source && !ALLOWED_CANDIDATE_SOURCE_OVERRIDES.has(requested_source)) {
     return {
+      ok: false,
+      error: "CANDIDATE_SOURCE_UNAVAILABLE",
       source: source_name,
-      scanned_count: normalized.length,
-      rows: normalized,
+      requested_source,
+      scanned_count: 0,
+      rows: [],
+      candidate_source_error: `candidate_source override not allowed: ${requested_source}`,
+      available_hint: [...CANDIDATE_SOURCE_AVAILABLE_HINT],
     };
   }
 
+  const effective_fetch_limit = Math.max(1, Math.min(asPositiveInteger(scan_limit, 500), 5000));
+  const { data, error } = await supabase
+    .from(source_name)
+    .select("*")
+    .limit(effective_fetch_limit);
+
+  if (error) {
+    return {
+      ok: false,
+      error: "CANDIDATE_SOURCE_UNAVAILABLE",
+      source: source_name,
+      requested_source: requested_source || null,
+      scanned_count: 0,
+      rows: [],
+      candidate_source_error: error?.message || String(error),
+      available_hint: [...CANDIDATE_SOURCE_AVAILABLE_HINT],
+    };
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+  const normalized = rows
+    .map((row) =>
+      normalizeCandidateRow(row, {
+        template_use_case,
+        touch_number,
+        campaign_session_id,
+        market,
+        state,
+      })
+    )
+    .filter((row) => {
+      if (market && normalizeMarket(row.market) !== normalizeMarket(market)) return false;
+      if (state && lower(row.state) !== lower(state)) return false;
+      return true;
+    });
+
   return {
-    source: null,
-    scanned_count: 0,
-    rows: [],
+    ok: true,
+    source: source_name,
+    requested_source: requested_source || null,
+    scanned_count: normalized.length,
+    rows: normalized,
+    effective_fetch_limit,
   };
 }
 
@@ -708,6 +735,10 @@ export function buildFeederDiagnostics(summary = {}) {
     ok: summary.ok !== false,
     dry_run: Boolean(summary.dry_run),
     source: summary.source || null,
+    candidate_source: summary.candidate_source || summary.source || null,
+    requested_limit: Number(summary.requested_limit || 0),
+    effective_candidate_fetch_limit: Number(summary.effective_candidate_fetch_limit || 0),
+    fetched_candidate_count: Number(summary.fetched_candidate_count || 0),
     scanned_count: Number(summary.scanned_count || 0),
     eligible_count: Number(summary.eligible_count || 0),
     queued_count: Number(summary.queued_count || 0),
@@ -718,6 +749,9 @@ export function buildFeederDiagnostics(summary = {}) {
     pending_prior_touch_block_count: Number(summary.pending_prior_touch_block_count || 0),
     duplicate_queue_block_count: Number(summary.duplicate_queue_block_count || 0),
     template_block_count: Number(summary.template_block_count || 0),
+    error: clean(summary.error) || null,
+    candidate_source_error: clean(summary.candidate_source_error) || null,
+    available_hint: Array.isArray(summary.available_hint) ? summary.available_hint : undefined,
     selected_textgrid_market_counts: summary.selected_textgrid_market_counts || {},
     routing_tier_counts: summary.routing_tier_counts || {},
     sample_created_queue_items: Array.isArray(summary.sample_created_queue_items)
@@ -738,6 +772,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     dry_run: asBoolean(input.dry_run, false),
     limit,
     scan_limit,
+    candidate_source: clean(input.candidate_source) || null,
     market: clean(input.market) || null,
     state: clean(input.state) || null,
     routing_safe_only: asBoolean(input.routing_safe_only, true),
@@ -749,10 +784,43 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
   };
 
   const source = await getSupabaseFeederCandidates(options, deps);
+  if (source?.ok === false) {
+    return buildFeederDiagnostics({
+      ok: false,
+      dry_run: options.dry_run,
+      source: source.source || DEFAULT_CANDIDATE_SOURCE,
+      candidate_source: source.source || DEFAULT_CANDIDATE_SOURCE,
+      requested_limit: options.limit,
+      effective_candidate_fetch_limit: source.effective_fetch_limit || options.scan_limit,
+      fetched_candidate_count: 0,
+      scanned_count: 0,
+      eligible_count: 0,
+      queued_count: 0,
+      skipped_count: 0,
+      routing_block_count: 0,
+      suppression_block_count: 0,
+      contact_window_block_count: 0,
+      pending_prior_touch_block_count: 0,
+      duplicate_queue_block_count: 0,
+      template_block_count: 0,
+      selected_textgrid_market_counts: {},
+      routing_tier_counts: {},
+      sample_created_queue_items: [],
+      sample_skips: [],
+      error: "CANDIDATE_SOURCE_UNAVAILABLE",
+      candidate_source_error: source.candidate_source_error || "candidate source unavailable",
+      available_hint: Array.isArray(source.available_hint) ? source.available_hint : [...CANDIDATE_SOURCE_AVAILABLE_HINT],
+    });
+  }
+
   const summary = {
     ok: true,
     dry_run: options.dry_run,
     source: source.source,
+    candidate_source: source.source,
+    requested_limit: options.limit,
+    effective_candidate_fetch_limit: source.effective_fetch_limit || options.scan_limit,
+    fetched_candidate_count: source.scanned_count,
     scanned_count: source.scanned_count,
     eligible_count: 0,
     queued_count: 0,

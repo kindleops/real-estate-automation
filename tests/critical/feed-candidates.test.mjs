@@ -15,10 +15,10 @@ function makeSupabaseWithCandidates(candidates = []) {
         select() {
           return {
             limit() {
-              if (table === "outbound_candidate_snapshot") {
+              if (table === "v_sms_campaign_queue_candidates") {
                 return Promise.resolve({ data: candidates, error: null });
               }
-              return Promise.resolve({ data: [], error: { code: "42P01" } });
+              return Promise.resolve({ data: [], error: { code: "42P01", message: `missing ${table}` } });
             },
           };
         },
@@ -83,6 +83,10 @@ test("runSupabaseCandidateFeeder dry_run returns diagnostics without queue mutat
 
   assert.equal(result.ok, true);
   assert.equal(result.dry_run, true);
+  assert.equal(result.candidate_source, "v_sms_campaign_queue_candidates");
+  assert.equal(result.requested_limit, 5);
+  assert.equal(result.effective_candidate_fetch_limit, 5);
+  assert.equal(result.fetched_candidate_count, 1);
   assert.equal(result.scanned_count, 1);
   assert.equal(result.queued_count, 1);
   assert.equal(create_calls, 0);
@@ -157,6 +161,47 @@ test("runSupabaseCandidateFeeder reports routing diagnostics for blocked routing
   assert.equal(result.routing_block_count, 1);
   assert.equal(result.queued_count, 0);
   assert.equal(result.sample_skips[0].reason_code, REASON_CODES.ROUTING_BLOCKED);
+});
+
+test("runSupabaseCandidateFeeder returns structured source unavailable error", async () => {
+  const missingSourceSupabase = {
+    from() {
+      return {
+        select() {
+          return {
+            limit() {
+              return Promise.resolve({
+                data: [],
+                error: {
+                  code: "42P01",
+                  message: "Could not find the table 'public.v_sms_campaign_queue_candidates' in the schema cache",
+                },
+              });
+            },
+          };
+        },
+      };
+    },
+  };
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 1,
+      scan_limit: 1,
+    },
+    { supabase: missingSourceSupabase }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "CANDIDATE_SOURCE_UNAVAILABLE");
+  assert.equal(result.candidate_source, "v_sms_campaign_queue_candidates");
+  assert.ok(String(result.candidate_source_error || "").includes("schema cache"));
+  assert.deepEqual(result.available_hint, [
+    "v_sms_campaign_queue_candidates",
+    "v_sms_ready_contacts",
+    "v_launch_sms_tier1",
+  ]);
 });
 
 test("evaluateCandidateEligibility blocks duplicate queue items", async () => {

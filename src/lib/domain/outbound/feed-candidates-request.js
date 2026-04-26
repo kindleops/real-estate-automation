@@ -26,6 +26,7 @@ export function normalizeFeedCandidatesInput(input = {}) {
   return {
     limit: asPositiveInteger(input.limit, 25),
     scan_limit: asPositiveInteger(input.scan_limit, 500),
+    candidate_source: clean(input.candidate_source) || null,
     market: clean(input.market) || null,
     state: clean(input.state) || null,
     routing_safe_only: asBoolean(input.routing_safe_only, true),
@@ -44,6 +45,7 @@ function mergeBodyAndQuery(request, method, body = {}) {
   for (const key of [
     "limit",
     "scan_limit",
+    "candidate_source",
     "market",
     "state",
     "routing_safe_only",
