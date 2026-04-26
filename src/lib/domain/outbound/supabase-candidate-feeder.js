@@ -21,8 +21,10 @@ const CANDIDATE_SOURCE_AVAILABLE_HINT = [
 ];
 
 const REASON_CODES = Object.freeze({
-  NO_VALID_PHONE: "NO_VALID_PHONE",
+  NO_MASTER_OWNER: "NO_MASTER_OWNER",
   NO_PROPERTY: "NO_PROPERTY",
+  NO_PHONE: "NO_PHONE",
+  NO_VALID_PHONE: "NO_VALID_PHONE",
   TRUE_OPT_OUT: "TRUE_OPT_OUT",
   SUPPRESSED: "SUPPRESSED",
   OUTSIDE_CONTACT_WINDOW: "OUTSIDE_CONTACT_WINDOW",
@@ -124,44 +126,56 @@ function buildQueueKeyFromIdempotencyKey(idempotency_key) {
   return `feed:${crypto.createHash("sha1").update(clean(idempotency_key)).digest("hex")}`;
 }
 
-function normalizeCandidateRow(row = {}, defaults = {}) {
-  const master_owner_id = asPositiveInteger(
-    pick(row.master_owner_id, row.owner_id, row.master_owner_item_id),
-    null
-  );
-  const property_id = asPositiveInteger(
-    pick(row.property_id, row.primary_property_id, row.property_item_id),
-    null
-  );
-  const phone_id = asPositiveInteger(
-    pick(row.best_phone_id, row.phone_number_id, row.phone_id, row.primary_phone_id),
-    null
-  );
+export function normalizeCandidateRow(row = {}, defaults = {}) {
+  // Accept any non-empty string for IDs (mo_..., prop_..., ph_..., numeric, etc.)
+  const master_owner_id =
+    pick(row.master_owner_id, row.owner_id, row.owner_podio_item_id) || null;
+  const property_id =
+    pick(row.property_id, row.property_export_id, row.property_item_id) || null;
+  const property_export_id = pick(row.property_export_id) || null;
+  const phone_id =
+    pick(row.phone_id, row.best_phone_id, row.phone_item_id) || null;
+  const primary_prospect_id = pick(row.primary_prospect_id) || null;
+  const canonical_prospect_id = pick(row.canonical_prospect_id) || null;
 
   const canonical_e164 =
     normalizePhone(
       pick(
-        row.canonical_e164,
-        row.phone_e164,
         row.best_phone_e164,
+        row.canonical_e164,
+        row.phone,
+        row.best_phone,
+        row.phone_e164,
         row.phone_hidden,
         row.phone_number
       )
     ) || "";
 
   const market = clean(
-    pick(row.seller_market, row.market_name, row.market, row.market_label, defaults.market)
+    pick(row.market, row.market_name, row.seller_market, row.canonical_market_slug, row.market_label, defaults.market)
   );
-  const state = clean(pick(row.seller_state, row.state, row.property_state, defaults.state));
+  const state = clean(
+    pick(row.state_code, row.property_address_state, row.property_state, row.seller_state, row.state, defaults.state)
+  );
+  const owner_display_name = clean(pick(row.owner_display_name, row.display_name, row.owner_name));
 
   return {
     raw: row,
     master_owner_id,
     property_id,
+    property_export_id,
     phone_id,
+    primary_prospect_id,
+    canonical_prospect_id,
     canonical_e164,
     market,
     state,
+    state_code: state,
+    owner_display_name,
+    property_address_full: clean(pick(row.property_address_full, row.property_address, row.address, row.title)),
+    property_city: clean(pick(row.property_address_city, row.property_city)),
+    property_state: state,
+    property_zip: clean(pick(row.property_address_zip, row.property_zip)),
     timezone: clean(pick(row.timezone, row.seller_timezone, "America/Chicago")) || "America/Chicago",
     contact_window: clean(
       pick(row.contact_window, row.contact_window_local, row.allowed_contact_window, "")
@@ -179,12 +193,36 @@ function normalizeCandidateRow(row = {}, defaults = {}) {
     campaign_session_id:
       clean(pick(row.campaign_session_id, defaults.campaign_session_id)) ||
       `session-${new Date().toISOString().slice(0, 10)}`,
-    property_address: clean(pick(row.property_address, row.address, row.title)),
+    property_address: clean(pick(row.property_address_full, row.property_address, row.address, row.title)),
     owner_first_name: clean(pick(row.owner_first_name, row.first_name)),
     owner_last_name: clean(pick(row.owner_last_name, row.last_name)),
-    language: clean(pick(row.language, row.preferred_language, "English")) || "English",
-    seller_name: clean(pick(row.seller_name, row.owner_name, "there")) || "there",
+    language: clean(pick(row.best_language, row.language, row.preferred_language, "English")) || "English",
+    seller_name: clean(pick(row.seller_name, row.owner_display_name, row.display_name, row.owner_name, "there")) || "there",
     market_id: asPositiveInteger(pick(row.market_id), null),
+    // Agent
+    agent_persona: clean(pick(row.agent_persona)),
+    agent_family: clean(pick(row.agent_family)),
+    best_language: clean(pick(row.best_language, row.language)),
+    // Scores & financials
+    final_acquisition_score: asNumber(row.final_acquisition_score, null),
+    best_phone_score: asNumber(row.best_phone_score, null),
+    cash_offer: asNumber(row.cash_offer, null),
+    estimated_value: asNumber(row.estimated_value, null),
+    equity_amount: asNumber(row.equity_amount, null),
+    equity_percent: asNumber(row.equity_percent, null),
+    // v_sms_campaign_queue_candidates extras
+    property_address_county_name: clean(pick(row.property_address_county_name)),
+    estimated_repair_cost: asNumber(row.estimated_repair_cost, null),
+    rehab_level: clean(pick(row.rehab_level)),
+    contact_status: clean(pick(row.contact_status)),
+    ownership_years: asNumber(row.ownership_years, null),
+    // Priority / campaign
+    priority_tier: clean(pick(row.priority_tier)),
+    follow_up_cadence: clean(pick(row.follow_up_cadence)),
+    // Phone metadata
+    phone_type: clean(pick(row.phone_type)),
+    activity_status: clean(pick(row.activity_status)),
+    sms_eligible: asBoolean(pick(row.sms_eligible), true),
   };
 }
 
@@ -208,6 +246,18 @@ function mapReasonToDiagnosticCounter(reason) {
     return "routing_block_count";
   }
   return null;
+}
+
+function buildCandidateNormalizedPreview(raw, candidate) {
+  return {
+    raw_keys: Object.keys(raw || {}).slice(0, 50),
+    normalized_master_owner_id: candidate.master_owner_id,
+    normalized_property_id: candidate.property_id,
+    normalized_phone_id: candidate.phone_id,
+    normalized_phone_e164: candidate.canonical_e164 || null,
+    normalized_market: candidate.market || null,
+    normalized_state: candidate.state || null,
+  };
 }
 
 function buildTemplateContext(candidate = {}) {
@@ -280,7 +330,8 @@ function computeNextSchedulableTime(candidate = {}, now_iso = new Date().toISOSt
 
 export async function getSupabaseFeederCandidates(
   {
-    scan_limit = 500,
+    limit = 25,
+    scan_limit = null,
     candidate_source = null,
     market = null,
     state = null,
@@ -312,7 +363,8 @@ export async function getSupabaseFeederCandidates(
     };
   }
 
-  const effective_fetch_limit = Math.max(1, Math.min(asPositiveInteger(scan_limit, 500), 5000));
+  const requestedLimit = asPositiveInteger(limit, 25);
+  const effective_fetch_limit = Math.min(Math.max(requestedLimit * 5, 10), 100);
   const { data, error } = await supabase
     .from(source_name)
     .select("*")
@@ -393,13 +445,16 @@ async function hasDuplicateQueueItem(candidate = {}, options = {}, deps = {}) {
 
 export async function evaluateCandidateEligibility(candidate = {}, options = {}, deps = {}) {
   if (!candidate.master_owner_id) {
-    return { ok: false, reason_code: REASON_CODES.NO_PROPERTY, reason: "missing_master_owner_id" };
+    return { ok: false, reason_code: REASON_CODES.NO_MASTER_OWNER, reason: "missing_master_owner_id" };
   }
   if (!candidate.property_id) {
     return { ok: false, reason_code: REASON_CODES.NO_PROPERTY, reason: "missing_property_id" };
   }
-  if (!candidate.phone_id || !candidate.canonical_e164) {
-    return { ok: false, reason_code: REASON_CODES.NO_VALID_PHONE, reason: "missing_phone" };
+  if (!candidate.phone_id) {
+    return { ok: false, reason_code: REASON_CODES.NO_PHONE, reason: "missing_phone_id" };
+  }
+  if (!candidate.canonical_e164) {
+    return { ok: false, reason_code: REASON_CODES.NO_VALID_PHONE, reason: "missing_phone_e164" };
   }
   if (candidate.true_post_contact_suppression) {
     return { ok: false, reason_code: REASON_CODES.SUPPRESSED, reason: "true_post_contact_suppression" };
@@ -852,6 +907,10 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     candidate.template_use_case = options.template_use_case;
     candidate.campaign_session_id = options.campaign_session_id;
 
+    const _preview = options.dry_run
+      ? { candidate_preview: buildCandidateNormalizedPreview(candidate.raw, candidate) }
+      : {};
+
     const eligibility = await evaluateCandidateEligibility(candidate, options, deps);
     if (!eligibility.ok) {
       summary.skipped_count += 1;
@@ -862,6 +921,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         reason: eligibility.reason,
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        ..._preview,
       });
       continue;
     }
@@ -877,6 +937,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         reason: routing.routing_block_reason,
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        ..._preview,
       });
       continue;
     }
@@ -890,6 +951,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         reason: rendered.reason,
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        ..._preview,
       });
       continue;
     }
@@ -924,6 +986,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         reason: queue_result.reason || "queue_create_failed",
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
+        ..._preview,
       });
       continue;
     }
