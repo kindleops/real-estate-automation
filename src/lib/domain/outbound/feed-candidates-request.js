@@ -24,9 +24,10 @@ function asPositiveInteger(value, fallback = null) {
 }
 
 export function normalizeFeedCandidatesInput(input = {}) {
+  const raw_scan_limit = input.scan_limit ?? input.candidate_fetch_limit;
   return {
     limit: asPositiveInteger(input.limit, 25),
-    scan_limit: asPositiveInteger(input.scan_limit, 500),
+    scan_limit: asPositiveInteger(raw_scan_limit, 500),
     candidate_source: clean(input.candidate_source) || null,
     market: clean(input.market) || null,
     state: clean(input.state) || null,
@@ -38,6 +39,11 @@ export function normalizeFeedCandidatesInput(input = {}) {
     touch_number: asPositiveInteger(input.touch_number, 1),
     campaign_session_id: clean(input.campaign_session_id) || null,
     debug_templates: asBoolean(input.debug_templates, false),
+    schedule_spread: asBoolean(input.schedule_spread, false),
+    schedule_start_local: clean(input.schedule_start_local) || "09:00",
+    schedule_end_local: clean(input.schedule_end_local) || "20:00",
+    schedule_interval_seconds_min: asPositiveInteger(input.schedule_interval_seconds_min, 45),
+    schedule_interval_seconds_max: asPositiveInteger(input.schedule_interval_seconds_max, 180),
   };
 }
 
@@ -48,6 +54,7 @@ function mergeBodyAndQuery(request, method, body = {}) {
   for (const key of [
     "limit",
     "scan_limit",
+    "candidate_fetch_limit",
     "candidate_source",
     "market",
     "state",
@@ -59,6 +66,11 @@ function mergeBodyAndQuery(request, method, body = {}) {
     "touch_number",
     "campaign_session_id",
     "debug_templates",
+    "schedule_spread",
+    "schedule_start_local",
+    "schedule_end_local",
+    "schedule_interval_seconds_min",
+    "schedule_interval_seconds_max",
   ]) {
     const value = search_params.get(key);
     if (value !== null) merged[key] = value;

@@ -1092,6 +1092,81 @@ function computeNextSchedulableTime(candidate = {}, now_iso = new Date().toISOSt
   return next_day.toISOString();
 }
 
+function getLocalMinutesAt(date, timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone || "America/Chicago",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const hh = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+    const mm = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    return hh * 60 + mm;
+  } catch {
+    return null;
+  }
+}
+
+function parseTimeLocal(value) {
+  const cleaned = clean(value);
+  const ampm_result = parseWindowTime(cleaned);
+  if (ampm_result !== null) return ampm_result;
+  const hhmm = cleaned.match(/^(\d{1,2}):(\d{2})$/);
+  if (hhmm) {
+    const hours = Number(hhmm[1]);
+    const minutes = Number(hhmm[2]);
+    if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+      return hours * 60 + minutes;
+    }
+  }
+  return null;
+}
+
+function snapToNextWindowOpen(date_ms, timezone, start_minutes, end_minutes) {
+  const date = new Date(date_ms);
+  const local_minutes = getLocalMinutesAt(date, timezone);
+  if (local_minutes === null) return date;
+  if (local_minutes >= start_minutes && local_minutes < end_minutes) {
+    return date;
+  }
+  if (local_minutes < start_minutes) {
+    const delta_minutes = start_minutes - local_minutes;
+    return new Date(date_ms + delta_minutes * 60 * 1000);
+  }
+  const minutes_to_tomorrow_start = (24 * 60 - local_minutes) + start_minutes;
+  return new Date(date_ms + minutes_to_tomorrow_start * 60 * 1000);
+}
+
+function createSpreadScheduler({
+  now_iso,
+  schedule_start_local = "09:00",
+  schedule_end_local = "20:00",
+  schedule_interval_seconds_min = 45,
+  schedule_interval_seconds_max = 180,
+} = {}) {
+  const default_start_minutes = parseTimeLocal(schedule_start_local) ?? (9 * 60);
+  const default_end_minutes = parseTimeLocal(schedule_end_local) ?? (20 * 60);
+  const min_interval_ms = Math.max(1, Number(schedule_interval_seconds_min) || 45) * 1000;
+  const max_interval_ms = Math.max(min_interval_ms, Number(schedule_interval_seconds_max) || 180) * 1000;
+  let cursor_ms = new Date(now_iso).getTime();
+
+  return {
+    nextScheduledFor(candidate) {
+      const timezone = candidate.timezone || "America/Chicago";
+      const range = parseContactWindowRange(candidate.contact_window);
+      const start_minutes = range?.start ?? default_start_minutes;
+      const end_minutes = range?.end ?? default_end_minutes;
+      const jitter_ms = min_interval_ms + Math.random() * (max_interval_ms - min_interval_ms);
+      cursor_ms += jitter_ms;
+      const snapped = snapToNextWindowOpen(cursor_ms, timezone, start_minutes, end_minutes);
+      cursor_ms = snapped.getTime();
+      return snapped.toISOString();
+    },
+  };
+}
+
 export async function getSupabaseFeederCandidates(
   {
     limit = 25,
@@ -1128,7 +1203,10 @@ export async function getSupabaseFeederCandidates(
   }
 
   const requestedLimit = asPositiveInteger(limit, 25);
-  const effective_fetch_limit = Math.min(Math.max(requestedLimit * 5, 10), 100);
+  const requestedScanLimit = asPositiveInteger(scan_limit, null);
+  const effective_fetch_limit = requestedScanLimit !== null
+    ? Math.min(requestedScanLimit, 5000)
+    : Math.min(Math.max(requestedLimit * 5, 10), 2500);
   const { data, error } = await supabase
     .from(source_name)
     .select("*")
@@ -1987,6 +2065,9 @@ export function buildFeederDiagnostics(summary = {}) {
     template_block_count: Number(summary.template_block_count || 0),
     no_template_count: Number(summary.no_template_count || 0),
     template_render_failed_count: Number(summary.template_render_failed_count || 0),
+    schedule_spread_enabled: Boolean(summary.schedule_spread_enabled),
+    first_scheduled_for: summary.first_scheduled_for || null,
+    last_scheduled_for: summary.last_scheduled_for || null,
     error: clean(summary.error) || null,
     candidate_source_error: clean(summary.candidate_source_error) || null,
     available_hint: Array.isArray(summary.available_hint) ? summary.available_hint : undefined,
@@ -2004,7 +2085,7 @@ export function buildFeederDiagnostics(summary = {}) {
 export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
   const now = input.now || new Date().toISOString();
   const limit = Math.max(1, Math.min(asPositiveInteger(input.limit, 25), 500));
-  const scan_limit = Math.max(limit, Math.min(asPositiveInteger(input.scan_limit, 500), 5000));
+  const scan_limit = Math.max(limit, Math.min(asPositiveInteger(input.scan_limit ?? input.candidate_fetch_limit, 500), 5000));
 
   const options = {
     dry_run: asBoolean(input.dry_run, false),
@@ -2020,6 +2101,11 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     touch_number: asPositiveInteger(input.touch_number, 1),
     campaign_session_id: clean(input.campaign_session_id) || `session-${now.slice(0, 10)}`,
     debug_templates: asBoolean(input.debug_templates, false),
+    schedule_spread: asBoolean(input.schedule_spread, false),
+    schedule_start_local: clean(input.schedule_start_local) || "09:00",
+    schedule_end_local: clean(input.schedule_end_local) || "20:00",
+    schedule_interval_seconds_min: asPositiveInteger(input.schedule_interval_seconds_min, 45),
+    schedule_interval_seconds_max: asPositiveInteger(input.schedule_interval_seconds_max, 180),
     now,
   };
 
@@ -2055,6 +2141,17 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     });
   }
 
+  const use_spread = options.schedule_spread && !options.within_contact_window_now;
+  const spread_scheduler = use_spread
+    ? createSpreadScheduler({
+        now_iso: options.now,
+        schedule_start_local: options.schedule_start_local,
+        schedule_end_local: options.schedule_end_local,
+        schedule_interval_seconds_min: options.schedule_interval_seconds_min,
+        schedule_interval_seconds_max: options.schedule_interval_seconds_max,
+      })
+    : null;
+
   const summary = {
     ok: true,
     dry_run: options.dry_run,
@@ -2075,6 +2172,9 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     template_block_count: 0,
     no_template_count: 0,
     template_render_failed_count: 0,
+    schedule_spread_enabled: use_spread,
+    first_scheduled_for: null,
+    last_scheduled_for: null,
     selected_textgrid_market_counts: {},
     routing_tier_counts: {},
     sample_created_queue_items: [],
@@ -2202,11 +2302,15 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       continue;
     }
 
+    const scheduled_for = spread_scheduler
+      ? spread_scheduler.nextScheduledFor(candidate)
+      : eligibility.scheduled_for;
+
     const queue_result = await createSendQueueItem(
       candidate,
       {
         ...options,
-        scheduled_for: eligibility.scheduled_for,
+        scheduled_for,
         rendered_message_body: rendered.rendered_message_body,
         template_id: rendered.template?.template_id || rendered.template?.item_id || null,
         template_source: rendered.template?.source || "supabase",
@@ -2265,6 +2369,8 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     }
 
     summary.queued_count += 1;
+    if (!summary.first_scheduled_for) summary.first_scheduled_for = scheduled_for;
+    summary.last_scheduled_for = scheduled_for;
     summary.selected_textgrid_market_counts[routing.selected.market || "unknown"] =
       Number(summary.selected_textgrid_market_counts[routing.selected.market || "unknown"] || 0) + 1;
     summary.routing_tier_counts[routing.routing_tier || "unknown"] =
@@ -2273,6 +2379,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     summary.sample_created_queue_items.push({
       queue_row_id: queue_result.queue_row_id || null,
       queue_key: queue_result.queue_key,
+      scheduled_for: scheduled_for || null,
       master_owner_id: candidate.master_owner_id,
       property_id: candidate.property_id,
       phone_masked: maskPhone(candidate.canonical_e164),

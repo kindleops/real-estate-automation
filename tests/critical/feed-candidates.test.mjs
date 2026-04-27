@@ -122,7 +122,7 @@ test("runSupabaseCandidateFeeder dry_run returns diagnostics without queue mutat
   assert.equal(result.dry_run, true);
   assert.equal(result.candidate_source, "v_sms_campaign_queue_candidates");
   assert.equal(result.requested_limit, 5);
-  assert.equal(result.effective_candidate_fetch_limit, 25);
+  assert.equal(result.effective_candidate_fetch_limit, 5);
   assert.equal(result.fetched_candidate_count, 1);
   assert.equal(result.scanned_count, 1);
   assert.equal(result.queued_count, 1);
@@ -504,7 +504,7 @@ test("queue key uses best_phone_id when present", async () => {
   assert.notEqual(resultA.queue_key, resultB.queue_key);
 });
 
-test("runSupabaseCandidateFeeder limit=1 fetches at most 10 candidates from source", async () => {
+test("runSupabaseCandidateFeeder limit=1 scan_limit=10 fetches exactly 10 candidates from source", async () => {
   let captured_limit = null;
 
   const countingSupabase = {
@@ -526,6 +526,7 @@ test("runSupabaseCandidateFeeder limit=1 fetches at most 10 candidates from sour
     {
       dry_run: true,
       limit: 1,
+      scan_limit: 10,
       campaign_session_id: "session-limit-test",
       within_contact_window_now: false,
     },
@@ -548,7 +549,7 @@ test("runSupabaseCandidateFeeder limit=1 fetches at most 10 candidates from sour
     }
   );
 
-  // limit=1 → effectiveCandidateFetchLimit = min(max(1*5, 10), 100) = 10
+  // explicit scan_limit=10 → effective_fetch_limit = min(10, 5000) = 10
   assert.equal(captured_limit, 10);
 });
 
@@ -2032,6 +2033,259 @@ test("fallback_any_use_case fetch diagnostic shows fallback_used=false when prim
 
   assert.equal(result.ok, true);
   assert.equal(result.template_rotation?.template_fetch_fallback_used, false);
+});
+
+test("scan_limit=200 causes effective_fetch_limit to exceed 100", async () => {
+  let captured_limit = null;
+
+  const countingSupabase = {
+    from() {
+      return {
+        select() {
+          return {
+            limit(n) {
+              captured_limit = n;
+              return Promise.resolve({ data: Array.from({ length: n }, (_, i) => makeCandidate(i + 1)), error: null });
+            },
+          };
+        },
+      };
+    },
+  };
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 25,
+      scan_limit: 200,
+      within_contact_window_now: false,
+    },
+    {
+      supabase: countingSupabase,
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({ ok: false, reason_code: "ROUTING_BLOCKED", routing_allowed: false, routing_tier: "blocked", routing_block_reason: "NO_APPROVED_ROUTING_PATH" }),
+    }
+  );
+
+  assert.ok(captured_limit > 100, `effective_fetch_limit should exceed 100, got ${captured_limit}`);
+  assert.equal(result.effective_candidate_fetch_limit, 200);
+  assert.ok(result.fetched_candidate_count > 100, `fetched_candidate_count should exceed 100, got ${result.fetched_candidate_count}`);
+});
+
+test("limit=500 scan_limit=500 can queue more than 100 when enough eligible candidates exist", async () => {
+  let create_calls = 0;
+  const candidates = Array.from({ length: 500 }, (_, i) => makeCandidate(i + 1));
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: false,
+      limit: 500,
+      scan_limit: 500,
+      within_contact_window_now: false,
+      campaign_session_id: "session-large-batch",
+      template_use_case: "ownership_check",
+      routing_safe_only: true,
+    },
+    {
+      supabase: makeSupabaseWithCandidates(candidates),
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_large", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Hi, is this your property?",
+      }),
+      createSendQueueItem: async () => {
+        create_calls += 1;
+        return { ok: true, queued: true, queue_key: `key-${create_calls}`, queue_row_id: create_calls };
+      },
+    }
+  );
+
+  assert.ok(result.queued_count > 100, `queued_count should exceed 100, got ${result.queued_count}`);
+  assert.equal(create_calls, result.queued_count);
+});
+
+test("within_contact_window_now=false creates rows with future scheduled_for", async () => {
+  const now = new Date().toISOString();
+  let captured_scheduled_for = null;
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: false,
+      limit: 1,
+      scan_limit: 10,
+      within_contact_window_now: false,
+      campaign_session_id: "session-scheduled",
+      template_use_case: "ownership_check",
+    },
+    {
+      supabase: makeSupabaseWithCandidates([makeCandidate(1)]),
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_sched", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Scheduled message.",
+      }),
+      createSendQueueItem: async (payload) => {
+        captured_scheduled_for = payload.scheduled_for;
+        return { ok: true, queued: true, queue_key: "key-sched", queue_row_id: 1 };
+      },
+    }
+  );
+
+  assert.equal(result.queued_count, 1);
+  assert.ok(captured_scheduled_for, "scheduled_for should be set");
+  assert.ok(result.first_scheduled_for, "first_scheduled_for should be set in diagnostics");
+  assert.ok(result.last_scheduled_for, "last_scheduled_for should be set in diagnostics");
+});
+
+test("schedule_spread distributes scheduled_for values across multiple timestamps", async () => {
+  const queued_scheduled_fors = [];
+  const candidates = Array.from({ length: 10 }, (_, i) => makeCandidate(i + 1));
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: false,
+      limit: 10,
+      scan_limit: 10,
+      within_contact_window_now: false,
+      schedule_spread: true,
+      schedule_start_local: "09:00",
+      schedule_end_local: "20:00",
+      schedule_interval_seconds_min: 45,
+      schedule_interval_seconds_max: 180,
+      campaign_session_id: "session-spread",
+      template_use_case: "ownership_check",
+    },
+    {
+      supabase: makeSupabaseWithCandidates(candidates),
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_spread", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Spread message.",
+      }),
+      createSendQueueItem: async (payload) => {
+        queued_scheduled_fors.push(payload.scheduled_for);
+        return { ok: true, queued: true, queue_key: `key-${queued_scheduled_fors.length}`, queue_row_id: queued_scheduled_fors.length };
+      },
+    }
+  );
+
+  assert.equal(result.schedule_spread_enabled, true);
+  assert.ok(result.queued_count >= 2, "should have queued multiple candidates");
+  const unique_times = new Set(queued_scheduled_fors);
+  assert.ok(unique_times.size > 1, `schedule_spread should produce multiple distinct timestamps, got ${unique_times.size}`);
+});
+
+test("schedule_spread never schedules before now", async () => {
+  const now_iso = new Date().toISOString();
+  const queued_scheduled_fors = [];
+  const candidates = Array.from({ length: 5 }, (_, i) => makeCandidate(i + 1));
+
+  await runSupabaseCandidateFeeder(
+    {
+      dry_run: false,
+      limit: 5,
+      scan_limit: 5,
+      within_contact_window_now: false,
+      schedule_spread: true,
+      schedule_start_local: "09:00",
+      schedule_end_local: "20:00",
+      schedule_interval_seconds_min: 60,
+      schedule_interval_seconds_max: 120,
+      campaign_session_id: "session-spread-time",
+      now: now_iso,
+    },
+    {
+      supabase: makeSupabaseWithCandidates(candidates),
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_time", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Time message.",
+      }),
+      createSendQueueItem: async (payload) => {
+        queued_scheduled_fors.push(payload.scheduled_for);
+        return { ok: true, queued: true, queue_key: `key-${queued_scheduled_fors.length}`, queue_row_id: queued_scheduled_fors.length };
+      },
+    }
+  );
+
+  const now_ms = new Date(now_iso).getTime();
+  for (const sf of queued_scheduled_fors) {
+    assert.ok(
+      new Date(sf).getTime() >= now_ms,
+      `scheduled_for ${sf} should not be before now ${now_iso}`
+    );
+  }
+});
+
+test("duplicate suppression still blocks duplicates when scan_limit is large", async () => {
+  const candidates = Array.from({ length: 150 }, (_, i) => makeCandidate(i + 1));
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 50,
+      scan_limit: 150,
+      within_contact_window_now: false,
+      template_use_case: "ownership_check",
+    },
+    {
+      supabase: makeSupabaseWithCandidates(candidates),
+      hasDuplicateQueueItem: async () => true,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_dup", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Dup check.",
+      }),
+    }
+  );
+
+  assert.equal(result.queued_count, 0, "duplicates should block all queuing");
+  assert.ok(result.duplicate_queue_block_count > 0, "duplicate_queue_block_count should be > 0");
+  assert.ok(result.effective_candidate_fetch_limit > 100, "should have scanned more than 100 candidates");
 });
 
 test("createSendQueueItem stores template fetch diagnostics in metadata", async () => {
