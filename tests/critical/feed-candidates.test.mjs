@@ -1884,5 +1884,202 @@ test("debug_templates=true includes template diagnostics in dry-run sample_skips
   assert.ok("selected_template_id" in skip);
   assert.ok("rotation_seed" in skip);
   assert.ok("excluded_recent_template_ids" in skip);
+  assert.ok("template_fetch_limit" in skip);
+  assert.ok("template_fetch_language_filter_applied" in skip);
+  assert.ok("template_fetch_use_case_filter_applied" in skip);
+  assert.ok("template_fetch_fallback_used" in skip);
+  assert.ok("raw_template_count_before_language_filter" in skip);
+  assert.ok("template_count_after_language_filter" in skip);
+});
+
+test("cold S1 English fetch diagnostics show expanded limit and language filter applied", async () => {
+  const english_templates = Array.from({ length: 20 }, (_, index) => ({
+    id: `tpl-en-${index + 1}`,
+    template_id: `ownership-en-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "English",
+    is_active: true,
+    success_rate: 0.9 - index * 0.01,
+    usage_count: 100,
+    template_body: "Do you still own {property_address}?",
+  }));
+
+  const candidate = normalizeCandidateRow({
+    master_owner_id: "mo-fetch-diag-1",
+    property_id: "prop-fetch-diag-1",
+    phone_id: "ph-fetch-diag-1",
+    best_phone_id: "ph-best-fetch-diag-1",
+    canonical_e164: "+18325550301",
+    display_name: "Fetch Owner",
+    property_address_full: "900 Delta Dr, Houston, TX 77001",
+    property_address_state: "TX",
+    touch_number: 1,
+    stage_code: "S1",
+    template_use_case: "ownership_check",
+    language: "English",
+  });
+
+  const result = await renderOutboundTemplate(
+    candidate,
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-fetch-diag" },
+    { fetchSmsTemplates: async () => english_templates }
+  );
+
+  assert.equal(result.ok, true);
+  const rot = result.template_rotation;
+  assert.ok(rot, "template_rotation should be present");
+  assert.equal(rot.rotation_strategy, "cold_s1_wide_window");
+  assert.equal(rot.template_fetch_language_filter_applied, true);
+  assert.equal(rot.template_fetch_use_case_filter_applied, true);
+  assert.equal(rot.template_fetch_fallback_used, false);
+  assert.equal(rot.raw_template_count_before_language_filter, 20);
+  assert.equal(rot.template_count_after_language_filter, 20);
+  assert.ok(rot.rotation_pool_size >= 16, `Pool size should be >= 16, got ${rot.rotation_pool_size}`);
+  assert.equal(rot.rotation_language_mismatch_detected, false);
+});
+
+test("cold S1 English with mixed fetch sees only English after language filter in diagnostics", async () => {
+  const mixed_templates = [
+    ...Array.from({ length: 8 }, (_, index) => ({
+      id: `tpl-mix-en-${index + 1}`,
+      template_id: `ownership-mix-en-${index + 1}`,
+      use_case: "ownership_check",
+      stage_code: "S1",
+      language: "English",
+      is_active: true,
+      success_rate: 0.9 - index * 0.01,
+      usage_count: 100,
+      template_body: "Do you still own {property_address}?",
+    })),
+    ...Array.from({ length: 12 }, (_, index) => ({
+      id: `tpl-mix-es-${index + 1}`,
+      template_id: `ownership-mix-es-${index + 1}`,
+      use_case: "ownership_check",
+      stage_code: "S1",
+      language: "Spanish",
+      is_active: true,
+      success_rate: 0.88 - index * 0.01,
+      usage_count: 80,
+      template_body: "\u00bfA\u00fan es due\u00f1o de {property_address}?",
+    })),
+  ];
+
+  const candidate = normalizeCandidateRow({
+    master_owner_id: "mo-mix-diag-1",
+    property_id: "prop-mix-diag-1",
+    phone_id: "ph-mix-diag-1",
+    best_phone_id: "ph-best-mix-diag-1",
+    canonical_e164: "+18325550302",
+    display_name: "Mix Owner",
+    property_address_full: "901 Echo Blvd, Houston, TX 77001",
+    property_address_state: "TX",
+    touch_number: 1,
+    stage_code: "S1",
+    template_use_case: "ownership_check",
+    language: "English",
+  });
+
+  const result = await renderOutboundTemplate(
+    candidate,
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-mix-diag" },
+    { fetchSmsTemplates: async () => mixed_templates }
+  );
+
+  assert.equal(result.ok, true);
+  const rot = result.template_rotation;
+  assert.ok(rot, "template_rotation should be present");
+  assert.equal(rot.raw_template_count_before_language_filter, 20);
+  assert.equal(rot.template_count_after_language_filter, 8);
+  assert.equal(rot.rotation_language_mismatch_detected, false);
+  assert.deepStrictEqual(rot.rotation_candidate_languages, ["English"]);
+  assert.equal(rot.template_fetch_language_filter_applied, true);
+});
+
+test("fallback_any_use_case fetch diagnostic shows fallback_used=false when primary returns results", async () => {
+  const templates = Array.from({ length: 5 }, (_, index) => ({
+    id: `tpl-fb-${index + 1}`,
+    template_id: `ownership-fb-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "English",
+    is_active: true,
+    success_rate: 0.9,
+    usage_count: 100,
+    template_body: "Do you still own {property_address}?",
+  }));
+
+  const candidate = normalizeCandidateRow({
+    master_owner_id: "mo-fb-1",
+    property_id: "prop-fb-1",
+    phone_id: "ph-fb-1",
+    best_phone_id: "ph-best-fb-1",
+    canonical_e164: "+18325550303",
+    display_name: "Fb Owner",
+    property_address_full: "905 Foxtrot Ave, Houston, TX 77001",
+    property_address_state: "TX",
+    touch_number: 1,
+    stage_code: "S1",
+    template_use_case: "ownership_check",
+    language: "English",
+  });
+
+  const result = await renderOutboundTemplate(
+    candidate,
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-fb" },
+    { fetchSmsTemplates: async () => templates }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template_rotation?.template_fetch_fallback_used, false);
+});
+
+test("createSendQueueItem stores template fetch diagnostics in metadata", async () => {
+  const candidate = normalizeCandidateRow({
+    master_owner_id: "mo-fetch-meta",
+    property_id: "prop-fetch-meta",
+    phone_id: "ph-fetch-meta",
+    best_phone_id: "ph-best-fetch-meta",
+    canonical_e164: "+18325550399",
+    display_name: "Fetch Meta Owner",
+    property_address_full: "910 Golf St, Houston, TX 77001",
+    property_address_state: "TX",
+    touch_number: 1,
+    stage_code: "S1",
+    template_use_case: "ownership_check",
+  });
+  const queue_result = await createSendQueueItem(
+    candidate,
+    {
+      dry_run: true,
+      rendered_message_body: "Do you still own 910 Golf St?",
+      template_id: "tpl-fetch-meta-1",
+      template_use_case: "ownership_check",
+      scheduled_for: "2026-04-26T12:00:00.000Z",
+      selected_textgrid_number_id: 5,
+      selected_textgrid_number: "+18325550700",
+      selected_textgrid_market: "Houston, TX",
+      routing_tier: "exact_market_match",
+      selection_reason: "exact_market_match",
+      routing_allowed: true,
+      routing_block_reason: null,
+      template_fetch_limit: 500,
+      template_fetch_language_filter_applied: true,
+      template_fetch_use_case_filter_applied: true,
+      template_fetch_stage_filter_applied: false,
+      template_fetch_fallback_used: false,
+      raw_template_count_before_language_filter: 32,
+      template_count_after_language_filter: 20,
+    },
+    {}
+  );
+  assert.equal(queue_result.ok, true);
+  assert.equal(queue_result.payload.metadata.template_fetch_limit, 500);
+  assert.equal(queue_result.payload.metadata.template_fetch_language_filter_applied, true);
+  assert.equal(queue_result.payload.metadata.template_fetch_use_case_filter_applied, true);
+  assert.equal(queue_result.payload.metadata.template_fetch_stage_filter_applied, false);
+  assert.equal(queue_result.payload.metadata.template_fetch_fallback_used, false);
+  assert.equal(queue_result.payload.metadata.raw_template_count_before_language_filter, 32);
+  assert.equal(queue_result.payload.metadata.template_count_after_language_filter, 20);
 });
 

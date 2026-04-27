@@ -979,6 +979,7 @@ function buildTemplateRotationDiagnostics({
   selected_template = null,
   pool_result = {},
   preferred_language = "English",
+  fetch_diagnostics = {},
 } = {}) {
   const rotation_pool = Array.isArray(rotation_choice?.rotation_pool)
     ? rotation_choice.rotation_pool
@@ -1024,6 +1025,13 @@ function buildTemplateRotationDiagnostics({
     selected_index: Number.isFinite(Number(rotation_choice?.selected_index))
       ? Number(rotation_choice.selected_index)
       : -1,
+    template_fetch_limit: Number(fetch_diagnostics?.template_fetch_limit) || null,
+    template_fetch_language_filter_applied: Boolean(fetch_diagnostics?.template_fetch_language_filter_applied),
+    template_fetch_use_case_filter_applied: fetch_diagnostics?.template_fetch_use_case_filter_applied !== false,
+    template_fetch_stage_filter_applied: Boolean(fetch_diagnostics?.template_fetch_stage_filter_applied),
+    template_fetch_fallback_used: Boolean(fetch_diagnostics?.template_fetch_fallback_used),
+    raw_template_count_before_language_filter: Number(fetch_diagnostics?.raw_template_count_before_language_filter || 0),
+    template_count_after_language_filter: Number(fetch_diagnostics?.template_count_after_language_filter || 0),
   };
 }
 
@@ -1464,17 +1472,43 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
     deal_strategy: clean(candidate.raw?.deal_strategy) || null,
   };
 
+  const is_cold_s1_fetch = isS1OwnershipCheckRotation(selector);
+  const fetch_limit = is_cold_s1_fetch ? 500 : 200;
+  const fetch_language = clean(selector.preferred_language) || null;
+
+  let fetch_diagnostics = {
+    template_fetch_limit: fetch_limit,
+    template_fetch_language_filter_applied: Boolean(fetch_language),
+    template_fetch_use_case_filter_applied: true,
+    template_fetch_stage_filter_applied: false,
+    template_fetch_fallback_used: false,
+    raw_template_count_before_language_filter: 0,
+    template_count_after_language_filter: 0,
+  };
+
   let templates = [];
   if (typeof deps.fetchSmsTemplates === "function") {
     templates = await deps.fetchSmsTemplates(selector, candidate, options);
+    fetch_diagnostics = {
+      ...fetch_diagnostics,
+      raw_template_count_before_language_filter: templates.length,
+    };
   } else {
     const supabase = getSupabase(deps);
-    const { data, error } = await supabase
+
+    let primary_query = supabase
       .from("sms_templates")
       .select("*")
       .eq("is_active", true)
-      .eq("use_case", selector.use_case)
-      .limit(200);
+      .eq("use_case", selector.use_case);
+
+    if (fetch_language) {
+      primary_query = primary_query.ilike("language", fetch_language);
+    }
+
+    primary_query = primary_query.limit(fetch_limit);
+
+    const { data, error } = await primary_query;
 
     if (error) {
       return {
@@ -1490,20 +1524,35 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
       };
     }
 
-    templates = Array.isArray(data) ? data : [];
+    const primary_rows = Array.isArray(data) ? data : [];
+    fetch_diagnostics.raw_template_count_before_language_filter = primary_rows.length;
+    templates = primary_rows;
 
     if (!templates.length) {
-      const fallback_any_use_case = await supabase
+      let fallback_query = supabase
         .from("sms_templates")
         .select("*")
-        .eq("is_active", true)
-        .limit(200);
+        .eq("is_active", true);
 
-      templates = Array.isArray(fallback_any_use_case?.data) ? fallback_any_use_case.data : [];
+      if (fetch_language) {
+        fallback_query = fallback_query.ilike("language", fetch_language);
+      }
+
+      fallback_query = fallback_query.limit(fetch_limit);
+
+      const fallback_any_use_case = await fallback_query;
+      const fallback_rows = Array.isArray(fallback_any_use_case?.data) ? fallback_any_use_case.data : [];
+
+      if (fallback_rows.length) {
+        fetch_diagnostics.template_fetch_fallback_used = true;
+        fetch_diagnostics.raw_template_count_before_language_filter = fallback_rows.length;
+      }
+      templates = fallback_rows;
     }
   }
 
   const language_filtered = filterTemplatesByPreferredLanguage(templates, selector);
+  fetch_diagnostics.template_count_after_language_filter = language_filtered.templates.length;
   templates = language_filtered.templates;
 
   if (!templates.length) {
@@ -1532,6 +1581,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         excluded_recent_template_ids: [],
         selected_template_id: null,
         selected_index: -1,
+        ...fetch_diagnostics,
       },
     };
   }
@@ -1587,6 +1637,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
     selected_template,
     pool_result,
     preferred_language: language_filtered.preferred_language,
+    fetch_diagnostics,
   });
 
   const selected_template_with_source = selected_template
@@ -1864,6 +1915,13 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
       selected_template_language: clean(options.selected_template_language || options.template_language) || null,
       selected_template_use_case: clean(options.selected_template_use_case || options.template_use_case) || null,
       selected_template_stage_code: clean(options.selected_template_stage_code || options.template_stage_code) || null,
+      template_fetch_limit: Number.isFinite(Number(options.template_fetch_limit)) ? Number(options.template_fetch_limit) : null,
+      template_fetch_language_filter_applied: Boolean(options.template_fetch_language_filter_applied),
+      template_fetch_use_case_filter_applied: options.template_fetch_use_case_filter_applied !== false,
+      template_fetch_stage_filter_applied: Boolean(options.template_fetch_stage_filter_applied),
+      template_fetch_fallback_used: Boolean(options.template_fetch_fallback_used),
+      raw_template_count_before_language_filter: Number(options.raw_template_count_before_language_filter || 0),
+      template_count_after_language_filter: Number(options.template_count_after_language_filter || 0),
     },
   };
 
@@ -2130,6 +2188,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
                 rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
               rotation_seed: rendered.template_rotation?.seed || null,
               excluded_recent_template_ids: rendered.template_rotation?.excluded_recent_template_ids || [],
+              template_fetch_limit: rendered.template_rotation?.template_fetch_limit ?? null,
+              template_fetch_language_filter_applied: Boolean(rendered.template_rotation?.template_fetch_language_filter_applied),
+              template_fetch_use_case_filter_applied: rendered.template_rotation?.template_fetch_use_case_filter_applied !== false,
+              template_fetch_stage_filter_applied: Boolean(rendered.template_rotation?.template_fetch_stage_filter_applied),
+              template_fetch_fallback_used: Boolean(rendered.template_rotation?.template_fetch_fallback_used),
+              raw_template_count_before_language_filter: Number(rendered.template_rotation?.raw_template_count_before_language_filter || 0),
+              template_count_after_language_filter: Number(rendered.template_rotation?.template_count_after_language_filter || 0),
             }
           : {}),
         ..._preview,
@@ -2164,6 +2229,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         selected_template_id: rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
         selected_template_source: rendered.template?.source || "sms_templates",
         selected_template_language: rendered.language || rendered.template?.language || null,
+        template_fetch_limit: rendered.template_rotation?.template_fetch_limit ?? null,
+        template_fetch_language_filter_applied: Boolean(rendered.template_rotation?.template_fetch_language_filter_applied),
+        template_fetch_use_case_filter_applied: rendered.template_rotation?.template_fetch_use_case_filter_applied !== false,
+        template_fetch_stage_filter_applied: Boolean(rendered.template_rotation?.template_fetch_stage_filter_applied),
+        template_fetch_fallback_used: Boolean(rendered.template_rotation?.template_fetch_fallback_used),
+        raw_template_count_before_language_filter: Number(rendered.template_rotation?.raw_template_count_before_language_filter || 0),
+        template_count_after_language_filter: Number(rendered.template_rotation?.template_count_after_language_filter || 0),
         selected_template_use_case: rendered.template_use_case,
         selected_template_stage_code: rendered.stage_code || rendered.template?.stage_code || null,
         selected_textgrid_number_id: routing.selected.id,
@@ -2233,6 +2305,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       template_rotation_min_score: Number.isFinite(Number(rendered.template_rotation?.rotation_min_score))
         ? Number(rendered.template_rotation?.rotation_min_score)
         : null,
+      template_fetch_limit: rendered.template_rotation?.template_fetch_limit ?? null,
+      template_fetch_language_filter_applied: Boolean(rendered.template_rotation?.template_fetch_language_filter_applied),
+      template_fetch_use_case_filter_applied: rendered.template_rotation?.template_fetch_use_case_filter_applied !== false,
+      template_fetch_stage_filter_applied: Boolean(rendered.template_rotation?.template_fetch_stage_filter_applied),
+      template_fetch_fallback_used: Boolean(rendered.template_rotation?.template_fetch_fallback_used),
+      raw_template_count_before_language_filter: Number(rendered.template_rotation?.raw_template_count_before_language_filter || 0),
+      template_count_after_language_filter: Number(rendered.template_rotation?.template_count_after_language_filter || 0),
       rendered_message_preview: clean(rendered.rendered_message_body).slice(0, 160),
       dry_run: options.dry_run,
     });
