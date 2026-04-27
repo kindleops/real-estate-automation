@@ -917,6 +917,162 @@ test("S1 ownership_check expanded pool includes lower-ranked but valid templates
   assert.ok(result.template_rotation.rotation_candidate_template_ids.includes("ownership-lower-10"));
 });
 
+test("English cold S1 with mixed-language templates keeps rotation pool English-only", async () => {
+  const english_templates = Array.from({ length: 20 }, (_, index) => ({
+    id: `tpl-en-mix-${index + 1}`,
+    template_id: `ownership-en-mix-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "English",
+    is_active: true,
+    is_first_touch: true,
+    template_body: `EN ${index + 1} {property_address}`,
+  }));
+  const non_english_templates = [
+    {
+      id: "tpl-es-mix-1",
+      template_id: "ownership-es-mix-1",
+      use_case: "ownership_check",
+      stage_code: "S1",
+      language: "Spanish",
+      is_active: true,
+      template_body: "ES {property_address}",
+    },
+    {
+      id: "tpl-zh-mix-1",
+      template_id: "ownership-zh-mix-1",
+      use_case: "ownership_check",
+      stage_code: "S1",
+      language: "Mandarin",
+      is_active: true,
+      template_body: "ZH {property_address}",
+    },
+  ];
+
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      master_owner_id: "mo-lang-en-1",
+      property_id: "prop-lang-en-1",
+      best_phone_id: "ph-lang-en-1",
+      phone_id: "ph-lang-en-1",
+      canonical_e164: "+18325550971",
+      best_language: "English",
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      touch_number: 1,
+      property_address_full: "10 Lang St, Houston, TX 77001",
+      property_address_state: "TX",
+    }),
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-lang-en" },
+    {
+      fetchSmsTemplates: async () => [...english_templates, ...non_english_templates],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template_rotation.rotation_pool_size >= 16, true);
+  assert.deepEqual(result.template_rotation.rotation_candidate_languages, ["English"]);
+  assert.equal(result.template_rotation.rotation_language_mismatch_detected, false);
+  assert.equal(result.template_rotation.selected_template_language, "English");
+  assert.equal(result.template.language, "English");
+});
+
+test("Spanish cold S1 keeps rotation pool Spanish-only and does not backfill from English", async () => {
+  const spanish_templates = Array.from({ length: 13 }, (_, index) => ({
+    id: `tpl-es-only-${index + 1}`,
+    template_id: `ownership-es-only-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "Spanish",
+    is_active: true,
+    is_first_touch: true,
+    template_body: `ES ${index + 1} {property_address}`,
+  }));
+  const english_templates = Array.from({ length: 20 }, (_, index) => ({
+    id: `tpl-en-only-${index + 1}`,
+    template_id: `ownership-en-only-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "English",
+    is_active: true,
+    template_body: `EN ${index + 1} {property_address}`,
+  }));
+
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      master_owner_id: "mo-lang-es-1",
+      property_id: "prop-lang-es-1",
+      best_phone_id: "ph-lang-es-1",
+      phone_id: "ph-lang-es-1",
+      canonical_e164: "+18325550972",
+      best_language: "Spanish",
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      touch_number: 1,
+      property_address_full: "11 Lang St, Houston, TX 77001",
+      property_address_state: "TX",
+    }),
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-lang-es" },
+    {
+      fetchSmsTemplates: async () => [...english_templates, ...spanish_templates],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template_rotation.rotation_pool_size, 13);
+  assert.deepEqual(result.template_rotation.rotation_candidate_languages, ["Spanish"]);
+  assert.equal(result.template_rotation.rotation_language_mismatch_detected, false);
+  assert.equal(result.template_rotation.selected_template_language, "Spanish");
+  assert.equal(result.template.language, "Spanish");
+});
+
+test("selected template language always matches preferred language for cold S1 mixed pools", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      master_owner_id: "mo-lang-vn-1",
+      property_id: "prop-lang-vn-1",
+      best_phone_id: "ph-lang-vn-1",
+      phone_id: "ph-lang-vn-1",
+      canonical_e164: "+18325550973",
+      best_language: "Vietnamese",
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      touch_number: 1,
+      property_address_full: "12 Lang St, Houston, TX 77001",
+      property_address_state: "TX",
+    }),
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-lang-vn" },
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-vn-1",
+          template_id: "ownership-vn-1",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "Vietnamese",
+          is_active: true,
+          template_body: "VN {property_address}",
+        },
+        {
+          id: "tpl-en-1",
+          template_id: "ownership-en-1",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+          is_active: true,
+          template_body: "EN {property_address}",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template_rotation.requested_language, "Vietnamese");
+  assert.equal(result.template_rotation.selected_template_language, "Vietnamese");
+  assert.equal(result.template.language, "Vietnamese");
+  assert.deepEqual(result.template_rotation.rotation_candidate_languages, ["Vietnamese"]);
+});
+
 test("S1 ownership_check rotation is deterministic for same seed", async () => {
   const candidate = normalizeCandidateRow({
     master_owner_id: "mo-seed-1",
@@ -1628,6 +1784,7 @@ test("S1 ownership_check blocks full agent name rendering and reports diagnostic
   const result = await renderOutboundTemplate(
     normalizeCandidateRow({
       display_name: "Owner Agent Gate",
+      best_language: "Spanish",
       property_address_full: "101 Gate St, Austin, TX 78701",
       property_address_state: "TX",
       touch_number: 1,

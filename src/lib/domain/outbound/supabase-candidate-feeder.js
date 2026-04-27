@@ -785,6 +785,30 @@ function shouldEnableTemplateRotation(selector = {}) {
   return isColdOutboundS1OwnershipCheck(selector);
 }
 
+function normalizeLanguageToken(value = "") {
+  return lower(clean(value));
+}
+
+function filterTemplatesByPreferredLanguage(templates = [], selector = {}) {
+  const preferred_language = clean(pick(selector.preferred_language, selector.language, "English")) || "English";
+  const preferred_language_normalized = normalizeLanguageToken(preferred_language);
+  const rows = Array.isArray(templates) ? templates : [];
+  const matching = rows.filter((template) =>
+    normalizeLanguageToken(pick(template?.language, template?.metadata?.language, "")) === preferred_language_normalized
+  );
+
+  return {
+    preferred_language,
+    preferred_language_normalized,
+    templates: matching,
+    had_mixed_languages: new Set(
+      rows
+        .map((template) => clean(pick(template?.language, template?.metadata?.language, "")))
+        .filter(Boolean)
+    ).size > 1,
+  };
+}
+
 function isS1OwnershipCheckRotation(selector = {}) {
   const use_case = lower(clean(pick(selector.use_case, selector.template_use_case, "")));
   const stage_code = clean(selector.stage_code).toUpperCase();
@@ -954,14 +978,32 @@ function buildTemplateRotationDiagnostics({
   rotation_choice = {},
   selected_template = null,
   pool_result = {},
+  preferred_language = "English",
 } = {}) {
   const rotation_pool = Array.isArray(rotation_choice?.rotation_pool)
     ? rotation_choice.rotation_pool
     : [];
+  const rotation_candidate_languages = [...new Set(
+    rotation_pool
+      .map((template) => clean(pick(template?.language, template?.metadata?.language, "")))
+      .filter(Boolean)
+  )];
+  const selected_template_language = clean(
+    pick(selected_template?.language, selected_template?.metadata?.language, "")
+  ) || null;
+  const preferred_language_normalized = normalizeLanguageToken(preferred_language);
+  const mismatch_detected = rotation_candidate_languages.some(
+    (language) => normalizeLanguageToken(language) !== preferred_language_normalized
+  );
 
   return {
     enabled: rotation_enabled,
     seed: rotation_seed,
+    preferred_language: clean(preferred_language) || "English",
+    requested_language: clean(preferred_language) || "English",
+    selected_template_language,
+    rotation_candidate_languages,
+    rotation_language_mismatch_detected: mismatch_detected,
     rotation_strategy: clean(pool_result?.strategy) || "default_top_window",
     rotation_best_score: Number.isFinite(Number(pool_result?.best_score))
       ? Number(pool_result.best_score)
@@ -1461,16 +1503,36 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
     }
   }
 
+  const language_filtered = filterTemplatesByPreferredLanguage(templates, selector);
+  templates = language_filtered.templates;
+
   if (!templates.length) {
     return {
       ok: false,
       reason_code: REASON_CODES.NO_TEMPLATE,
-      reason: "no_template_found",
+      reason: "no_template_for_preferred_language",
       template: null,
       rendered_message_body: null,
       missing_variables: [],
       variable_payload_preview: buildTemplateVariablePayload(candidate),
       selected_template_preview: null,
+      template_rotation: {
+        enabled: false,
+        preferred_language: language_filtered.preferred_language,
+        requested_language: language_filtered.preferred_language,
+        selected_template_language: null,
+        rotation_candidate_languages: [],
+        rotation_language_mismatch_detected: false,
+        rotation_strategy: "no_template_for_preferred_language",
+        rotation_best_score: null,
+        rotation_min_score: null,
+        eligible_template_count: 0,
+        rotation_pool_size: 0,
+        rotation_candidate_template_ids: [],
+        excluded_recent_template_ids: [],
+        selected_template_id: null,
+        selected_index: -1,
+      },
     };
   }
 
@@ -1524,6 +1586,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
     rotation_choice,
     selected_template,
     pool_result,
+    preferred_language: language_filtered.preferred_language,
   });
 
   const selected_template_with_source = selected_template
@@ -1773,9 +1836,15 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
       template_rotation_candidate_ids: Array.isArray(options.template_rotation_candidate_ids)
         ? options.template_rotation_candidate_ids
         : [],
+      template_rotation_candidate_languages: Array.isArray(options.template_rotation_candidate_languages)
+        ? options.template_rotation_candidate_languages
+        : [],
       template_rotation_selected_index: Number.isFinite(Number(options.template_rotation_selected_index))
         ? Number(options.template_rotation_selected_index)
         : null,
+      template_rotation_requested_language: clean(options.template_rotation_requested_language) || null,
+      selected_template_language: clean(options.selected_template_language || options.template_language) || null,
+      rotation_language_mismatch_detected: Boolean(options.rotation_language_mismatch_detected),
       template_rotation_strategy: clean(options.template_rotation_strategy) || null,
       template_rotation_best_score: Number.isFinite(Number(options.template_rotation_best_score))
         ? Number(options.template_rotation_best_score)
@@ -2053,6 +2122,10 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
                 ? Number(rendered.template_rotation?.rotation_min_score)
                 : null,
               rotation_candidate_template_ids: rendered.template_rotation?.rotation_candidate_template_ids || [],
+              rotation_candidate_languages: rendered.template_rotation?.rotation_candidate_languages || [],
+              requested_language: rendered.template_rotation?.requested_language || null,
+              selected_template_language: rendered.template_rotation?.selected_template_language || null,
+              rotation_language_mismatch_detected: Boolean(rendered.template_rotation?.rotation_language_mismatch_detected),
               selected_template_id:
                 rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
               rotation_seed: rendered.template_rotation?.seed || null,
@@ -2080,7 +2153,11 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         template_rotation_seed: rendered.template_rotation?.seed || null,
         template_rotation_pool_size: rendered.template_rotation?.rotation_pool_size || 0,
         template_rotation_candidate_ids: rendered.template_rotation?.rotation_candidate_template_ids || [],
+        template_rotation_candidate_languages: rendered.template_rotation?.rotation_candidate_languages || [],
         template_rotation_selected_index: rendered.template_rotation?.selected_index ?? null,
+        template_rotation_requested_language: rendered.template_rotation?.requested_language || null,
+        selected_template_language: rendered.template_rotation?.selected_template_language || rendered.language || rendered.template?.language || null,
+        rotation_language_mismatch_detected: Boolean(rendered.template_rotation?.rotation_language_mismatch_detected),
         template_rotation_strategy: rendered.template_rotation?.rotation_strategy || null,
         template_rotation_best_score: rendered.template_rotation?.rotation_best_score ?? null,
         template_rotation_min_score: rendered.template_rotation?.rotation_min_score ?? null,
@@ -2145,6 +2222,10 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       template_rotation_enabled: Boolean(rendered.template_rotation?.enabled),
       template_rotation_pool_size: Number(rendered.template_rotation?.rotation_pool_size || 0),
       template_rotation_selected_index: Number(rendered.template_rotation?.selected_index ?? -1),
+      template_rotation_requested_language: clean(rendered.template_rotation?.requested_language) || null,
+      selected_template_language: clean(rendered.template_rotation?.selected_template_language || rendered.language || rendered.template?.language) || null,
+      rotation_language_mismatch_detected: Boolean(rendered.template_rotation?.rotation_language_mismatch_detected),
+      rotation_candidate_languages: rendered.template_rotation?.rotation_candidate_languages || [],
       template_rotation_strategy: clean(rendered.template_rotation?.rotation_strategy) || null,
       template_rotation_best_score: Number.isFinite(Number(rendered.template_rotation?.rotation_best_score))
         ? Number(rendered.template_rotation?.rotation_best_score)
