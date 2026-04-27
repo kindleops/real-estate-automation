@@ -11,6 +11,8 @@ const DEFAULT_CANDIDATE_SOURCE = "v_sms_campaign_queue_candidates";
 const ALLOWED_CANDIDATE_SOURCE_OVERRIDES = new Set([
   "outbound_candidate_snapshot",
   "v_sms_ready_contacts",
+  "v_sms_campaign_queue_candidates",
+  "v_launch_sms_tier1",
 ]);
 const CANDIDATE_SOURCE_AVAILABLE_HINT = [
   "v_sms_campaign_queue_candidates",
