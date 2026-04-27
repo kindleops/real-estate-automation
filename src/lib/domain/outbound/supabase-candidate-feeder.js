@@ -36,6 +36,8 @@ const REASON_CODES = Object.freeze({
   NO_VALID_TEXTGRID_NUMBER: "NO_VALID_TEXTGRID_NUMBER",
   ROUTING_BLOCKED: "ROUTING_BLOCKED",
   CAMPAIGN_LIMIT_REACHED: "CAMPAIGN_LIMIT_REACHED",
+  SCHEDULE_WINDOW_FULL: "SCHEDULE_WINDOW_FULL",
+  SCHEDULE_OVERFLOW_BLOCKED: "SCHEDULE_OVERFLOW_BLOCKED",
 });
 
 const logger = child({ module: "domain.outbound.supabase_candidate_feeder" });
@@ -343,6 +345,12 @@ function mapReasonToDiagnosticCounter(reason) {
   }
   if (reason === REASON_CODES.ROUTING_BLOCKED || reason === REASON_CODES.NO_VALID_TEXTGRID_NUMBER) {
     return "routing_block_count";
+  }
+  if (reason === REASON_CODES.SCHEDULE_WINDOW_FULL) {
+    return "schedule_window_full_count";
+  }
+  if (reason === REASON_CODES.SCHEDULE_OVERFLOW_BLOCKED) {
+    return "schedule_overflow_blocked_count";
   }
   return null;
 }
@@ -1111,6 +1119,77 @@ function getLocalMinutesAt(date, timezone) {
   }
 }
 
+function getLocalDateTimeParts(date, timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone || "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const value = (type) => Number(parts.find((p) => p.type === type)?.value);
+    const result = {
+      year: value("year"),
+      month: value("month"),
+      day: value("day"),
+      hour: value("hour"),
+      minute: value("minute"),
+      second: value("second"),
+    };
+    return Object.values(result).every(Number.isFinite) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function getTimezoneOffsetMs(date, timezone) {
+  const parts = getLocalDateTimeParts(date, timezone);
+  if (!parts) return null;
+  const local_as_utc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  );
+  return local_as_utc - date.getTime();
+}
+
+function localDateTimeToUtcMs(parts, timezone) {
+  let guess = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second || 0,
+    0
+  );
+
+  for (let i = 0; i < 3; i += 1) {
+    const offset = getTimezoneOffsetMs(new Date(guess), timezone);
+    if (offset === null) return null;
+    const next = Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second || 0,
+      0
+    ) - offset;
+    if (Math.abs(next - guess) < 1000) return next;
+    guess = next;
+  }
+
+  return guess;
+}
+
 function parseTimeLocal(value) {
   const cleaned = clean(value);
   const ampm_result = parseWindowTime(cleaned);
@@ -1146,25 +1225,69 @@ function createSpreadScheduler({
   schedule_start_local = "09:00",
   schedule_end_local = "20:00",
   schedule_interval_seconds_min = 45,
-  schedule_interval_seconds_max = 180,
 } = {}) {
-  const default_start_minutes = parseTimeLocal(schedule_start_local) ?? (9 * 60);
-  const default_end_minutes = parseTimeLocal(schedule_end_local) ?? (20 * 60);
-  const min_interval_ms = Math.max(1, Number(schedule_interval_seconds_min) || 45) * 1000;
-  const max_interval_ms = Math.max(min_interval_ms, Number(schedule_interval_seconds_max) || 180) * 1000;
-  let cursor_ms = new Date(now_iso).getTime();
+  const start_minutes = parseTimeLocal(schedule_start_local) ?? (9 * 60);
+  const end_minutes = parseTimeLocal(schedule_end_local) ?? (20 * 60);
+  const interval_ms = Math.max(1, Number(schedule_interval_seconds_min) || 45) * 1000;
+  const now_ms = new Date(now_iso).getTime();
+  const overflow_guard_ms = now_ms + 18 * 60 * 60 * 1000;
+  const cursors_by_timezone = new Map();
+
+  function getTodayWindowUtc(timezone) {
+    const requested_timezone = clean(timezone) || "America/Chicago";
+    const effective_timezone = getLocalDateTimeParts(new Date(now_ms), requested_timezone)
+      ? requested_timezone
+      : "America/Chicago";
+    const now_parts = getLocalDateTimeParts(new Date(now_ms), effective_timezone);
+    if (!now_parts) return null;
+
+    const start_utc = localDateTimeToUtcMs({
+      year: now_parts.year,
+      month: now_parts.month,
+      day: now_parts.day,
+      hour: Math.floor(start_minutes / 60),
+      minute: start_minutes % 60,
+      second: 0,
+    }, effective_timezone);
+    const end_utc = localDateTimeToUtcMs({
+      year: now_parts.year,
+      month: now_parts.month,
+      day: now_parts.day,
+      hour: Math.floor(end_minutes / 60),
+      minute: end_minutes % 60,
+      second: 0,
+    }, effective_timezone);
+
+    if (start_utc === null || end_utc === null) return null;
+    return {
+      timezone: effective_timezone,
+      start_utc,
+      end_utc,
+    };
+  }
 
   return {
     nextScheduledFor(candidate) {
-      const timezone = candidate.timezone || "America/Chicago";
-      const range = parseContactWindowRange(candidate.contact_window);
-      const start_minutes = range?.start ?? default_start_minutes;
-      const end_minutes = range?.end ?? default_end_minutes;
-      const jitter_ms = min_interval_ms + Math.random() * (max_interval_ms - min_interval_ms);
-      cursor_ms += jitter_ms;
-      const snapped = snapToNextWindowOpen(cursor_ms, timezone, start_minutes, end_minutes);
-      cursor_ms = snapped.getTime();
-      return snapped.toISOString();
+      const window = getTodayWindowUtc(candidate.timezone || "America/Chicago");
+      if (!window || window.end_utc <= window.start_utc) {
+        return { scheduled_for: null, reason_code: REASON_CODES.SCHEDULE_WINDOW_FULL };
+      }
+
+      const previous_cursor = cursors_by_timezone.get(window.timezone);
+      const cursor_ms = previous_cursor === undefined
+        ? Math.max(now_ms + 10 * 60 * 1000, window.start_utc)
+        : previous_cursor + interval_ms;
+      cursors_by_timezone.set(window.timezone, cursor_ms);
+
+      if (cursor_ms > overflow_guard_ms) {
+        return { scheduled_for: null, reason_code: REASON_CODES.SCHEDULE_OVERFLOW_BLOCKED };
+      }
+
+      if (cursor_ms > window.end_utc) {
+        return { scheduled_for: null, reason_code: REASON_CODES.SCHEDULE_WINDOW_FULL };
+      }
+
+      return { scheduled_for: new Date(cursor_ms).toISOString(), reason_code: null };
     },
   };
 }
@@ -2077,6 +2200,11 @@ export function buildFeederDiagnostics(summary = {}) {
     no_template_count: Number(summary.no_template_count || 0),
     template_render_failed_count: Number(summary.template_render_failed_count || 0),
     schedule_spread_enabled: Boolean(summary.schedule_spread_enabled),
+    schedule_start_local: clean(summary.schedule_start_local) || null,
+    schedule_end_local: clean(summary.schedule_end_local) || null,
+    schedule_interval_seconds: Number(summary.schedule_interval_seconds || 0),
+    schedule_window_full_count: Number(summary.schedule_window_full_count || 0),
+    schedule_overflow_blocked_count: Number(summary.schedule_overflow_blocked_count || 0),
     first_scheduled_for: summary.first_scheduled_for || null,
     last_scheduled_for: summary.last_scheduled_for || null,
     error: clean(summary.error) || null,
@@ -2146,6 +2274,14 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       template_block_count: 0,
       no_template_count: 0,
       template_render_failed_count: 0,
+      schedule_spread_enabled: options.schedule_spread && !options.within_contact_window_now,
+      schedule_start_local: options.schedule_start_local || null,
+      schedule_end_local: options.schedule_end_local || null,
+      schedule_interval_seconds: options.schedule_interval_seconds_min || 0,
+      schedule_window_full_count: 0,
+      schedule_overflow_blocked_count: 0,
+      first_scheduled_for: null,
+      last_scheduled_for: null,
       selected_textgrid_market_counts: {},
       routing_tier_counts: {},
       sample_created_queue_items: [],
@@ -2163,7 +2299,6 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         schedule_start_local: options.schedule_start_local,
         schedule_end_local: options.schedule_end_local,
         schedule_interval_seconds_min: options.schedule_interval_seconds_min,
-        schedule_interval_seconds_max: options.schedule_interval_seconds_max,
       })
     : null;
 
@@ -2190,6 +2325,11 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     no_template_count: 0,
     template_render_failed_count: 0,
     schedule_spread_enabled: use_spread,
+    schedule_start_local: options.schedule_start_local || null,
+    schedule_end_local: options.schedule_end_local || null,
+    schedule_interval_seconds: options.schedule_interval_seconds_min || 0,
+    schedule_window_full_count: 0,
+    schedule_overflow_blocked_count: 0,
     first_scheduled_for: null,
     last_scheduled_for: null,
     selected_textgrid_market_counts: {},
@@ -2319,9 +2459,25 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       continue;
     }
 
-    const scheduled_for = spread_scheduler
-      ? spread_scheduler.nextScheduledFor(candidate)
-      : eligibility.scheduled_for;
+    let scheduled_for;
+    if (spread_scheduler) {
+      const spread_result = spread_scheduler.nextScheduledFor(candidate);
+      if (spread_result.reason_code) {
+        summary.skipped_count += 1;
+        const counter = mapReasonToDiagnosticCounter(spread_result.reason_code);
+        if (counter) summary[counter] += 1;
+        summary.sample_skips.push({
+          reason_code: spread_result.reason_code,
+          reason: spread_result.reason_code,
+          master_owner_id: candidate.master_owner_id,
+          property_id: candidate.property_id,
+        });
+        continue;
+      }
+      scheduled_for = spread_result.scheduled_for;
+    } else {
+      scheduled_for = eligibility.scheduled_for;
+    }
 
     const queue_result = await createSendQueueItem(
       candidate,

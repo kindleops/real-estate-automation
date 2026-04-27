@@ -77,6 +77,27 @@ function makeTextgridSupabase(numbers = []) {
   };
 }
 
+function getLocalParts(iso, timezone = "America/Chicago") {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(iso));
+  const value = (type) => Number(parts.find((p) => p.type === type)?.value);
+  return {
+    year: value("year"),
+    month: value("month"),
+    day: value("day"),
+    hour: value("hour"),
+    minute: value("minute"),
+    date_key: `${parts.find((p) => p.type === "year")?.value}-${parts.find((p) => p.type === "month")?.value}-${parts.find((p) => p.type === "day")?.value}`,
+  };
+}
+
 test("runSupabaseCandidateFeeder dry_run returns diagnostics without queue mutation", async () => {
   let create_calls = 0;
 
@@ -2151,27 +2172,37 @@ test("within_contact_window_now=false creates rows with future scheduled_for", a
 
   assert.equal(result.queued_count, 1);
   assert.ok(captured_scheduled_for, "scheduled_for should be set");
+  assert.equal(result.schedule_spread_enabled, false);
   assert.ok(result.first_scheduled_for, "first_scheduled_for should be set in diagnostics");
   assert.ok(result.last_scheduled_for, "last_scheduled_for should be set in diagnostics");
 });
 
-test("schedule_spread distributes scheduled_for values across multiple timestamps", async () => {
+test("schedule_spread slots 100 rows today inside the campaign window", async () => {
   const queued_scheduled_fors = [];
-  const candidates = Array.from({ length: 10 }, (_, i) => makeCandidate(i + 1));
+  const timezone = "America/Chicago";
+  const now_iso = "2026-04-27T12:00:00.000Z";
+  const today_key = getLocalParts(now_iso, timezone).date_key;
+  const candidates = Array.from({ length: 100 }, (_, i) =>
+    makeCandidate(i + 1, {
+      timezone,
+      contact_window: "11:00 PM - 11:30 PM",
+    })
+  );
 
   const result = await runSupabaseCandidateFeeder(
     {
       dry_run: false,
-      limit: 10,
-      scan_limit: 10,
+      limit: 100,
+      scan_limit: 100,
       within_contact_window_now: false,
       schedule_spread: true,
       schedule_start_local: "09:00",
       schedule_end_local: "20:00",
-      schedule_interval_seconds_min: 45,
-      schedule_interval_seconds_max: 180,
+      schedule_interval_seconds_min: 180,
+      schedule_interval_seconds_max: 999,
       campaign_session_id: "session-spread",
       template_use_case: "ownership_check",
+      now: now_iso,
     },
     {
       supabase: makeSupabaseWithCandidates(candidates),
@@ -2197,17 +2228,36 @@ test("schedule_spread distributes scheduled_for values across multiple timestamp
   );
 
   assert.equal(result.schedule_spread_enabled, true);
-  assert.ok(result.queued_count >= 2, "should have queued multiple candidates");
-  const unique_times = new Set(queued_scheduled_fors);
-  assert.ok(unique_times.size > 1, `schedule_spread should produce multiple distinct timestamps, got ${unique_times.size}`);
+  assert.equal(result.schedule_start_local, "09:00");
+  assert.equal(result.schedule_end_local, "20:00");
+  assert.equal(result.schedule_interval_seconds, 180);
+  assert.equal(result.queued_count, 100);
+  assert.equal(result.schedule_window_full_count, 0);
+  assert.equal(result.schedule_overflow_blocked_count, 0);
+  assert.equal(queued_scheduled_fors.length, 100);
+  assert.equal(result.first_scheduled_for, queued_scheduled_fors[0]);
+  assert.equal(result.last_scheduled_for, queued_scheduled_fors.at(-1));
+
+  for (let i = 0; i < queued_scheduled_fors.length; i += 1) {
+    const local = getLocalParts(queued_scheduled_fors[i], timezone);
+    const local_minutes = local.hour * 60 + local.minute;
+    assert.equal(local.date_key, today_key, `${queued_scheduled_fors[i]} must be today in ${timezone}`);
+    assert.ok(local_minutes >= 9 * 60, `${queued_scheduled_fors[i]} must be at or after 09:00 local`);
+    assert.ok(local_minutes <= 20 * 60, `${queued_scheduled_fors[i]} must be at or before 20:00 local`);
+
+    if (i > 0) {
+      const previous_ms = new Date(queued_scheduled_fors[i - 1]).getTime();
+      const current_ms = new Date(queued_scheduled_fors[i]).getTime();
+      assert.equal(current_ms - previous_ms, 180_000, "spread slots should use the configured min interval exactly");
+    }
+  }
 });
 
-test("schedule_spread never schedules before now", async () => {
-  const now_iso = new Date().toISOString();
+test("schedule_spread skips rows once the campaign window is full", async () => {
   const queued_scheduled_fors = [];
   const candidates = Array.from({ length: 5 }, (_, i) => makeCandidate(i + 1));
 
-  await runSupabaseCandidateFeeder(
+  const result = await runSupabaseCandidateFeeder(
     {
       dry_run: false,
       limit: 5,
@@ -2215,11 +2265,10 @@ test("schedule_spread never schedules before now", async () => {
       within_contact_window_now: false,
       schedule_spread: true,
       schedule_start_local: "09:00",
-      schedule_end_local: "20:00",
-      schedule_interval_seconds_min: 60,
-      schedule_interval_seconds_max: 120,
-      campaign_session_id: "session-spread-time",
-      now: now_iso,
+      schedule_end_local: "09:05",
+      schedule_interval_seconds_min: 180,
+      campaign_session_id: "session-spread-full",
+      now: "2026-04-27T12:00:00.000Z",
     },
     {
       supabase: makeSupabaseWithCandidates(candidates),
@@ -2244,13 +2293,72 @@ test("schedule_spread never schedules before now", async () => {
     }
   );
 
-  const now_ms = new Date(now_iso).getTime();
+  assert.equal(result.queued_count, 2);
+  assert.equal(queued_scheduled_fors.length, 2);
+  assert.equal(result.schedule_window_full_count, 3);
+  assert.equal(result.schedule_overflow_blocked_count, 0);
+  assert.equal(result.skipped_count, 3);
+  assert.ok(
+    result.sample_skips.some((skip) => skip.reason_code === REASON_CODES.SCHEDULE_WINDOW_FULL),
+    "sample skips should include SCHEDULE_WINDOW_FULL"
+  );
+});
+
+test("schedule_spread blocks any slot beyond the 18 hour safety guard", async () => {
+  const now_iso = "2026-04-27T05:01:00.000Z";
+  const queued_scheduled_fors = [];
+  const candidates = Array.from({ length: 25 }, (_, i) =>
+    makeCandidate(i + 1, { timezone: "America/Chicago" })
+  );
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: false,
+      limit: 25,
+      scan_limit: 25,
+      within_contact_window_now: false,
+      schedule_spread: true,
+      schedule_start_local: "00:10",
+      schedule_end_local: "23:59",
+      schedule_interval_seconds_min: 3600,
+      campaign_session_id: "session-spread-overflow",
+      now: now_iso,
+    },
+    {
+      supabase: makeSupabaseWithCandidates(candidates),
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_overflow", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Overflow message.",
+      }),
+      createSendQueueItem: async (payload) => {
+        queued_scheduled_fors.push(payload.scheduled_for);
+        return { ok: true, queued: true, queue_key: `key-${queued_scheduled_fors.length}`, queue_row_id: queued_scheduled_fors.length };
+      },
+    }
+  );
+
+  const guard_ms = new Date(now_iso).getTime() + 18 * 60 * 60 * 1000;
   for (const sf of queued_scheduled_fors) {
     assert.ok(
-      new Date(sf).getTime() >= now_ms,
-      `scheduled_for ${sf} should not be before now ${now_iso}`
+      new Date(sf).getTime() <= guard_ms,
+      `scheduled_for ${sf} must not exceed now + 18 hours`
     );
   }
+  assert.ok(result.schedule_overflow_blocked_count > 0, "overflow slots should be blocked");
+  assert.ok(
+    result.sample_skips.some((skip) => skip.reason_code === REASON_CODES.SCHEDULE_OVERFLOW_BLOCKED),
+    "sample skips should include SCHEDULE_OVERFLOW_BLOCKED"
+  );
 });
 
 test("duplicate suppression still blocks duplicates when scan_limit is large", async () => {
@@ -2516,4 +2624,3 @@ test("createSendQueueItem stores template fetch diagnostics in metadata", async 
   assert.equal(queue_result.payload.metadata.raw_template_count_before_language_filter, 32);
   assert.equal(queue_result.payload.metadata.template_count_after_language_filter, 20);
 });
-
