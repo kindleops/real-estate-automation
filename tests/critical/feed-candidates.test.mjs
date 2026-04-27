@@ -827,6 +827,7 @@ test("S1 ownership_check rotation spreads template selection across a healthy po
   }));
 
   const selected = new Set();
+  const observed_pool_sizes = [];
   for (let i = 0; i < 25; i += 1) {
     const candidate = normalizeCandidateRow({
       master_owner_id: `mo-rot-${i}`,
@@ -851,9 +852,69 @@ test("S1 ownership_check rotation spreads template selection across a healthy po
 
     assert.equal(result.ok, true);
     selected.add(result.template.template_id);
+    observed_pool_sizes.push(Number(result.template_rotation?.rotation_pool_size || 0));
   }
 
+  assert.ok(observed_pool_sizes.every((size) => size >= 16));
   assert.ok(selected.size >= 5);
+});
+
+test("S1 ownership_check expanded pool includes lower-ranked but valid templates", async () => {
+  const top_templates = Array.from({ length: 4 }, (_, index) => ({
+    id: `tpl-top-${index + 1}`,
+    template_id: `ownership-top-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "English",
+    agent_persona: "Alex",
+    is_active: true,
+    is_first_touch: true,
+    success_rate: 0.99,
+    usage_count: 250,
+    template_body: `Top ${index + 1} {property_address}`,
+  }));
+
+  const lower_ranked_valid_templates = Array.from({ length: 14 }, (_, index) => ({
+    id: `tpl-lower-${index + 1}`,
+    template_id: `ownership-lower-${index + 1}`,
+    use_case: "ownership_check",
+    stage_code: "S1",
+    language: "English",
+    agent_persona: null,
+    is_active: true,
+    is_first_touch: true,
+    success_rate: 0.4,
+    usage_count: 35,
+    template_body: `Lower ${index + 1} {property_address}`,
+  }));
+
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      master_owner_id: "mo-pool-1",
+      property_id: "prop-pool-1",
+      best_phone_id: "ph-pool-1",
+      phone_id: "ph-pool-1",
+      canonical_e164: "+18325550961",
+      display_name: "Pool Owner",
+      property_address_full: "900 Pool St, Houston, TX 77001",
+      property_address_state: "TX",
+      touch_number: 1,
+      stage_code: "S1",
+      template_use_case: "ownership_check",
+      language: "English",
+      agent_persona: "Alex",
+    }),
+    { now: "2026-04-26T00:00:00.000Z", campaign_key: "campaign-expanded-pool" },
+    {
+      fetchSmsTemplates: async () => [...top_templates, ...lower_ranked_valid_templates],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.template_rotation.rotation_strategy, "cold_s1_wide_window");
+  assert.ok(result.template_rotation.rotation_pool_size >= 16);
+  assert.ok(result.template_rotation.rotation_candidate_template_ids.includes("ownership-lower-1"));
+  assert.ok(result.template_rotation.rotation_candidate_template_ids.includes("ownership-lower-10"));
 });
 
 test("S1 ownership_check rotation is deterministic for same seed", async () => {
@@ -1120,6 +1181,9 @@ test("createSendQueueItem stores template rotation diagnostics in metadata", asy
       template_rotation_pool_size: 7,
       template_rotation_candidate_ids: ["ownership-s1-meta", "ownership-s1-meta-2"],
       template_rotation_selected_index: 2,
+      template_rotation_strategy: "cold_s1_wide_window",
+      template_rotation_best_score: 321,
+      template_rotation_min_score: 286,
       selected_template_id: "ownership-s1-meta",
       selected_template_source: "sms_templates",
       selected_template_language: "English",
@@ -1134,6 +1198,12 @@ test("createSendQueueItem stores template rotation diagnostics in metadata", asy
   assert.equal(result.payload.metadata.template_rotation_seed, "seed-meta");
   assert.equal(result.payload.metadata.template_rotation_pool_size, 7);
   assert.deepEqual(result.payload.metadata.template_rotation_candidate_ids, ["ownership-s1-meta", "ownership-s1-meta-2"]);
+  assert.equal(result.payload.metadata.template_rotation_strategy, "cold_s1_wide_window");
+  assert.equal(result.payload.metadata.template_rotation_best_score, 321);
+  assert.equal(result.payload.metadata.template_rotation_min_score, 286);
+  assert.equal(result.payload.metadata.rotation_strategy, "cold_s1_wide_window");
+  assert.equal(result.payload.metadata.rotation_best_score, 321);
+  assert.equal(result.payload.metadata.rotation_min_score, 286);
   assert.equal(result.payload.metadata.selected_template_id, "ownership-s1-meta");
 });
 
@@ -1650,6 +1720,9 @@ test("debug_templates=true includes template diagnostics in dry-run sample_skips
   assert.ok("selected_template_preview" in skip);
   assert.ok("eligible_template_count" in skip);
   assert.ok("rotation_pool_size" in skip);
+  assert.ok("rotation_strategy" in skip);
+  assert.ok("rotation_best_score" in skip);
+  assert.ok("rotation_min_score" in skip);
   assert.ok("rotation_candidate_template_ids" in skip);
   assert.ok("selected_template_id" in skip);
   assert.ok("rotation_seed" in skip);

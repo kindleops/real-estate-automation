@@ -785,6 +785,13 @@ function shouldEnableTemplateRotation(selector = {}) {
   return isColdOutboundS1OwnershipCheck(selector);
 }
 
+function isS1OwnershipCheckRotation(selector = {}) {
+  const use_case = lower(clean(pick(selector.use_case, selector.template_use_case, "")));
+  const stage_code = clean(selector.stage_code).toUpperCase();
+  const preferred_language = lower(clean(pick(selector.preferred_language, selector.language, "English")));
+  return use_case === "ownership_check" && stage_code === "S1" && preferred_language === "english";
+}
+
 async function getRecentTemplateIds(candidate = {}, selector = {}, options = {}, deps = {}) {
   if (typeof deps.getRecentTemplateIds === "function") {
     const custom = await deps.getRecentTemplateIds(candidate, selector, options);
@@ -866,7 +873,13 @@ async function getRecentTemplateIds(candidate = {}, selector = {}, options = {},
 }
 
 function buildRotationPool(sorted_templates = [], selector = {}) {
-  const cap = 50;
+  const is_s1_ownership_rotation = isS1OwnershipCheckRotation(selector);
+  const strategy = is_s1_ownership_rotation
+    ? "cold_s1_wide_window"
+    : "default_top_window";
+  const score_window = is_s1_ownership_rotation ? 35 : 10;
+  const min_pool_size = is_s1_ownership_rotation ? 16 : 0;
+  const cap = is_s1_ownership_rotation ? 35 : 50;
   const scored = sorted_templates.map((template) => ({
     template,
     score: computeTemplateQualityScore(template, selector),
@@ -876,29 +889,99 @@ function buildRotationPool(sorted_templates = [], selector = {}) {
     return {
       pool: [],
       best_score: null,
+      min_score: null,
+      strategy,
+      min_pool_size,
+      cap,
     };
   }
 
   const has_scores = scored.some((entry) => Number.isFinite(entry.score));
   if (!has_scores) {
+    const fallback_pool = sorted_templates.slice(0, Math.min(Math.max(min_pool_size, 25), cap));
     return {
-      pool: sorted_templates.slice(0, Math.min(25, cap)),
+      pool: fallback_pool,
       best_score: null,
+      min_score: null,
+      strategy,
+      min_pool_size,
+      cap,
     };
   }
 
   const best_score = Math.max(...scored.map((entry) => Number(entry.score || 0)));
+  const min_score = best_score - score_window;
   let pool = scored
-    .filter((entry) => Number(entry.score || 0) >= best_score - 10)
+    .filter((entry) => Number(entry.score || 0) >= min_score)
     .map((entry) => entry.template);
 
+  if (is_s1_ownership_rotation && pool.length < min_pool_size) {
+    const existing_ids = new Set(
+      pool
+        .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+        .filter(Boolean)
+    );
+
+    for (const entry of scored) {
+      if (pool.length >= min_pool_size) break;
+      const template = entry.template;
+      const template_id = clean(template?.template_id || template?.id || template?.item_id);
+      if (template_id && existing_ids.has(template_id)) continue;
+      pool.push(template);
+      if (template_id) existing_ids.add(template_id);
+    }
+  }
+
   if (!pool.length) {
-    pool = sorted_templates.slice(0, 25);
+    pool = sorted_templates.slice(0, Math.min(Math.max(min_pool_size, 25), cap));
   }
 
   return {
     pool: pool.slice(0, cap),
     best_score,
+    min_score,
+    strategy,
+    min_pool_size,
+    cap,
+  };
+}
+
+function buildTemplateRotationDiagnostics({
+  rotation_enabled = false,
+  rotation_seed = "",
+  eligible_template_count = 0,
+  excluded_recent_template_ids = [],
+  rotation_choice = {},
+  selected_template = null,
+  pool_result = {},
+} = {}) {
+  const rotation_pool = Array.isArray(rotation_choice?.rotation_pool)
+    ? rotation_choice.rotation_pool
+    : [];
+
+  return {
+    enabled: rotation_enabled,
+    seed: rotation_seed,
+    rotation_strategy: clean(pool_result?.strategy) || "default_top_window",
+    rotation_best_score: Number.isFinite(Number(pool_result?.best_score))
+      ? Number(pool_result.best_score)
+      : null,
+    rotation_min_score: Number.isFinite(Number(pool_result?.min_score))
+      ? Number(pool_result.min_score)
+      : null,
+    eligible_template_count: Number(eligible_template_count || 0),
+    rotation_pool_size: rotation_pool.length,
+    rotation_candidate_template_ids: rotation_pool
+      .map((template) => clean(template?.template_id || template?.id || template?.item_id))
+      .filter(Boolean),
+    excluded_recent_template_ids: Array.isArray(excluded_recent_template_ids)
+      ? excluded_recent_template_ids
+      : [],
+    selected_template_id:
+      clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
+    selected_index: Number.isFinite(Number(rotation_choice?.selected_index))
+      ? Number(rotation_choice.selected_index)
+      : -1,
   };
 }
 
@@ -1433,6 +1516,15 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
       };
 
   selected_template = rotation_choice.selected || selected_template;
+  const template_rotation = buildTemplateRotationDiagnostics({
+    rotation_enabled,
+    rotation_seed,
+    eligible_template_count: sorted_templates.length,
+    excluded_recent_template_ids: recent_template_ids,
+    rotation_choice,
+    selected_template,
+    pool_result,
+  });
 
   const selected_template_with_source = selected_template
     ? { ...selected_template, source: "sms_templates" }
@@ -1460,18 +1552,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
-      template_rotation: {
-        enabled: rotation_enabled,
-        seed: rotation_seed,
-        eligible_template_count: sorted_templates.length,
-        rotation_pool_size: rotation_choice.rotation_pool.length,
-        rotation_candidate_template_ids: rotation_choice.rotation_pool
-          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
-          .filter(Boolean),
-        excluded_recent_template_ids: recent_template_ids,
-        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
-        selected_index: rotation_choice.selected_index,
-      },
+      template_rotation,
     };
   }
 
@@ -1499,18 +1580,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
-      template_rotation: {
-        enabled: rotation_enabled,
-        seed: rotation_seed,
-        eligible_template_count: sorted_templates.length,
-        rotation_pool_size: rotation_choice.rotation_pool.length,
-        rotation_candidate_template_ids: rotation_choice.rotation_pool
-          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
-          .filter(Boolean),
-        excluded_recent_template_ids: recent_template_ids,
-        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
-        selected_index: rotation_choice.selected_index,
-      },
+      template_rotation,
     };
   }
 
@@ -1536,18 +1606,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
-      template_rotation: {
-        enabled: rotation_enabled,
-        seed: rotation_seed,
-        eligible_template_count: sorted_templates.length,
-        rotation_pool_size: rotation_choice.rotation_pool.length,
-        rotation_candidate_template_ids: rotation_choice.rotation_pool
-          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
-          .filter(Boolean),
-        excluded_recent_template_ids: recent_template_ids,
-        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
-        selected_index: rotation_choice.selected_index,
-      },
+      template_rotation,
     };
   }
 
@@ -1581,18 +1640,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
-      template_rotation: {
-        enabled: rotation_enabled,
-        seed: rotation_seed,
-        eligible_template_count: sorted_templates.length,
-        rotation_pool_size: rotation_choice.rotation_pool.length,
-        rotation_candidate_template_ids: rotation_choice.rotation_pool
-          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
-          .filter(Boolean),
-        excluded_recent_template_ids: recent_template_ids,
-        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
-        selected_index: rotation_choice.selected_index,
-      },
+      template_rotation,
     };
   }
 
@@ -1627,18 +1675,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
         stage_code: selected_template?.stage_code || null,
         stage_label: selected_template?.stage_label || null,
       },
-      template_rotation: {
-        enabled: rotation_enabled,
-        seed: rotation_seed,
-        eligible_template_count: sorted_templates.length,
-        rotation_pool_size: rotation_choice.rotation_pool.length,
-        rotation_candidate_template_ids: rotation_choice.rotation_pool
-          .map((template) => clean(template?.template_id || template?.id || template?.item_id))
-          .filter(Boolean),
-        excluded_recent_template_ids: recent_template_ids,
-        selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
-        selected_index: rotation_choice.selected_index,
-      },
+      template_rotation,
     };
   }
 
@@ -1660,18 +1697,7 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
       stage_code: selected_template?.stage_code || null,
       stage_label: selected_template?.stage_label || null,
     },
-    template_rotation: {
-      enabled: rotation_enabled,
-      seed: rotation_seed,
-      eligible_template_count: sorted_templates.length,
-      rotation_pool_size: rotation_choice.rotation_pool.length,
-      rotation_candidate_template_ids: rotation_choice.rotation_pool
-        .map((template) => clean(template?.template_id || template?.id || template?.item_id))
-        .filter(Boolean),
-      excluded_recent_template_ids: recent_template_ids,
-      selected_template_id: clean(selected_template?.template_id || selected_template?.id || selected_template?.item_id) || null,
-      selected_index: rotation_choice.selected_index,
-    },
+    template_rotation,
     stage_code: selected_template?.stage_code || selector.stage_code,
     stage_label: selected_template?.stage_label || selector.stage_label,
     language: selected_template?.language || selector.preferred_language,
@@ -1749,6 +1775,20 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
         : [],
       template_rotation_selected_index: Number.isFinite(Number(options.template_rotation_selected_index))
         ? Number(options.template_rotation_selected_index)
+        : null,
+      template_rotation_strategy: clean(options.template_rotation_strategy) || null,
+      template_rotation_best_score: Number.isFinite(Number(options.template_rotation_best_score))
+        ? Number(options.template_rotation_best_score)
+        : null,
+      template_rotation_min_score: Number.isFinite(Number(options.template_rotation_min_score))
+        ? Number(options.template_rotation_min_score)
+        : null,
+      rotation_strategy: clean(options.template_rotation_strategy) || null,
+      rotation_best_score: Number.isFinite(Number(options.template_rotation_best_score))
+        ? Number(options.template_rotation_best_score)
+        : null,
+      rotation_min_score: Number.isFinite(Number(options.template_rotation_min_score))
+        ? Number(options.template_rotation_min_score)
         : null,
       selected_template_id: clean(options.selected_template_id || options.template_id) || null,
       selected_template_source: clean(options.selected_template_source || options.template_source || "supabase") || "supabase",
@@ -2005,6 +2045,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
               selected_template_preview: rendered.selected_template_preview || null,
               eligible_template_count: Number(rendered.template_rotation?.eligible_template_count || 0),
               rotation_pool_size: Number(rendered.template_rotation?.rotation_pool_size || 0),
+              rotation_strategy: clean(rendered.template_rotation?.rotation_strategy) || null,
+              rotation_best_score: Number.isFinite(Number(rendered.template_rotation?.rotation_best_score))
+                ? Number(rendered.template_rotation?.rotation_best_score)
+                : null,
+              rotation_min_score: Number.isFinite(Number(rendered.template_rotation?.rotation_min_score))
+                ? Number(rendered.template_rotation?.rotation_min_score)
+                : null,
               rotation_candidate_template_ids: rendered.template_rotation?.rotation_candidate_template_ids || [],
               selected_template_id:
                 rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
@@ -2034,6 +2081,9 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         template_rotation_pool_size: rendered.template_rotation?.rotation_pool_size || 0,
         template_rotation_candidate_ids: rendered.template_rotation?.rotation_candidate_template_ids || [],
         template_rotation_selected_index: rendered.template_rotation?.selected_index ?? null,
+        template_rotation_strategy: rendered.template_rotation?.rotation_strategy || null,
+        template_rotation_best_score: rendered.template_rotation?.rotation_best_score ?? null,
+        template_rotation_min_score: rendered.template_rotation?.rotation_min_score ?? null,
         selected_template_id: rendered.template_rotation?.selected_template_id || rendered.template?.template_id || rendered.template?.id || null,
         selected_template_source: rendered.template?.source || "sms_templates",
         selected_template_language: rendered.language || rendered.template?.language || null,
@@ -2095,6 +2145,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       template_rotation_enabled: Boolean(rendered.template_rotation?.enabled),
       template_rotation_pool_size: Number(rendered.template_rotation?.rotation_pool_size || 0),
       template_rotation_selected_index: Number(rendered.template_rotation?.selected_index ?? -1),
+      template_rotation_strategy: clean(rendered.template_rotation?.rotation_strategy) || null,
+      template_rotation_best_score: Number.isFinite(Number(rendered.template_rotation?.rotation_best_score))
+        ? Number(rendered.template_rotation?.rotation_best_score)
+        : null,
+      template_rotation_min_score: Number.isFinite(Number(rendered.template_rotation?.rotation_min_score))
+        ? Number(rendered.template_rotation?.rotation_min_score)
+        : null,
       rendered_message_preview: clean(rendered.rendered_message_body).slice(0, 160),
       dry_run: options.dry_run,
     });
