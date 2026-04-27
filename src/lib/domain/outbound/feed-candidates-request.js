@@ -23,11 +23,18 @@ function asPositiveInteger(value, fallback = null) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
 }
 
+function asNonNegativeInteger(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : fallback;
+}
+
 export function normalizeFeedCandidatesInput(input = {}) {
   const raw_scan_limit = input.scan_limit ?? input.candidate_fetch_limit;
+  const raw_offset = input.candidate_offset ?? input.scan_offset ?? input.offset;
   return {
     limit: asPositiveInteger(input.limit, 25),
     scan_limit: asPositiveInteger(raw_scan_limit, 500),
+    candidate_offset: asNonNegativeInteger(raw_offset, 0),
     candidate_source: clean(input.candidate_source) || null,
     market: clean(input.market) || null,
     state: clean(input.state) || null,
@@ -55,6 +62,9 @@ function mergeBodyAndQuery(request, method, body = {}) {
     "limit",
     "scan_limit",
     "candidate_fetch_limit",
+    "candidate_offset",
+    "scan_offset",
+    "offset",
     "candidate_source",
     "market",
     "state",

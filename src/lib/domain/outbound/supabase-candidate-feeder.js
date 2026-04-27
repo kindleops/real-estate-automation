@@ -1173,6 +1173,7 @@ export async function getSupabaseFeederCandidates(
   {
     limit = 25,
     scan_limit = null,
+    candidate_offset = 0,
     candidate_source = null,
     market = null,
     state = null,
@@ -1209,10 +1210,15 @@ export async function getSupabaseFeederCandidates(
   const effective_fetch_limit = requestedScanLimit !== null
     ? Math.min(requestedScanLimit, 5000)
     : Math.min(Math.max(requestedLimit * 5, 10), 2500);
-  const { data, error } = await supabase
-    .from(source_name)
-    .select("*")
-    .limit(effective_fetch_limit);
+  const effective_offset = Math.max(0, Math.trunc(Number(candidate_offset) || 0));
+
+  let query = supabase.from(source_name).select("*");
+  if (effective_offset > 0) {
+    query = query.range(effective_offset, effective_offset + effective_fetch_limit - 1);
+  } else {
+    query = query.limit(effective_fetch_limit);
+  }
+  const { data, error } = await query;
 
   if (error) {
     return {
@@ -1248,6 +1254,7 @@ export async function getSupabaseFeederCandidates(
     ok: true,
     source: source_name,
     requested_source: requested_source || null,
+    candidate_offset: effective_offset,
     scanned_count: normalized.length,
     rows: normalized,
     effective_fetch_limit,
@@ -2054,6 +2061,8 @@ export function buildFeederDiagnostics(summary = {}) {
     candidate_source: summary.candidate_source || summary.source || null,
     requested_limit: Number(summary.requested_limit || 0),
     effective_candidate_fetch_limit: Number(summary.effective_candidate_fetch_limit || 0),
+    requested_candidate_offset: Number(summary.requested_candidate_offset || 0),
+    effective_candidate_offset: Number(summary.effective_candidate_offset || 0),
     fetched_candidate_count: Number(summary.fetched_candidate_count || 0),
     scanned_count: Number(summary.scanned_count || 0),
     eligible_count: Number(summary.eligible_count || 0),
@@ -2088,11 +2097,13 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
   const now = input.now || new Date().toISOString();
   const limit = Math.max(1, Math.min(asPositiveInteger(input.limit, 25), 500));
   const scan_limit = Math.max(limit, Math.min(asPositiveInteger(input.scan_limit ?? input.candidate_fetch_limit, 500), 5000));
+  const candidate_offset = Math.max(0, Math.trunc(Number(input.candidate_offset ?? input.scan_offset ?? input.offset) || 0));
 
   const options = {
     dry_run: asBoolean(input.dry_run, false),
     limit,
     scan_limit,
+    candidate_offset,
     candidate_source: clean(input.candidate_source) || null,
     market: clean(input.market) || null,
     state: clean(input.state) || null,
@@ -2120,6 +2131,8 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       candidate_source: source.source || DEFAULT_CANDIDATE_SOURCE,
       requested_limit: options.limit,
       effective_candidate_fetch_limit: source.effective_fetch_limit || options.scan_limit,
+      requested_candidate_offset: options.candidate_offset,
+      effective_candidate_offset: options.candidate_offset,
       fetched_candidate_count: 0,
       scanned_count: 0,
       eligible_count: 0,
@@ -2161,6 +2174,8 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     candidate_source: source.source,
     requested_limit: options.limit,
     effective_candidate_fetch_limit: source.effective_fetch_limit || options.scan_limit,
+    requested_candidate_offset: options.candidate_offset,
+    effective_candidate_offset: source.candidate_offset ?? options.candidate_offset,
     fetched_candidate_count: source.scanned_count,
     scanned_count: source.scanned_count,
     eligible_count: 0,

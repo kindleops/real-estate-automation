@@ -2288,6 +2288,186 @@ test("duplicate suppression still blocks duplicates when scan_limit is large", a
   assert.ok(result.effective_candidate_fetch_limit > 100, "should have scanned more than 100 candidates");
 });
 
+// ─── candidate_offset / pagination tests ────────────────────────────────────
+
+function makeOffsetCapturingSupabase(candidates = []) {
+  let captured = { method: null, offset_from: null, offset_to: null, limit_n: null };
+  const supabase = {
+    _captured: captured,
+    from() {
+      let _select_chain = null;
+      const chain = {
+        select() {
+          _select_chain = this;
+          return this;
+        },
+        range(from, to) {
+          captured.method = "range";
+          captured.offset_from = from;
+          captured.offset_to = to;
+          return Promise.resolve({ data: candidates, error: null });
+        },
+        limit(n) {
+          captured.method = "limit";
+          captured.limit_n = n;
+          return Promise.resolve({ data: candidates, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  return { supabase, captured };
+}
+
+test("candidate_offset=0 uses limit() not range()", async () => {
+  const { supabase, captured } = makeOffsetCapturingSupabase([makeCandidate(1)]);
+
+  await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 5,
+      scan_limit: 10,
+      candidate_offset: 0,
+      within_contact_window_now: false,
+    },
+    {
+      supabase,
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({ ok: false, reason_code: "ROUTING_BLOCKED", routing_allowed: false, routing_tier: "blocked", routing_block_reason: "NO_APPROVED_ROUTING_PATH" }),
+    }
+  );
+
+  assert.equal(captured.method, "limit", "offset=0 should use .limit() not .range()");
+  assert.equal(captured.offset_from, null);
+});
+
+test("candidate_offset=100 uses range(100, 109) for scan_limit=10", async () => {
+  const { supabase, captured } = makeOffsetCapturingSupabase([makeCandidate(1)]);
+
+  await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 5,
+      scan_limit: 10,
+      candidate_offset: 100,
+      within_contact_window_now: false,
+    },
+    {
+      supabase,
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({ ok: false, reason_code: "ROUTING_BLOCKED", routing_allowed: false, routing_tier: "blocked", routing_block_reason: "NO_APPROVED_ROUTING_PATH" }),
+    }
+  );
+
+  assert.equal(captured.method, "range", "offset=100 should use .range()");
+  assert.equal(captured.offset_from, 100);
+  assert.equal(captured.offset_to, 109); // 100 + 10 - 1
+});
+
+test("scan_offset alias resolves to candidate_offset", async () => {
+  const { supabase, captured } = makeOffsetCapturingSupabase([makeCandidate(1)]);
+
+  await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 5,
+      scan_limit: 10,
+      scan_offset: 200,
+      within_contact_window_now: false,
+    },
+    {
+      supabase,
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({ ok: false, reason_code: "ROUTING_BLOCKED", routing_allowed: false, routing_tier: "blocked", routing_block_reason: "NO_APPROVED_ROUTING_PATH" }),
+    }
+  );
+
+  assert.equal(captured.method, "range");
+  assert.equal(captured.offset_from, 200);
+});
+
+test("diagnostics include effective_candidate_offset", async () => {
+  const { supabase } = makeOffsetCapturingSupabase([makeCandidate(1)]);
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 5,
+      scan_limit: 10,
+      candidate_offset: 300,
+      within_contact_window_now: false,
+    },
+    {
+      supabase,
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({ ok: false, reason_code: "ROUTING_BLOCKED", routing_allowed: false, routing_tier: "blocked", routing_block_reason: "NO_APPROVED_ROUTING_PATH" }),
+    }
+  );
+
+  assert.equal(result.requested_candidate_offset, 300);
+  assert.equal(result.effective_candidate_offset, 300);
+});
+
+test("candidate_offset does not weaken duplicate suppression", async () => {
+  const candidates = Array.from({ length: 20 }, (_, i) => makeCandidate(i + 100));
+  const { supabase } = makeOffsetCapturingSupabase(candidates);
+
+  const result = await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 10,
+      scan_limit: 20,
+      candidate_offset: 100,
+      within_contact_window_now: false,
+      template_use_case: "ownership_check",
+    },
+    {
+      supabase,
+      hasDuplicateQueueItem: async () => true,
+      chooseTextgridNumber: async () => ({
+        ok: true,
+        routing_allowed: true,
+        routing_tier: "exact_market_match",
+        selection_reason: "exact_market_match",
+        selected: { id: 10, phone_number: "+18325550101", market: "houston" },
+      }),
+      renderOutboundTemplate: async () => ({
+        ok: true,
+        template: { item_id: "tpl_off", source: "supabase" },
+        template_use_case: "ownership_check",
+        rendered_message_body: "Offset dup test.",
+      }),
+    }
+  );
+
+  assert.equal(result.queued_count, 0, "duplicates must block even with offset");
+  assert.ok(result.duplicate_queue_block_count > 0);
+  assert.equal(result.effective_candidate_offset, 100);
+});
+
+test("default candidate_offset is 0", async () => {
+  const { supabase, captured } = makeOffsetCapturingSupabase([makeCandidate(1)]);
+
+  await runSupabaseCandidateFeeder(
+    {
+      dry_run: true,
+      limit: 5,
+      scan_limit: 10,
+      within_contact_window_now: false,
+    },
+    {
+      supabase,
+      hasDuplicateQueueItem: async () => false,
+      chooseTextgridNumber: async () => ({ ok: false, reason_code: "ROUTING_BLOCKED", routing_allowed: false, routing_tier: "blocked", routing_block_reason: "NO_APPROVED_ROUTING_PATH" }),
+    }
+  );
+
+  assert.equal(captured.method, "limit", "no offset → should use .limit()");
+  assert.equal(captured.offset_from, null);
+});
+
+// ─── end candidate_offset tests ──────────────────────────────────────────────
+
 test("createSendQueueItem stores template fetch diagnostics in metadata", async () => {
   const candidate = normalizeCandidateRow({
     master_owner_id: "mo-fetch-meta",
