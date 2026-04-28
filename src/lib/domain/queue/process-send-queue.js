@@ -1228,6 +1228,51 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       from: message_fields.from,
     });
 
+    // ── Blank greeting guard ─────────────────────────────────────────────
+    // Block any row where the rendered body starts with a blank greeting.
+    // This is a belt-and-suspenders guard for rows that bypassed feeder checks.
+    const BLANK_GREETING_GUARD_RE = /^(hi|hey|hello|hola|ola|marhaba)\s*,/i;
+    const BLANK_GREETING_INLINE_RE = /(Hello\s*,|Hey\s*,|Hi\s*,|Hola\s*,|Ola\s*,|Marhaba\s*,)/;
+    if (BLANK_GREETING_GUARD_RE.test(message_fields.body) || BLANK_GREETING_INLINE_RE.test(message_fields.body)) {
+      const supabase_client = getSupabase(deps);
+      await supabase_client
+        .from(QUEUE_TABLE)
+        .update({
+          queue_status: "paused_name_missing",
+          guard_status: "blocked",
+          guard_reason: "blank_greeting_before_send",
+          paused_reason: "blank_greeting_before_send",
+          is_locked: false,
+          locked_at: null,
+          lock_token: null,
+          updated_at: now,
+          metadata: {
+            ...(queue_row.metadata ?? {}),
+            paused_reason: "blocked_blank_greeting_before_send",
+            blocked_by: "process_send_queue_guard",
+            blocked_at: now,
+          },
+        })
+        .eq("id", queue_row_id);
+
+      info("send.blocked_blank_greeting", {
+        queue_row_id,
+        master_owner_id: queue_row.master_owner_id,
+        property_id: queue_row.property_id,
+        reason: "blank_greeting_before_send",
+        body_preview: String(message_fields.body || "").slice(0, 60),
+      });
+
+      return {
+        ok: false,
+        skipped: true,
+        reason: "blank_greeting_before_send",
+        queue_status: "paused_name_missing",
+        queue_row_id,
+        queue_item_id: queue_row_id,
+      };
+    }
+
     captureSystemEvent("sms_send_started", {
       queue_row_id: queue_row_id,
       queue_key: queue_row.queue_key || null,
@@ -1367,6 +1412,43 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
   } catch (error) {
     console.log("TEXTGRID RAW RESPONSE", error?.data || error?.raw_text || null);
     console.log("SEND ERROR:", error?.message || "Unknown error");
+
+    // Blank greeting errors from TextGrid guard should pause as name_missing not failed.
+    const is_blank_greeting_error = /blank.*(greeting|name)|missing.*seller_first_name/i.test(error?.message || "");
+    if (is_blank_greeting_error) {
+      try {
+        const supabase_client = getSupabase(deps);
+        await supabase_client
+          .from(QUEUE_TABLE)
+          .update({
+            queue_status: "paused_name_missing",
+            guard_status: "blocked",
+            guard_reason: "blank_greeting_textgrid_guard",
+            paused_reason: "blank_greeting_textgrid_guard",
+            is_locked: false,
+            locked_at: null,
+            lock_token: null,
+            updated_at: now,
+            metadata: {
+              ...(queue_row.metadata ?? {}),
+              paused_reason: "blocked_blank_greeting_before_send",
+              blocked_by: "textgrid_send_guard",
+              blocked_at: now,
+            },
+          })
+          .eq("id", queue_row_id);
+      } catch (_pause_err) {
+        warn("queue.blank_greeting_pause_failed", { queue_row_id });
+      }
+      return {
+        ok: false,
+        skipped: true,
+        reason: "blank_greeting_textgrid_guard",
+        queue_status: "paused_name_missing",
+        queue_row_id,
+        queue_item_id: queue_row_id,
+      };
+    }
 
     try {
       const failed_row = lock_token

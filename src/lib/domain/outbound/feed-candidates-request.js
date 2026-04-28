@@ -1,7 +1,6 @@
 import { runSupabaseCandidateFeeder } from "@/lib/domain/outbound/supabase-candidate-feeder.js";
 import { child } from "@/lib/logging/logger.js";
 import { captureRouteException } from "@/lib/monitoring/sentry.js";
-import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
 
 const logger = child({ module: "domain.outbound.feed_candidates_request" });
@@ -26,6 +25,12 @@ function asPositiveInteger(value, fallback = null) {
 function asNonNegativeInteger(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : fallback;
+}
+
+export function statusForResult(result) {
+  const status = Number(result?.status);
+  if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+  return result?.ok === false ? 500 : 200;
 }
 
 export function normalizeFeedCandidatesInput(input = {}) {
@@ -97,9 +102,12 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
   const route = clean(options.route) || "internal/outbound/feed-candidates";
   const route_logger = options.logger || logger;
   const json_response = options.jsonResponse || ((payload, init = {}) => Response.json(payload, init));
+  const require_cron_auth =
+    options.requireCronAuth ||
+    (await import("@/lib/security/cron-auth.js")).requireCronAuth;
 
   try {
-    const auth = requireCronAuth(request, route_logger);
+    const auth = require_cron_auth(request, route_logger);
     if (!auth.authorized) return auth.response;
 
     const body = method === "POST" ? await request.json().catch(() => ({})) : {};
@@ -151,7 +159,7 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
         inserted_count: diagnostics.queued_count,
         ...diagnostics,
       },
-      { status: diagnostics.ok === false ? 400 : 200 }
+      { status: statusForResult(diagnostics) }
     );
   } catch (error) {
     captureRouteException(error, {

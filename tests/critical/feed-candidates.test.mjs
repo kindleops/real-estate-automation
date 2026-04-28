@@ -10,6 +10,7 @@ import {
   runSupabaseCandidateFeeder,
   normalizeCandidateRow,
 } from "@/lib/domain/outbound/supabase-candidate-feeder.js";
+import { statusForResult } from "@/lib/domain/outbound/feed-candidates-request.js";
 import { runSendQueue } from "@/lib/domain/queue/run-send-queue.js";
 
 function makeSupabaseWithCandidates(candidates = [], sourceName = "v_sms_campaign_queue_candidates") {
@@ -76,6 +77,16 @@ function makeTextgridSupabase(numbers = []) {
     },
   };
 }
+
+test("feed candidates statusForResult propagates valid result statuses", () => {
+  assert.equal(statusForResult({ ok: false, status: 423 }), 423);
+  assert.equal(statusForResult({ ok: false, status: "423" }), 423);
+  assert.equal(statusForResult({ ok: false }), 500);
+  assert.equal(statusForResult({ ok: false, status: 99 }), 500);
+  assert.equal(statusForResult({ ok: false, status: 600 }), 500);
+  assert.equal(statusForResult({ ok: true }), 200);
+  assert.equal(statusForResult(null), 200);
+});
 
 function getLocalParts(iso, timezone = "America/Chicago") {
   const parts = new Intl.DateTimeFormat("en-US", {

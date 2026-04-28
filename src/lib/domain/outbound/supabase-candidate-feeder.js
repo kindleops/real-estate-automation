@@ -416,14 +416,71 @@ function isLikelyCorporateName(name = "") {
   );
 }
 
-function deriveSellerFirstName(candidate = {}) {
-  const explicit_first = clean(pick(candidate.seller_first_name, candidate.phone_first_name));
-  if (explicit_first) return explicit_first;
+// Entity tokens that are not valid person first names.
+const ENTITY_NAME_TOKENS = new Set([
+  "llc", "inc", "corp", "corporation", "trust", "estate", "bank", "fund",
+  "holdings", "holding", "group", "realty", "properties", "property",
+  "investment", "investments", "partners", "partnership", "foundation",
+  "management", "enterprises", "international", "associates", "assoc",
+  "company", "co", "ltd", "limited", "services", "systems",
+]);
 
-  const phone_full_name = clean(pick(candidate.seller_full_name, candidate.phone_full_name));
-  if (phone_full_name) {
-    const parts = phone_full_name.split(/\s+/).filter(Boolean);
-    return clean(parts[0]);
+// Patterns that indicate non-person names.
+const PHONE_NUMBER_RE = /^\+?[\d\s\-().]{7,}$/;
+const NUMERIC_ONLY_RE = /^\d+$/;
+const EMAIL_RE = /@/;
+
+/**
+ * Validates that `raw` is a usable person first name.
+ * Returns the trimmed first name, or null if it looks like an entity, phone,
+ * email, or otherwise non-personal value.
+ *
+ * @param {string|null|undefined} raw
+ * @returns {string|null}
+ */
+function safePersonFirstName(raw) {
+  const value = clean(String(raw ?? ""));
+  if (!value) return null;
+  if (value.length > 50) return null;
+  if (PHONE_NUMBER_RE.test(value)) return null;
+  if (NUMERIC_ONLY_RE.test(value)) return null;
+  if (EMAIL_RE.test(value)) return null;
+  const lower_value = value.toLowerCase();
+  if (ENTITY_NAME_TOKENS.has(lower_value)) return null;
+  // reject if first token of a multi-word value is an entity token
+  const first_token = lower_value.split(/[\s,]+/)[0];
+  if (ENTITY_NAME_TOKENS.has(first_token)) return null;
+  return value;
+}
+
+function deriveSellerFirstName(candidate = {}) {
+  // Priority: prospect_first_name → phone_first_name → seller_first_name
+  // → first token of full name fields → owner display first token → null (no fallback to phone)
+  const sources = [
+    candidate.prospect_first_name,
+    candidate.phone_first_name,
+    candidate.seller_first_name,
+    candidate.owner_first_name,
+  ];
+  for (const src of sources) {
+    const result = safePersonFirstName(src);
+    if (result) return result;
+  }
+
+  // Try parsing first token out of full name fields.
+  const full_name_sources = [
+    candidate.seller_full_name,
+    candidate.phone_full_name,
+    candidate.owner_display_name,
+    candidate.display_name,
+    candidate.seller_name,
+  ];
+  for (const full of full_name_sources) {
+    const trimmed = clean(String(full ?? ""));
+    if (!trimmed) continue;
+    const first_token = trimmed.split(/\s+/).filter(Boolean)[0] || "";
+    const result = safePersonFirstName(first_token);
+    if (result) return result;
   }
 
   return "";
@@ -1885,6 +1942,74 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
   const rendered = applyTemplatePlaceholders(rewritten_source_body, variable_payload);
   const normalized_rendered = clean(decodeBasicHtmlEntities(stripHtml(rendered.rendered_text || "")));
 
+  // Hard block: if template uses a seller/owner name variable but it resolved empty,
+  // drop the candidate — never queue a row with a blank greeting.
+  const NAME_REQUIRED_VARIABLES = new Set(["seller_first_name", "first_name", "owner_first_name", "seller_name"]);
+  const missing_name_vars = rendered.missing_variables.filter((v) => NAME_REQUIRED_VARIABLES.has(v));
+  if (missing_name_vars.length > 0) {
+    logger.warn("feeder.missing_required_variable", {
+        master_owner_id: candidate.master_owner_id,
+        property_id: candidate.property_id,
+        phone_id: candidate.phone_id || candidate.best_phone_id,
+        template_id: selected_template?.template_id || selected_template?.id || null,
+        missing_variables: missing_name_vars,
+      });
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "missing_required_variable",
+      render_error_message: `Template requires seller name variable(s) that could not be resolved: ${missing_name_vars.join(", ")}`,
+      missing_required_variables: missing_name_vars,
+      template: selected_template_with_source,
+      template_id: selected_template?.template_id || selected_template?.id || null,
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+      },
+      template_rotation,
+    };
+  }
+
+  // Belt-and-suspenders: block blank greeting even if missing_variables is empty
+  // (e.g. template uses a non-standard variable that resolved to empty string).
+  const RENDER_BLANK_GREETING_RE = /^(hi|hey|hello|hola|ola|marhaba)\s*,/i;
+  if (RENDER_BLANK_GREETING_RE.test(normalized_rendered)) {
+    logger.warn("feeder.blank_greeting_detected", {
+        master_owner_id: candidate.master_owner_id,
+        property_id: candidate.property_id,
+        phone_id: candidate.phone_id || candidate.best_phone_id,
+        template_id: selected_template?.template_id || selected_template?.id || null,
+        rendered_preview: normalized_rendered.slice(0, 80),
+      });
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "blank_greeting_detected",
+      render_error_message: "Rendered message begins with blank greeting (missing seller first name)",
+      template: selected_template_with_source,
+      template_id: selected_template?.template_id || selected_template?.id || null,
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+      },
+      template_rotation,
+    };
+  }
+
   if (!normalized_rendered) {
     return {
       ok: false,
@@ -2098,6 +2223,23 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
         seller_market: candidate.market,
         seller_state: candidate.state,
         touch_number: candidate.touch_number,
+        // Seller identity fields — required for re-render and audit.
+        seller_first_name: clean(candidate.seller_first_name) || null,
+        seller_full_name: clean(candidate.seller_full_name || candidate.phone_full_name) || null,
+        owner_display_name: clean(candidate.owner_display_name || candidate.display_name) || null,
+        prospect_first_name: clean(candidate.prospect_first_name) || null,
+        phone_first_name: clean(candidate.phone_first_name) || null,
+        seller_name_source: clean(candidate.seller_first_name)
+          ? "seller_first_name"
+          : clean(candidate.prospect_first_name)
+          ? "prospect_first_name"
+          : clean(candidate.phone_first_name)
+          ? "phone_first_name"
+          : clean(candidate.owner_first_name)
+          ? "owner_first_name"
+          : clean(candidate.owner_display_name)
+          ? "owner_display_parsed"
+          : null,
       },
       template: {
         id: options.template_id,

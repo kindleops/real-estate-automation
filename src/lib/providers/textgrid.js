@@ -8,7 +8,7 @@ import { normalizeUsPhoneToE164 } from "@/lib/sms/sanitize.js";
 import { getSystemFlag } from "@/lib/system-control.js";
 
 // Pre-send content guard patterns.
-const BLANK_GREETING_RE = /(Hello|Hi|Hey|Hola)\s*,/i;
+const BLANK_GREETING_RE = /^(Hello|Hi|Hey|Hola|Ola|Marhaba)\s*,|(Hello\s*,|Hey\s*,|Hi\s*,|Hola\s*,|Ola\s*,|Marhaba\s*,)/i;
 const UNRESOLVED_PLACEHOLDER_RE = /\{\{[^}]+\}\}/;
 
 // ══════════════════════════════════════════════════════════════════════════
