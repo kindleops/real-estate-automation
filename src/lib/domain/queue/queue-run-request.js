@@ -13,6 +13,9 @@ function asBoolean(value, fallback = false) {
 }
 
 function asNumber(value, fallback = null) {
+  if (value === null || value === undefined || clean(value) === "") {
+    return fallback;
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -138,6 +141,28 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       due_rows: result?.due_rows ?? null,
       future_rows: result?.future_rows ?? null,
       total_rows_loaded: result?.total_rows_loaded ?? null,
+    });
+
+    route_logger?.info?.("queue_run.summary", {
+      attempted_count: result?.attempted_count ?? 0,
+      claimed_count: result?.claimed_count ?? 0,
+      processed_count: result?.processed_count ?? 0,
+      sent_count: result?.sent_count ?? 0,
+      failed_count: result?.failed_count ?? 0,
+      blocked_count: result?.blocked_count ?? 0,
+      skipped_count: result?.skipped_count ?? 0,
+      invalid_queue_row_count: result?.invalid_queue_row_count ?? 0,
+      preclaim_paused_name_missing_count:
+        result?.preclaim_paused_name_missing_count ?? 0,
+      preclaim_outside_window_excluded_count:
+        result?.preclaim_outside_window_excluded_count ?? 0,
+      preclaim_retry_pending_excluded_count:
+        result?.preclaim_retry_pending_excluded_count ?? 0,
+      eligible_claim_count: result?.eligible_claim_count ?? 0,
+      first_failure_reason:
+        result?.first_failure_reason ??
+        result?.first_failing_reason ??
+        null,
     });
 
     await notifyDiscordOps({

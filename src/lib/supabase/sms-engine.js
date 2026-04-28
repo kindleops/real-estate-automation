@@ -73,6 +73,37 @@ function pickFirst(...values) {
   return null;
 }
 
+function firstToken(value) {
+  const normalized = clean(value);
+  if (!normalized) return "";
+  return clean(normalized.split(/\s+/).filter(Boolean)[0] || "");
+}
+
+function resolveQueueSellerFirstNameFromSources(row = null) {
+  const safe_row = ensureObject(row);
+  const metadata = ensureObject(safe_row.metadata);
+  const queue_context = ensureObject(metadata.queue_context);
+  const snapshot = ensureObject(metadata.candidate_snapshot);
+
+  return clean(
+    pickFirst(
+      safe_row.seller_first_name,
+      firstToken(safe_row.seller_name),
+      safe_row.contact_first_name,
+      metadata.seller_first_name,
+      queue_context.seller_first_name,
+      snapshot.seller_first_name,
+      snapshot.prospect_first_name,
+      snapshot.phone_first_name,
+      snapshot.owner_first_name,
+      firstToken(snapshot.display_name),
+      firstToken(snapshot.seller_full_name),
+      firstToken(snapshot.phone_full_name),
+      firstToken(snapshot.owner_display_name)
+    )
+  );
+}
+
 function getQueueRowDestinationCandidates(row = null) {
   const safe_row = ensureObject(row);
   const metadata = ensureObject(safe_row.metadata);
@@ -104,6 +135,28 @@ function normalizeQueueStatusValue(value) {
   return raw;
 }
 
+const TERMINAL_QUEUE_STATUSES = new Set([
+  "sent",
+  "failed",
+  "blocked",
+  "paused_name_missing",
+  "paused_invalid_queue_row",
+  "paused_duplicate",
+  "paused_global_lock",
+  "paused_max_retries",
+  "cancelled",
+]);
+
+function isTerminalQueueStatus(value) {
+  return TERMINAL_QUEUE_STATUSES.has(normalizeQueueStatusValue(value));
+}
+
+function hasCurrentProcessingRun(row = null, options = {}) {
+  const expected_run_id = clean(options.processing_run_id || options.run_id);
+  if (!expected_run_id) return true;
+  return clean(row?.metadata?.processing_run_id) === expected_run_id;
+}
+
 function getSupabase(deps = {}) {
   if (!deps.supabase && !deps.supabaseClient && !hasSupabaseConfig()) {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
@@ -114,6 +167,7 @@ function getSupabase(deps = {}) {
 
 export function normalizeSendQueueRow(row) {
   const safe_row = ensureObject(row);
+  const resolved_seller_first_name = resolveQueueSellerFirstNameFromSources(safe_row);
   const row_id = normalizeQueueRowId(
     safe_row.id ??
       safe_row.queue_row_id ??
@@ -156,6 +210,8 @@ export function normalizeSendQueueRow(row) {
     sms_agent_id: safe_row.sms_agent_id || null,
     textgrid_number_id: safe_row.textgrid_number_id || null,
     template_id: safe_row.template_id || null,
+    seller_first_name: resolved_seller_first_name || null,
+    seller_display_name: safe_row.seller_display_name || null,
     property_address: safe_row.property_address || null,
     property_type: safe_row.property_type || null,
     owner_type: safe_row.owner_type || null,
@@ -279,6 +335,41 @@ export function shouldRunSendQueueRow(row, now = nowIso()) {
   };
 }
 
+function getCandidateSnapshot(row = null) {
+  const metadata = ensureObject(row?.metadata);
+  const snapshot = metadata.candidate_snapshot;
+  return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+    ? snapshot
+    : null;
+}
+
+function hasSelectedTemplateReference(row = null) {
+  const metadata = ensureObject(row?.metadata);
+  return Boolean(
+    clean(row?.template_id) ||
+      clean(metadata.selected_template_id) ||
+      clean(metadata.template_id) ||
+      clean(metadata.template?.id) ||
+      clean(metadata.selected_template?.id)
+  );
+}
+
+export function resolveQueueSellerFirstName(row = null) {
+  return resolveQueueSellerFirstNameFromSources(row);
+}
+
+function preclaimInvalidQueueRowReason(row = null) {
+  const normalized = normalizeSendQueueRow(row);
+  if (!normalizeQueueRowId(normalized.id, null)) return "missing_queue_row_id";
+  if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
+  if (!clean(resolveQueueDestinationPhone(normalized).phone)) return "missing_to_phone_number";
+  if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
+  if (!hasSelectedTemplateReference(normalized)) return "missing_selected_template_id";
+  if (!getCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
+  if (!resolveQueueSellerFirstName(normalized)) return "missing_seller_first_name";
+  return null;
+}
+
 function getQueueSortValues(row) {
   const normalized = normalizeSendQueueRow(row);
   return {
@@ -325,6 +416,7 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   const requested_limit = Math.max(1, Math.trunc(asNumber(limit, 50)));
   const preclaim_scan_limit = resolvePreclaimScanLimit(requested_limit, deps);
   const evaluate_contact_window = deps.evaluateContactWindow || evaluateContactWindow;
+  const dry_run = Boolean(deps.dry_run || deps.dryRun);
 
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
@@ -344,6 +436,52 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   let preclaim_scanned_count = 0;
   let preclaim_outside_window_excluded_count = 0;
   let preclaim_retry_pending_excluded_count = 0;
+  let preclaim_paused_name_missing_count = 0;
+  let preclaim_paused_invalid_count = 0;
+  let preclaim_paused_max_retries_count = 0;
+
+  const recordPaused = async (row, reason, status) => {
+    const normalized = normalizeSendQueueRow(row);
+    const queue_row_id = normalizeQueueRowId(normalized.id, null);
+
+    skipped.push({
+      id: queue_row_id,
+      reason,
+      row: normalized,
+      queue_status: status,
+      dry_run,
+    });
+
+    if (dry_run) return null;
+
+    try {
+      if (status === "paused_name_missing") {
+        return await pauseNameMissingQueueRow(normalized, reason, {
+          ...deps,
+          now,
+        });
+      }
+      if (status === "paused_max_retries") {
+        return await pauseMaxRetriesQueueRow(normalized, reason, {
+          ...deps,
+          now,
+        });
+      }
+      return await pauseInvalidQueueRow(normalized, reason, {
+        ...deps,
+        now,
+      });
+    } catch (pause_error) {
+      skipped.push({
+        id: queue_row_id,
+        reason: `${reason}_pause_failed`,
+        row: normalized,
+        queue_status: normalized.queue_status,
+        error: clean(pause_error?.message) || "preclaim_pause_failed",
+      });
+      return null;
+    }
+  };
 
   for (const row of sortQueuedRows(raw_rows)) {
     preclaim_scanned_count += 1;
@@ -351,12 +489,32 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
     if (!decision.ok) {
       if (decision.reason === "next_retry_pending") {
         preclaim_retry_pending_excluded_count += 1;
+      } else if (decision.reason === "max_retries_reached") {
+        preclaim_paused_max_retries_count += 1;
+        await recordPaused(decision.row, decision.reason, "paused_max_retries");
+      } else if (["missing_message_body", "missing_to_phone_number"].includes(decision.reason)) {
+        preclaim_paused_invalid_count += 1;
+        await recordPaused(decision.row, decision.reason, "paused_invalid_queue_row");
       }
-      skipped.push({
-        id: decision.row?.id || null,
-        reason: decision.reason,
-        row: decision.row,
-      });
+      if (!["max_retries_reached", "missing_message_body", "missing_to_phone_number"].includes(decision.reason)) {
+        skipped.push({
+          id: decision.row?.id || null,
+          reason: decision.reason,
+          row: decision.row,
+        });
+      }
+      continue;
+    }
+
+    const invalid_reason = preclaimInvalidQueueRowReason(decision.row);
+    if (invalid_reason) {
+      if (invalid_reason === "missing_seller_first_name") {
+        preclaim_paused_name_missing_count += 1;
+        await recordPaused(decision.row, invalid_reason, "paused_name_missing");
+      } else {
+        preclaim_paused_invalid_count += 1;
+        await recordPaused(decision.row, invalid_reason, "paused_invalid_queue_row");
+      }
       continue;
     }
 
@@ -383,6 +541,9 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
     now,
     preclaim_outside_window_excluded_count,
     preclaim_retry_pending_excluded_count,
+    preclaim_paused_name_missing_count,
+    preclaim_paused_invalid_count,
+    preclaim_paused_max_retries_count,
     preclaim_scanned_count,
     eligible_claim_count: Math.min(runnable.length, requested_limit),
     preclaim_scan_limit,
@@ -1229,6 +1390,62 @@ export async function pauseInvalidQueueRow(row, reason = "invalid_queue_row", op
   };
 }
 
+export async function pauseNameMissingQueueRow(row, reason = "missing_seller_first_name", options = {}) {
+  const normalized = normalizeSendQueueRow(row);
+  const now = options.now || nowIso();
+  const queue_row_id = normalizeQueueRowId(normalized.id, null);
+  const skip_reason = clean(reason) || "missing_seller_first_name";
+
+  if (!queue_row_id) {
+    throw new Error("missing_queue_row_id");
+  }
+
+  const payload = {
+    queue_status: "paused_name_missing",
+    guard_status: "blocked",
+    guard_reason: skip_reason,
+    paused_reason: skip_reason,
+    is_locked: false,
+    locked_at: null,
+    lock_token: null,
+    updated_at: now,
+    metadata: {
+      ...normalized.metadata,
+      skip_reason,
+      final_queue_status: "paused_name_missing",
+      paused_at: now,
+      finalized_at: now,
+    },
+  };
+
+  if (typeof options.pauseNameMissingQueueRow === "function") {
+    return options.pauseNameMissingQueueRow(normalized, payload);
+  }
+
+  if (typeof options.updateQueueRow === "function") {
+    await options.updateQueueRow(queue_row_id, payload);
+    return {
+      ...normalized,
+      ...payload,
+    };
+  }
+
+  const supabase = getSupabase(options);
+  const { data, error } = await supabase
+    .from(SEND_QUEUE_TABLE)
+    .update(payload)
+    .eq("id", queue_row_id)
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data ? normalizeSendQueueRow(data) : {
+    ...normalized,
+    ...payload,
+  };
+}
+
 export async function pauseMaxRetriesQueueRow(row, reason = "max_retries_reached", options = {}) {
   const normalized = normalizeSendQueueRow(row);
   const now = options.now || nowIso();
@@ -1316,18 +1533,33 @@ export async function recycleClaimedSendingRow(row, lock_token, reason = "finali
     return null;
   }
 
+  if (isTerminalQueueStatus(latest.queue_status)) {
+    return null;
+  }
+
   if (lower(latest.queue_status) !== "sending") {
     return null;
   }
 
-  const next_retry_count = latest.retry_count + 1;
-  const final_queue_status = next_retry_count >= latest.max_retries ? "failed" : "queued";
+  if (!hasCurrentProcessingRun(latest, options)) {
+    return null;
+  }
+
+  const metadata_final_status = normalizeQueueStatusValue(latest.metadata?.final_queue_status);
+  const preserve_terminal_status = isTerminalQueueStatus(metadata_final_status)
+    ? metadata_final_status
+    : null;
+  const next_retry_count = preserve_terminal_status ? latest.retry_count : latest.retry_count + 1;
+  const final_queue_status = preserve_terminal_status || (next_retry_count >= latest.max_retries ? "failed" : "queued");
   const finalization_reason = clean(reason) || "finalize_safety_net";
   const payload = {
     queue_status: final_queue_status,
     failed_reason: final_queue_status === "failed" ? finalization_reason : latest.failed_reason || null,
     retry_count: next_retry_count,
-    next_retry_at: final_queue_status === "failed" ? null : addMinutesIso(now, 5),
+    next_retry_at:
+      final_queue_status === "failed" || preserve_terminal_status
+        ? null
+        : addMinutesIso(now, 5),
     is_locked: false,
     locked_at: null,
     lock_token: null,
@@ -1394,7 +1626,14 @@ export async function finalizeClaimedSendQueueRows(claimed_rows = [], options = 
 
     try {
       const latest = await loadClaimedQueueRow(row, options);
-      if (!latest || lower(latest.queue_status) !== "sending") {
+      const metadata_final_status = normalizeQueueStatusValue(latest?.metadata?.final_queue_status);
+      if (!latest || isTerminalQueueStatus(latest.queue_status) || lower(latest.queue_status) !== "sending") {
+        continue;
+      }
+      if (metadata_final_status && isTerminalQueueStatus(metadata_final_status)) {
+        continue;
+      }
+      if (!hasCurrentProcessingRun(latest, options)) {
         continue;
       }
       if (lock_token && clean(latest.lock_token) && clean(latest.lock_token) !== lock_token) {

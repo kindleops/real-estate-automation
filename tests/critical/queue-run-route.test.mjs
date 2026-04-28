@@ -98,6 +98,10 @@ test("handleQueueRunRequest calls runSendQueue and emits route_enter, before_run
   assert.ok(infos.includes("queue_run.requested"), "queue_run.requested must be logged");
   assert.ok(infos.includes("queue_run.before_run_send_queue"), "queue_run.before_run_send_queue must be logged");
   assert.ok(infos.includes("queue_run.after_run_send_queue"), "queue_run.after_run_send_queue must be logged");
+  assert.ok(infos.includes("queue_run.summary"), "queue_run.summary must be logged");
+
+  assert.equal(run_calls[0].limit, 50, "GET default limit must be 50");
+  assert.equal(run_calls[0].dry_run, false, "GET default dry_run must be false");
 
   // before_run_send_queue must include rollout_mode and dry_run info
   const before = calls.find((c) => c.event === "queue_run.before_run_send_queue")?.meta;
@@ -121,6 +125,22 @@ test("handleQueueRunRequest calls runSendQueue and emits route_enter, before_run
   assert.equal(after.duplicate_locked_count, 0);
   assert.equal(after.batch_duration_ms, 1234);
   assert.equal(after.total_rows_loaded, 2);
+
+  const summary = calls.find((c) => c.event === "queue_run.summary")?.meta;
+  assert.ok(summary, "queue_run.summary payload is present");
+  assert.equal(summary.attempted_count, 2);
+  assert.equal(summary.claimed_count, 2);
+  assert.equal(summary.processed_count, 2);
+  assert.equal(summary.sent_count, 2);
+  assert.equal(summary.failed_count, 0);
+  assert.equal(summary.blocked_count, 0);
+  assert.equal(summary.skipped_count, 0);
+  assert.equal(summary.invalid_queue_row_count, 0);
+  assert.equal(summary.preclaim_paused_name_missing_count, 0);
+  assert.equal(summary.preclaim_outside_window_excluded_count, 0);
+  assert.equal(summary.preclaim_retry_pending_excluded_count, 0);
+  assert.equal(summary.eligible_claim_count, 0);
+  assert.equal(summary.first_failure_reason, null);
 
   // No early_return warn when run is not skipped
   const early = calls.find((c) => c.event === "queue_run.early_return");

@@ -28,6 +28,7 @@ import {
   normalizeSendQueueRow,
   normalizeQueueRowId,
   releaseSkippedQueueRow,
+  resolveQueueSellerFirstName,
   resolveQueueDestinationPhone,
   reserveFromPhoneNumber,
   selectAvailableTextgridNumber,
@@ -1184,12 +1185,14 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
     if (!message_fields.body) throw new Error("missing_message_body");
 
     // ── Seller name guard ────────────────────────────────────────────────
-    const seller_first_name = clean(
-      queue_row.seller_first_name ||
-      (queue_row.metadata?.seller_first_name) ||
-      (queue_row.metadata?.queue_context?.seller_first_name) ||
-      ""
-    ) || null;
+    const seller_first_name = clean(resolveQueueSellerFirstName(queue_row)) || null;
+
+    if (seller_first_name && seller_first_name !== queue_row.seller_first_name) {
+      queue_row = normalizeSendQueueRow({
+        ...queue_row,
+        seller_first_name,
+      });
+    }
 
     if (!seller_first_name) {
       // Mark row as blocked — do not send.

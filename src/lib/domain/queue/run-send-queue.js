@@ -7,7 +7,7 @@ import {
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
 import { isRevisionLimitExceeded } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
-import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/client.js";
+import { hasSupabaseConfig } from "@/lib/supabase/client.js";
 import {
   claimSendQueueRow,
   evaluateContactWindow,
@@ -17,6 +17,8 @@ import {
   normalizeSendQueueRow,
   pauseInvalidQueueRow,
   pauseMaxRetriesQueueRow,
+  pauseNameMissingQueueRow,
+  resolveQueueSellerFirstName,
 } from "@/lib/supabase/sms-engine.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
@@ -248,6 +250,9 @@ async function buildLegacyCandidateSummary(limit = 50, now = nowIso(), deps = {}
     outside_window_rows: 0,
     preclaim_outside_window_excluded_count: 0,
     preclaim_retry_pending_excluded_count: 0,
+    preclaim_paused_name_missing_count: 0,
+    preclaim_paused_invalid_count: 0,
+    preclaim_paused_max_retries_count: 0,
     preclaim_scanned_count: loaded_rows.length,
     eligible_claim_count: runnable_rows.length,
     first_10_candidate_item_ids: runnable_rows
@@ -288,6 +293,15 @@ async function buildSupabaseCandidateSummary(limit = 50, now = nowIso(), deps = 
     ),
     preclaim_retry_pending_excluded_count: Number(
       loaded.preclaim_retry_pending_excluded_count || 0
+    ),
+    preclaim_paused_name_missing_count: Number(
+      loaded.preclaim_paused_name_missing_count || 0
+    ),
+    preclaim_paused_invalid_count: Number(
+      loaded.preclaim_paused_invalid_count || 0
+    ),
+    preclaim_paused_max_retries_count: Number(
+      loaded.preclaim_paused_max_retries_count || 0
     ),
     preclaim_scanned_count: Number(loaded.preclaim_scanned_count || raw_rows.length),
     eligible_claim_count: Number(loaded.eligible_claim_count || rows.length),
@@ -379,14 +393,23 @@ function hasCandidateSnapshot(row = null) {
   return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot);
 }
 
+function hasQueueSellerFirstName(row = null) {
+  return Boolean(clean(resolveQueueSellerFirstName(row)));
+}
+
 function invalidQueueRowReason(row = null) {
   const normalized = normalizeSendQueueRow(row);
-  const selected_template_id = clean(metadataValue(normalized, "selected_template_id"));
+  const selected_template_id = clean(
+    normalized.template_id ||
+      metadataValue(normalized, "selected_template_id") ||
+      metadataValue(normalized, "template_id")
+  );
   if (!selected_template_id) return "missing_selected_template_id";
   if (!hasCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
   if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
   if (!clean(normalized.to_phone_number)) return "missing_to_phone_number";
   if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
+  if (!hasQueueSellerFirstName(normalized)) return "missing_seller_first_name";
   return null;
 }
 
@@ -435,6 +458,8 @@ export async function runSendQueue(
   const claim_send_queue_row = deps.claimSendQueueRow || claimSendQueueRow;
   const pause_invalid_queue_row = deps.pauseInvalidQueueRow || pauseInvalidQueueRow;
   const pause_max_retries_queue_row = deps.pauseMaxRetriesQueueRow || pauseMaxRetriesQueueRow;
+  const pause_name_missing_queue_row =
+    deps.pauseNameMissingQueueRow || pauseNameMissingQueueRow;
   const finalize_claimed_send_queue_rows =
     deps.finalizeClaimedSendQueueRows || finalizeClaimedSendQueueRows;
   const record_system_alert = deps.recordSystemAlert || (async () => ({}));
@@ -555,21 +580,42 @@ export async function runSendQueue(
       });
 
       const started_at_ms = Date.now();
-      const candidate_summary = await buildQueueCandidates(limit, now, deps);
+      const candidate_summary = await buildQueueCandidates(limit, now, {
+        ...deps,
+        dry_run,
+      });
       const dedupe_result = dedupeRowsByOwnerPhoneTouch(
         candidate_summary.rows
       );
       let rows = dedupe_result.deduped;
       const duplicates = dedupe_result.duplicates;
+      let preclaim_paused_name_missing_count = Number(
+        candidate_summary.preclaim_paused_name_missing_count || 0
+      );
+      let preclaim_paused_invalid_count = Number(
+        candidate_summary.preclaim_paused_invalid_count || 0
+      );
+      let preclaim_paused_max_retries_count = Number(
+        candidate_summary.preclaim_paused_max_retries_count || 0
+      );
+      let preclaim_outside_window_excluded_count = Number(
+        candidate_summary.preclaim_outside_window_excluded_count || 0
+      );
+      let preclaim_retry_pending_excluded_count = Number(
+        candidate_summary.preclaim_retry_pending_excluded_count || 0
+      );
 
       console.log("ROWS LOADED", {
         total_rows_loaded: candidate_summary.total_rows_loaded,
         runnable_count: rows.length,
         preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
         preclaim_outside_window_excluded_count:
-          candidate_summary.preclaim_outside_window_excluded_count,
+          preclaim_outside_window_excluded_count,
         preclaim_retry_pending_excluded_count:
-          candidate_summary.preclaim_retry_pending_excluded_count,
+          preclaim_retry_pending_excluded_count,
+        preclaim_paused_name_missing_count,
+        preclaim_paused_invalid_count,
+        preclaim_paused_max_retries_count,
       });
       console.log("RAW ROWS", candidate_summary.raw_rows);
 
@@ -580,9 +626,12 @@ export async function runSendQueue(
         future_rows: candidate_summary.future_rows,
         runnable_count: rows.length,
         preclaim_outside_window_excluded_count:
-          candidate_summary.preclaim_outside_window_excluded_count,
+          preclaim_outside_window_excluded_count,
         preclaim_retry_pending_excluded_count:
-          candidate_summary.preclaim_retry_pending_excluded_count,
+          preclaim_retry_pending_excluded_count,
+        preclaim_paused_name_missing_count,
+        preclaim_paused_invalid_count,
+        preclaim_paused_max_retries_count,
         preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
         eligible_claim_count: candidate_summary.eligible_claim_count,
         now_utc: now,
@@ -622,6 +671,55 @@ export async function runSendQueue(
       let first_failure_reason = null;
 
       if (!dry_run) {
+        const pausePreclaimTerminalRow = async (row, reason) => {
+          const queue_item_id = getQueueRowId(row);
+          if (!queue_item_id) return false;
+
+          const is_name_missing = reason === "missing_seller_first_name";
+          const is_max_retries = reason === "max_retries_reached";
+          const queue_status = is_name_missing
+            ? "paused_name_missing"
+            : is_max_retries
+            ? "paused_max_retries"
+            : "paused_invalid_queue_row";
+          const pause_fn = is_name_missing
+            ? pause_name_missing_queue_row
+            : is_max_retries
+            ? pause_max_retries_queue_row
+            : pause_invalid_queue_row;
+
+          try {
+            const paused = await pause_fn(row, reason, {
+              ...deps,
+              now,
+            });
+            if (!is_name_missing && !is_max_retries) {
+              invalid_queue_row_count += 1;
+            }
+            skipped_count += 1;
+            blocked_count += 1;
+            skipped_reasons.push(buildSkippedSummary(queue_item_id, reason));
+            results.push(withFinalQueueStatus({
+              ok: false,
+              skipped: true,
+              reason,
+              queue_status,
+              queue_item_id,
+              queue_row_id: queue_item_id,
+            }, paused?.queue_status || queue_status));
+            return true;
+          } catch (error) {
+            partial = true;
+            failed_count += 1;
+            log_warn("queue.preclaim_terminal_pause_failed", {
+              queue_item_id,
+              reason,
+              message: clean(error?.message) || "preclaim_terminal_pause_failed",
+            });
+            return false;
+          }
+        };
+
         const preflight_skipped = normalizeRows(candidate_summary.skipped);
         for (const skipped of preflight_skipped) {
           const skipped_row = skipped?.row ? normalizeSendQueueRow(skipped.row) : null;
@@ -629,61 +727,46 @@ export async function runSendQueue(
           const reason = clean(skipped?.reason) || "excluded";
           if (!skipped_row || !queue_item_id) continue;
 
-          if (reason === "max_retries_reached") {
-            try {
-              const paused = await pause_max_retries_queue_row(skipped_row, reason, {
-                ...deps,
-                now,
-              });
-              skipped_count += 1;
-              blocked_count += 1;
-              skipped_reasons.push(buildSkippedSummary(queue_item_id, reason));
-              results.push(withFinalQueueStatus({
-                ok: false,
-                skipped: true,
-                reason,
-                queue_status: "paused_max_retries",
-                queue_item_id,
-                queue_row_id: queue_item_id,
-              }, paused?.queue_status || "paused_max_retries"));
-            } catch (error) {
-              partial = true;
-              failed_count += 1;
-              log_warn("queue.max_retries_pause_failed", {
-                queue_item_id,
-                reason,
-                message: clean(error?.message) || "pause_max_retries_failed",
-              });
+          const already_paused_status = lower(skipped?.queue_status);
+          if (
+            [
+              "paused_name_missing",
+              "paused_invalid_queue_row",
+              "paused_max_retries",
+            ].includes(already_paused_status)
+          ) {
+            if (already_paused_status === "paused_invalid_queue_row") {
+              invalid_queue_row_count += 1;
             }
+            skipped_count += 1;
+            blocked_count += 1;
+            skipped_reasons.push(buildSkippedSummary(queue_item_id, reason));
+            results.push(withFinalQueueStatus({
+              ok: false,
+              skipped: true,
+              reason,
+              queue_status: already_paused_status,
+              queue_item_id,
+              queue_row_id: queue_item_id,
+            }, already_paused_status));
+            continue;
           }
 
-          if (["missing_message_body", "missing_to_phone_number"].includes(reason)) {
-            try {
-              const paused = await pause_invalid_queue_row(skipped_row, reason, {
-                ...deps,
-                now,
-              });
-              invalid_queue_row_count += 1;
-              skipped_count += 1;
-              blocked_count += 1;
-              skipped_reasons.push(buildSkippedSummary(queue_item_id, reason));
-              results.push(withFinalQueueStatus({
-                ok: false,
-                skipped: true,
-                reason,
-                queue_status: "paused_invalid_queue_row",
-                queue_item_id,
-                queue_row_id: queue_item_id,
-              }, paused?.queue_status || "paused_invalid_queue_row"));
-            } catch (error) {
-              partial = true;
-              failed_count += 1;
-              log_warn("queue.invalid_row_pause_failed", {
-                queue_item_id,
-                reason,
-                message: clean(error?.message) || "pause_invalid_queue_row_failed",
-              });
-            }
+          if (reason === "max_retries_reached") {
+            await pausePreclaimTerminalRow(skipped_row, reason);
+          } else if (reason === "missing_seller_first_name") {
+            await pausePreclaimTerminalRow(skipped_row, reason);
+          } else if (
+            [
+              "missing_message_body",
+              "missing_to_phone_number",
+              "missing_from_phone_number",
+              "missing_selected_template_id",
+              "missing_candidate_snapshot",
+              "missing_queue_row_id",
+            ].includes(reason)
+          ) {
+            await pausePreclaimTerminalRow(skipped_row, reason);
           }
         }
 
@@ -694,82 +777,43 @@ export async function runSendQueue(
             continue;
           }
 
-          const invalid_reason = invalidQueueRowReason(row);
-          if (!invalid_reason) {
-            runnable_rows.push(row);
+          const normalized_row = normalizeSendQueueRow(row);
+          const next_retry_ts = toTimestamp(normalized_row.next_retry_at);
+          const now_ts = toTimestamp(now) ?? Date.now();
+          if (next_retry_ts !== null && next_retry_ts > now_ts) {
+            preclaim_retry_pending_excluded_count += 1;
             continue;
           }
 
-          const queue_item_id = getQueueRowId(row);
-          try {
-            const paused = await pause_invalid_queue_row(row, invalid_reason, {
-              ...deps,
-              now,
-            });
-            invalid_queue_row_count += 1;
-            skipped_count += 1;
-            blocked_count += 1;
-            skipped_reasons.push(buildSkippedSummary(queue_item_id, invalid_reason));
-            results.push(withFinalQueueStatus({
-              ok: false,
-              skipped: true,
-              reason: invalid_reason,
-              queue_status: "paused_invalid_queue_row",
-              queue_item_id,
-              queue_row_id: queue_item_id,
-            }, paused?.queue_status || "paused_invalid_queue_row"));
-          } catch (error) {
-            partial = true;
-            failed_count += 1;
-            log_warn("queue.invalid_row_pause_failed", {
-              queue_item_id,
-              reason: invalid_reason,
-              message: clean(error?.message) || "pause_invalid_queue_row_failed",
-            });
+          const contact_window = (deps.evaluateContactWindow || evaluateContactWindow)(normalized_row, {
+            ...deps,
+            now,
+          });
+          if (contact_window && contact_window.allowed === false) {
+            preclaim_outside_window_excluded_count += 1;
+            continue;
           }
+
+          if (Number(normalized_row.retry_count || 0) >= Number(normalized_row.max_retries || 3)) {
+            preclaim_paused_max_retries_count += 1;
+            await pausePreclaimTerminalRow(normalized_row, "max_retries_reached");
+            continue;
+          }
+
+          const invalid_reason = invalidQueueRowReason(normalized_row);
+          if (!invalid_reason) {
+            runnable_rows.push(normalized_row);
+            continue;
+          }
+
+          if (invalid_reason === "missing_seller_first_name") {
+            preclaim_paused_name_missing_count += 1;
+          } else {
+            preclaim_paused_invalid_count += 1;
+          }
+          await pausePreclaimTerminalRow(normalized_row, invalid_reason);
         }
         rows = runnable_rows;
-      }
-
-      // ── After-hours sweep ───────────────────────────────────────────────
-      // Before processing any rows, mark runnable rows that are currently
-      // outside the local send window (8 AM – 9 PM) as paused_after_hours.
-      // This prevents the runner from accidentally sending them later.
-      if (!dry_run && hasSupabaseConfig()) {
-        try {
-          const supabase_client = deps.supabase || defaultSupabase;
-          // We do this as a raw DB-side update: fetch candidate rows and
-          // for each one evaluate the local time.  We keep it simple by
-          // updating rows row-by-row using the already-loaded candidate list.
-          const after_hours_rows = rows.filter((row) => {
-            const eval_fn = deps.evaluateContactWindow || evaluateContactWindow;
-            const { allowed } = eval_fn(row, { ...deps, now });
-            return !allowed;
-          });
-          if (after_hours_rows.length > 0) {
-            const after_hours_ids = after_hours_rows
-              .map((row) => getQueueRowId(row))
-              .filter(Boolean);
-            await supabase_client
-              .from("send_queue")
-              .update({
-                queue_status: "paused_after_hours",
-                guard_status: "blocked",
-                guard_reason: "outside_local_send_window",
-                paused_reason: "after_local_9pm",
-                last_guard_checked_at: now,
-                updated_at: now,
-              })
-              .in("id", after_hours_ids)
-              .in("queue_status", ["queued","ready","runnable","scheduled","pending"]);
-            info("queue.after_hours_paused", {
-              count: after_hours_ids.length,
-              ids: after_hours_ids.slice(0, 10),
-            });
-          }
-        } catch (sweep_err) {
-          warn("queue.after_hours_sweep_failed", { message: sweep_err?.message });
-        }
       }
 
       for (const duplicate of duplicates) {
@@ -1101,9 +1145,12 @@ export async function runSendQueue(
         finalize_safety_net_count,
         stuck_recycled_count,
         preclaim_outside_window_excluded_count:
-          candidate_summary.preclaim_outside_window_excluded_count,
+          preclaim_outside_window_excluded_count,
         preclaim_retry_pending_excluded_count:
-          candidate_summary.preclaim_retry_pending_excluded_count,
+          preclaim_retry_pending_excluded_count,
+        preclaim_paused_name_missing_count,
+        preclaim_paused_invalid_count,
+        preclaim_paused_max_retries_count,
         preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
         eligible_claim_count: rows.length,
         first_failing_queue_item_id,
@@ -1149,6 +1196,12 @@ export async function runSendQueue(
           summary.preclaim_outside_window_excluded_count,
         preclaim_retry_pending_excluded_count:
           summary.preclaim_retry_pending_excluded_count,
+        preclaim_paused_name_missing_count:
+          summary.preclaim_paused_name_missing_count,
+        preclaim_paused_invalid_count:
+          summary.preclaim_paused_invalid_count,
+        preclaim_paused_max_retries_count:
+          summary.preclaim_paused_max_retries_count,
         preclaim_scanned_count: summary.preclaim_scanned_count,
         eligible_claim_count: summary.eligible_claim_count,
         batch_duration_ms: summary.batch_duration_ms,

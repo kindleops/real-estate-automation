@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { runSendQueue } from "@/lib/domain/queue/run-send-queue.js";
+import { finalizeClaimedSendQueueRows } from "@/lib/supabase/sms-engine.js";
 
 const NOW = "2026-04-28T15:00:00.000Z";
 
@@ -24,6 +25,7 @@ function makeRow(id, overrides = {}) {
       candidate_snapshot: {
         master_owner_id: "mo_test",
         property_id: "prop_test",
+        seller_first_name: "John",
       },
     },
     ...overrides,
@@ -35,6 +37,7 @@ function makeHarness(initial_rows = [], overrides = {}) {
   const process_calls = [];
   const claim_calls = [];
   const pause_invalid_calls = [];
+  const pause_name_missing_calls = [];
 
   const loadRows = async () => ({
     rows: [...rows.values()].filter((row) => row.queue_status === "queued"),
@@ -101,6 +104,22 @@ function makeHarness(initial_rows = [], overrides = {}) {
       });
       return current;
     },
+    pauseNameMissingQueueRow: async (row, reason) => {
+      const current = rows.get(String(row.id));
+      Object.assign(current, {
+        queue_status: "paused_name_missing",
+        is_locked: false,
+        lock_token: null,
+        metadata: {
+          ...(current.metadata || {}),
+          skip_reason: reason,
+          final_queue_status: "paused_name_missing",
+          paused_at: NOW,
+        },
+      });
+      pause_name_missing_calls.push({ id: row.id, reason });
+      return current;
+    },
     failQueueItem: async (row, payload) => {
       const id = row.id || row.queue_row_id;
       const current = rows.get(String(id));
@@ -160,6 +179,7 @@ function makeHarness(initial_rows = [], overrides = {}) {
     process_calls,
     claim_calls,
     pause_invalid_calls,
+    pause_name_missing_calls,
   };
 }
 
@@ -198,6 +218,9 @@ function makePreclaimHarness(initial_rows = [], overrides = {}) {
   const rows = new Map(initial_rows.map((row) => [String(row.id), { ...row, metadata: { ...(row.metadata || {}) } }]));
   const claimed_ids = [];
   const processed_ids = [];
+  const paused_name_ids = [];
+  const paused_invalid_ids = [];
+  const paused_max_retry_ids = [];
 
   const deps = {
     getSystemFlag: async () => true,
@@ -248,6 +271,54 @@ function makePreclaimHarness(initial_rows = [], overrides = {}) {
         lock_token,
       };
     },
+    pauseNameMissingQueueRow: async (row, payload_or_reason) => {
+      const current = rows.get(String(row.id));
+      const payload = typeof payload_or_reason === "string"
+        ? {
+            queue_status: "paused_name_missing",
+            metadata: {
+              ...(current.metadata || {}),
+              skip_reason: payload_or_reason,
+              final_queue_status: "paused_name_missing",
+            },
+          }
+        : payload_or_reason;
+      Object.assign(current, payload);
+      paused_name_ids.push(current.id);
+      return current;
+    },
+    pauseInvalidQueueRow: async (row, payload_or_reason) => {
+      const current = rows.get(String(row.id));
+      const payload = typeof payload_or_reason === "string"
+        ? {
+            queue_status: "paused_invalid_queue_row",
+            metadata: {
+              ...(current.metadata || {}),
+              skip_reason: payload_or_reason,
+              final_queue_status: "paused_invalid_queue_row",
+            },
+          }
+        : payload_or_reason;
+      Object.assign(current, payload);
+      paused_invalid_ids.push(current.id);
+      return current;
+    },
+    pauseMaxRetriesQueueRow: async (row, payload_or_reason) => {
+      const current = rows.get(String(row.id));
+      const payload = typeof payload_or_reason === "string"
+        ? {
+            queue_status: "paused_max_retries",
+            metadata: {
+              ...(current.metadata || {}),
+              skip_reason: payload_or_reason,
+              final_queue_status: "paused_max_retries",
+            },
+          }
+        : payload_or_reason;
+      Object.assign(current, payload);
+      paused_max_retry_ids.push(current.id);
+      return current;
+    },
     processSendQueueItem: async (row) => {
       const current = rows.get(String(row.id));
       Object.assign(current, {
@@ -281,6 +352,9 @@ function makePreclaimHarness(initial_rows = [], overrides = {}) {
     deps,
     claimed_ids,
     processed_ids,
+    paused_name_ids,
+    paused_invalid_ids,
+    paused_max_retry_ids,
   };
 }
 
@@ -303,33 +377,54 @@ test("outside contact window claimed row does not remain sending", async () => {
   assert.equal(result.results[0].final_queue_status, "queued");
 });
 
-test("missing seller name claimed row does not remain sending", async () => {
-  const row = makeRow(9002, { seller_first_name: null });
-  const harness = makeHarness([row], {
-    processSendQueueItem: async (claimed_row) => {
-      const current = harness.rows.get(String(claimed_row.id));
-      current.queue_status = "paused_name_missing";
-      current.is_locked = false;
-      current.lock_token = null;
-      current.metadata = {
-        ...(current.metadata || {}),
-        skip_reason: "missing_seller_first_name",
-      };
-      return {
-        ok: false,
-        skipped: true,
-        reason: "missing_seller_first_name",
-        queue_status: "paused_name_missing",
-        queue_row_id: claimed_row.id,
-      };
+test("missing seller name is paused before claim and never becomes sending", async () => {
+  const row = makeRow(9002, {
+    seller_first_name: null,
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        master_owner_id: "mo_test",
+        property_id: "prop_test",
+      },
     },
   });
+  const harness = makeHarness([row]);
 
   const result = await runSendQueue({ limit: 1, now: NOW }, harness.deps);
 
   assert.equal(harness.rows.get("9002").queue_status, "paused_name_missing");
+  assert.equal(harness.claim_calls.length, 0);
+  assert.equal(harness.process_calls.length, 0);
+  assert.equal(harness.pause_name_missing_calls.length, 1);
   assert.equal(result.results[0].final_queue_status, "paused_name_missing");
+  assert.equal(result.claimed_count, 0);
+  assert.equal(result.preclaim_paused_name_missing_count, 1);
   assert.equal(result.finalize_safety_net_count, 0);
+});
+
+test("candidate_snapshot.phone_first_name is used for preclaim eligibility when seller_first_name is missing", async () => {
+  const row = makeRow(90021, {
+    seller_first_name: null,
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        master_owner_id: "mo_test",
+        property_id: "prop_test",
+        phone_first_name: "Mia",
+      },
+    },
+  });
+  const harness = makePreclaimHarness([row]);
+
+  const result = await runSendQueue({ limit: 1, now: NOW }, harness.deps);
+
+  assert.equal(result.preclaim_paused_name_missing_count, 0);
+  assert.equal(result.claimed_count, 1);
+  assert.equal(result.sent_count, 1);
+  assert.equal(harness.claimed_ids.length, 1);
+  assert.deepEqual(harness.claimed_ids, [90021]);
+  assert.equal(harness.processed_ids.length, 1);
+  assert.equal(harness.rows.get("90021").queue_status, "sent");
 });
 
 test("malformed row with null selected_template_id and candidate_snapshot becomes paused_invalid_queue_row", async () => {
@@ -477,4 +572,232 @@ test("outside-window rows do not increase claimed_count", async () => {
   assert.equal(result.claimed_count, 0);
   assert.equal(harness.claimed_ids.length, 0);
   assert.equal([...harness.rows.values()].every((row) => row.queue_status === "queued"), true);
+});
+
+test("preclaim scans past paused and excluded rows until the eligible limit is reached", async () => {
+  const missing_name_rows = Array.from({ length: 20 }, (_, index) =>
+    makeRow(9600 + index, {
+      seller_first_name: null,
+      metadata: {
+        selected_template_id: "200194",
+        candidate_snapshot: {
+          master_owner_id: "mo_test",
+          property_id: "prop_test",
+        },
+      },
+    })
+  );
+  const outside_rows = Array.from({ length: 20 }, (_, index) =>
+    makeRow(9700 + index, {
+      metadata: {
+        selected_template_id: "200194",
+        candidate_snapshot: {
+          master_owner_id: "mo_test",
+          property_id: "prop_test",
+          seller_first_name: "John",
+        },
+        window_state: "outside",
+      },
+    })
+  );
+  const retry_pending_rows = Array.from({ length: 10 }, (_, index) =>
+    makeRow(9800 + index, {
+      next_retry_at: "2026-04-28T16:00:00.000Z",
+    })
+  );
+  const eligible_rows = Array.from({ length: 50 }, (_, index) => makeRow(9900 + index));
+  const harness = makePreclaimHarness([
+    ...missing_name_rows,
+    ...outside_rows,
+    ...retry_pending_rows,
+    ...eligible_rows,
+  ]);
+
+  const result = await runSendQueue({ limit: 25, now: NOW }, harness.deps);
+
+  assert.equal(result.preclaim_scanned_count, 75);
+  assert.equal(result.preclaim_paused_name_missing_count, 20);
+  assert.equal(result.preclaim_outside_window_excluded_count, 20);
+  assert.equal(result.preclaim_retry_pending_excluded_count, 10);
+  assert.equal(result.eligible_claim_count, 25);
+  assert.equal(result.claimed_count, 25);
+  assert.deepEqual(harness.claimed_ids, eligible_rows.slice(0, 25).map((row) => row.id));
+  assert.equal(new Set(harness.paused_name_ids).size, 20);
+  assert.equal(missing_name_rows.every((row) => harness.rows.get(String(row.id)).queue_status === "paused_name_missing"), true);
+  assert.equal(outside_rows.every((row) => harness.rows.get(String(row.id)).queue_status === "queued"), true);
+  assert.equal(retry_pending_rows.every((row) => harness.rows.get(String(row.id)).queue_status === "queued"), true);
+});
+
+test("dry_run reports preclaim diagnostics without mutating row statuses", async () => {
+  const missing_name = makeRow(10101, {
+    seller_first_name: null,
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        master_owner_id: "mo_test",
+        property_id: "prop_test",
+      },
+    },
+  });
+  const outside = makeRow(10102, {
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        master_owner_id: "mo_test",
+        property_id: "prop_test",
+        seller_first_name: "John",
+      },
+      window_state: "outside",
+    },
+  });
+  const retry_pending = makeRow(10103, {
+    next_retry_at: "2026-04-28T16:00:00.000Z",
+  });
+  const eligible = makeRow(10104);
+  const harness = makePreclaimHarness([missing_name, outside, retry_pending, eligible]);
+
+  const result = await runSendQueue({ limit: 1, dry_run: true, now: NOW }, harness.deps);
+
+  assert.equal(result.preclaim_paused_name_missing_count, 1);
+  assert.equal(result.preclaim_outside_window_excluded_count, 1);
+  assert.equal(result.preclaim_retry_pending_excluded_count, 1);
+  assert.equal(result.eligible_claim_count, 1);
+  assert.equal(result.claimed_count, 0);
+  assert.equal(result.attempted_count, 1);
+  assert.equal(harness.paused_name_ids.length, 0);
+  assert.equal([...harness.rows.values()].every((row) => row.queue_status === "queued"), true);
+});
+
+test("terminal paused rows are not safety-net recycled", async () => {
+  let recycle_calls = 0;
+
+  const result = await finalizeClaimedSendQueueRows(
+    [{ row: { id: 11001, lock_token: "lock-11001" }, lock_token: "lock-11001" }],
+    {
+      processing_run_id: "run-current",
+      loadQueueRowById: async () =>
+        makeRow(11001, {
+          queue_status: "paused_name_missing",
+          lock_token: null,
+          metadata: {
+            selected_template_id: "200194",
+            candidate_snapshot: {
+              seller_first_name: "John",
+            },
+            processing_run_id: "run-current",
+          },
+        }),
+      recycleClaimedSendingRow: async () => {
+        recycle_calls += 1;
+        return {};
+      },
+    }
+  );
+
+  assert.equal(result.finalized_count, 0);
+  assert.equal(result.stuck_recycled_count, 0);
+  assert.equal(recycle_calls, 0);
+});
+
+test("safety net does not recycle sending row when metadata.final_queue_status is paused_name_missing", async () => {
+  let recycle_calls = 0;
+
+  const result = await finalizeClaimedSendQueueRows(
+    [{ row: { id: 11002, lock_token: "lock-11002" }, lock_token: "lock-11002" }],
+    {
+      processing_run_id: "run-current",
+      loadQueueRowById: async () =>
+        makeRow(11002, {
+          queue_status: "sending",
+          lock_token: "lock-11002",
+          metadata: {
+            selected_template_id: "200194",
+            candidate_snapshot: {
+              seller_first_name: "John",
+            },
+            processing_run_id: "run-current",
+            final_queue_status: "paused_name_missing",
+          },
+        }),
+      recycleClaimedSendingRow: async () => {
+        recycle_calls += 1;
+        return {};
+      },
+    }
+  );
+
+  assert.equal(result.finalized_count, 0);
+  assert.equal(result.stuck_recycled_count, 0);
+  assert.equal(recycle_calls, 0);
+});
+
+test("safety net recycles only still-sending rows from the current run", async () => {
+  const loaded = new Map([
+    [
+      "12001",
+      makeRow(12001, {
+        queue_status: "sending",
+        lock_token: "lock-12001",
+        metadata: {
+          selected_template_id: "200194",
+          candidate_snapshot: {
+            seller_first_name: "John",
+          },
+          processing_run_id: "run-current",
+        },
+      }),
+    ],
+    [
+      "12002",
+      makeRow(12002, {
+        queue_status: "sending",
+        lock_token: "lock-12002",
+        metadata: {
+          selected_template_id: "200194",
+          candidate_snapshot: {
+            seller_first_name: "John",
+          },
+          processing_run_id: "run-old",
+        },
+      }),
+    ],
+    [
+      "12003",
+      makeRow(12003, {
+        queue_status: "queued",
+        lock_token: null,
+        metadata: {
+          selected_template_id: "200194",
+          candidate_snapshot: {
+            seller_first_name: "John",
+          },
+          processing_run_id: "run-current",
+        },
+      }),
+    ],
+  ]);
+  const recycled_ids = [];
+
+  const result = await finalizeClaimedSendQueueRows(
+    [
+      { row: { id: 12001, lock_token: "lock-12001" }, lock_token: "lock-12001" },
+      { row: { id: 12002, lock_token: "lock-12002" }, lock_token: "lock-12002" },
+      { row: { id: 12003, lock_token: null }, lock_token: null },
+    ],
+    {
+      processing_run_id: "run-current",
+      loadQueueRowById: async (id) => loaded.get(String(id)),
+      recycleClaimedSendingRow: async (row, _lock_token, payload) => {
+        recycled_ids.push(row.id);
+        return {
+          ...row,
+          ...payload,
+        };
+      },
+    }
+  );
+
+  assert.deepEqual(recycled_ids, [12001]);
+  assert.equal(result.finalized_count, 1);
+  assert.equal(result.stuck_recycled_count, 1);
 });

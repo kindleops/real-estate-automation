@@ -94,6 +94,14 @@ function buildSupabaseQueueRow(overrides = {}) {
     message_body: "Hello from Supabase",
     to_phone_number: "+16127433952",
     from_phone_number: "+16128060495",
+    seller_first_name: "John",
+    template_id: "200194",
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        seller_first_name: "John",
+      },
+    },
     ...overrides,
   });
 }
@@ -113,6 +121,14 @@ test("runSendQueue uses the Supabase candidate path, claims rows, and passes the
     message_body: "Hello world",
     to_phone_number: "+16127433952",
     from_phone_number: "+16128060495",
+    seller_first_name: "John",
+    template_id: "200194",
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        seller_first_name: "John",
+      },
+    },
   });
 
   const result = await runSendQueue(
@@ -121,6 +137,7 @@ test("runSendQueue uses the Supabase candidate path, claims rows, and passes the
       now: "2026-04-18T15:00:00.000Z",
     },
     {
+      getSystemFlag: async () => true,
       supabase: makeSelectSupabase([row]),
       claimSendQueueRow: async (candidate) => ({
         ok: true,
@@ -180,6 +197,15 @@ test("loadRunnableSendQueueRows queries canonical queue filters and ordering onl
           send_priority: 9,
           message_body: "Hello world",
           to_phone_number: "+16127433952",
+          from_phone_number: "+12818458577",
+          seller_first_name: "John",
+          template_id: "200194",
+          metadata: {
+            selected_template_id: "200194",
+            candidate_snapshot: {
+              seller_first_name: "John",
+            },
+          },
         },
       ],
       calls
@@ -484,6 +510,7 @@ test("runSendQueue uses Supabase string ids in candidate summaries and result pa
       now: "2026-04-18T15:00:00.000Z",
     },
     {
+      getSystemFlag: async () => true,
       supabase: makeSelectSupabase([row]),
       claimSendQueueRow: async (candidate) => ({
         ok: true,
@@ -586,6 +613,51 @@ test("processSendQueueItem accepts a normalized Supabase row object directly", a
   assert.equal(result.sent, true);
   assert.equal(result.queue_row_id, "sq-process-uuid-2");
   assert.equal(result.queue_item_id, "sq-process-uuid-2");
+});
+
+test("processSendQueueItem resolves seller_first_name from candidate_snapshot.phone_first_name", async () => {
+  let captured_seller_first_name = null;
+
+  const row = buildSupabaseQueueRow({
+    id: "sq-process-uuid-3",
+    queue_key: "queue-sq-process-uuid-3",
+    queue_id: "queue-sq-process-uuid-3",
+    seller_first_name: null,
+    metadata: {
+      selected_template_id: "200194",
+      candidate_snapshot: {
+        phone_first_name: "Mia",
+      },
+    },
+  });
+
+  const result = await processSendQueueItem(row, {
+    selectAvailableTextgridNumber: async () => ({
+      ok: true,
+      from_phone_number: "+16128060495",
+      selected: { id: "tn-1", phone_number: "+16128060495", market: "houston" },
+    }),
+    updateSendQueueRowWithLock: async (row_id, lock_token, payload) => ({
+      ...row,
+      ...payload,
+      id: row_id,
+      queue_row_id: row_id,
+      queue_item_id: row_id,
+      item_id: row_id,
+      lock_token,
+    }),
+    sendTextgridSMS: async (payload) => {
+      captured_seller_first_name = payload.seller_first_name;
+      return {
+        sid: "SM-sq-process-uuid-3",
+        raw: { status: "queued" },
+      };
+    },
+    writeOutboundSuccessMessageEvent: async () => ({ item_id: "evt-3" }),
+  });
+
+  assert.equal(result.sent, true);
+  assert.equal(captured_seller_first_name, "Mia");
 });
 
 test("runDevSendTest inserts a canonical queued row and optionally runs the queue immediately", async () => {
