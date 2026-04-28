@@ -9,6 +9,7 @@ import {
   renderOutboundTemplate,
   runSupabaseCandidateFeeder,
   normalizeCandidateRow,
+  resolveSellerIdentity,
 } from "@/lib/domain/outbound/supabase-candidate-feeder.js";
 import { statusForResult } from "@/lib/domain/outbound/feed-candidates-request.js";
 import { runSendQueue } from "@/lib/domain/queue/run-send-queue.js";
@@ -437,6 +438,13 @@ test("phone_full_name fallback derives seller_first_name", () => {
   assert.equal(candidate.seller_first_name, "Carlos");
 });
 
+test("resolveSellerIdentity rejects invalid names and hydrates person first names", () => {
+  assert.equal(resolveSellerIdentity({ owner_display_name: "+1 (612) 743-3952" }).seller_name_missing, true);
+  assert.equal(resolveSellerIdentity({ owner_display_name: "John Smith" }).seller_first_name, "John");
+  assert.equal(resolveSellerIdentity({ owner_display_name: "ACME Holdings LLC" }).seller_name_missing, true);
+  assert.equal(resolveSellerIdentity({ phone_full_name: "Maria Lopez" }).seller_first_name, "Maria");
+});
+
 test("corporate owner display_name is not used when best phone name is missing", async () => {
   const candidate = normalizeCandidateRow({
     best_phone_id: "ph_best_3",
@@ -461,8 +469,76 @@ test("corporate owner display_name is not used when best phone name is missing",
     }
   );
 
-  assert.equal(rendered.ok, true);
+  assert.equal(rendered.ok, false);
+  assert.equal(rendered.reason, "missing_required_variable");
   assert.equal(rendered.variable_payload_preview.seller_first_name, "");
+  assert.equal(rendered.variable_payload_preview.seller_name_missing, true);
+});
+
+test("renderOutboundTemplate blocks rendered blank seller greetings", async () => {
+  for (const greeting of ["Hey", "Hi", "Hello", "Hola"]) {
+    const result = await renderOutboundTemplate(
+      normalizeCandidateRow({
+        display_name: "John Smith",
+        property_address_full: "10 Palm St, Tampa, FL 33601",
+        property_address_state: "FL",
+        touch_number: 1,
+        template_use_case: "ownership_check",
+        stage_code: "S1",
+        agent_persona: "Chris Porter",
+      }),
+      {},
+      {
+        fetchSmsTemplates: async () => [
+          {
+            id: `tpl-blank-greeting-${greeting}`,
+            template_id: `ownership-s1-blank-greeting-${greeting}`,
+            use_case: "ownership_check",
+            stage_code: "S1",
+            language: "English",
+            is_active: true,
+            template_body: `${greeting} {nickname}, this is {agent_name}. Do you still own {property_address}?`,
+          },
+        ],
+      }
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "blank_greeting_rendered");
+    assert.match(result.rendered_preview, new RegExp(`^${greeting} , this is Chris`));
+  }
+});
+
+test("renderOutboundTemplate allows hydrated seller first-name greetings", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      display_name: "John Smith",
+      property_address_full: "10 Palm St, Tampa, FL 33601",
+      property_address_state: "FL",
+      touch_number: 1,
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      agent_persona: "Chris Porter",
+    }),
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-hydrated-greeting",
+          template_id: "ownership-s1-hydrated-greeting",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+          is_active: true,
+          template_body: "Hey {seller_first_name}, this is {agent_name}. Do you still own {property_address}?",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.rendered_message_body, /^Hey John, this is Chris/);
+  assert.equal(result.variable_payload_preview.seller_first_name, "John");
 });
 
 test("missing best phone skips with NO_BEST_PHONE unless fallback mode enabled", async () => {

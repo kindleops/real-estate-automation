@@ -90,6 +90,108 @@ function pick(...values) {
   return null;
 }
 
+function isLikelyPhoneValue(value) {
+  const raw = clean(value);
+  if (!raw) return false;
+  const digits = raw.replace(/\D/g, "");
+  return digits.length >= 7;
+}
+
+function isInvalidSellerNameValue(value) {
+  const raw = clean(value);
+  if (!raw) return true;
+
+  const lowered = raw.toLowerCase();
+
+  if (isLikelyPhoneValue(raw)) return true;
+
+  if (
+    [
+      "unknown",
+      "owner",
+      "current owner",
+      "property owner",
+      "homeowner",
+      "seller",
+      "n/a",
+      "na",
+      "null",
+      "none",
+    ].includes(lowered)
+  ) {
+    return true;
+  }
+
+  if (
+    /\b(llc|l\.l\.c|inc|corp|corporation|company|co\.|trust|estate|holdings|properties|property|partners|investments|capital|group|fund|bank|lender)\b/i.test(raw)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function titleCaseNameToken(value) {
+  const raw = clean(value);
+  if (!raw) return "";
+  return raw
+    .toLowerCase()
+    .replace(/(^|[-'\s])([a-z])/g, (_, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
+}
+
+function extractFirstName(value) {
+  const raw = clean(value);
+  if (isInvalidSellerNameValue(raw)) return "";
+
+  const stripped = raw
+    .replace(/\s+/g, " ")
+    .replace(/[,;|].*$/g, "")
+    .trim();
+
+  const first = stripped.split(/\s+/).find(Boolean) || "";
+  if (isInvalidSellerNameValue(first)) return "";
+
+  if (!/^[a-zA-Z][a-zA-Z'-]{1,}$/i.test(first)) return "";
+
+  return titleCaseNameToken(first);
+}
+
+export function resolveSellerIdentity(candidate = {}) {
+  const sources = [
+    ["seller_first_name", candidate.seller_first_name],
+    ["prospect_first_name", candidate.prospect_first_name],
+    ["phone_first_name", candidate.phone_first_name],
+    ["owner_first_name", candidate.owner_first_name],
+    ["seller_full_name", candidate.seller_full_name],
+    ["phone_full_name", candidate.phone_full_name],
+    ["owner_display_name", candidate.owner_display_name],
+    ["display_name", candidate.display_name],
+    ["property_owner_name", candidate.property_owner_name],
+    ["master_owner_display_name", candidate.master_owner_display_name],
+  ];
+
+  for (const [source, value] of sources) {
+    const first_name = extractFirstName(value);
+    if (first_name) {
+      return {
+        seller_first_name: first_name,
+        seller_display_name: clean(value),
+        seller_full_name: clean(value),
+        seller_name_source: source,
+        seller_name_missing: false,
+      };
+    }
+  }
+
+  return {
+    seller_first_name: null,
+    seller_display_name: null,
+    seller_full_name: null,
+    seller_name_source: "none",
+    seller_name_missing: true,
+  };
+}
+
 function maskPhone(value) {
   const phone = normalizePhone(value);
   if (!phone) return null;
@@ -251,7 +353,7 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
   const seller_first_name = clean(pick(row.seller_first_name, row.phone_first_name, phone_first_name));
   const seller_full_name = clean(pick(row.seller_full_name, row.phone_full_name, phone_full_name));
 
-  return {
+  const candidate = {
     raw: row,
     master_owner_id,
     property_id,
@@ -270,6 +372,8 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
     phone_full_name,
     seller_first_name,
     seller_full_name,
+    property_owner_name: clean(pick(row.property_owner_name)),
+    master_owner_display_name: clean(pick(row.master_owner_display_name)),
     joined_property_source: clean(pick(row.joined_property_source, row.property_join_source, "master_owner_property_relation")),
     property_address_full: clean(pick(row.property_address_full, row.property_address, row.address, row.title)),
     property_city: clean(pick(row.property_address_city, row.property_city)),
@@ -325,6 +429,13 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
     phone_type: clean(pick(row.phone_type)),
     activity_status: clean(pick(row.activity_status)),
     sms_eligible: asBoolean(pick(row.sms_eligible), true),
+  };
+
+  const seller_identity = resolveSellerIdentity(candidate);
+  return {
+    ...candidate,
+    ...seller_identity,
+    seller_name: seller_identity.seller_first_name || "",
   };
 }
 
@@ -591,7 +702,13 @@ function hasBlankLocationPattern(text = "") {
   return false;
 }
 
+function hasBlankSellerGreeting(text = "") {
+  const normalized = clean(text).replace(/\s+/g, " ");
+  return /^(hi|hey|hello|hola)\s+,/i.test(normalized);
+}
+
 function buildTemplateVariablePayload(candidate = {}) {
+  const seller_identity = resolveSellerIdentity(candidate);
   const owner_display_name = clean(
     pick(candidate.raw?.display_name, candidate.owner_display_name, candidate.raw?.owner_display_name)
   );
@@ -674,10 +791,16 @@ function buildTemplateVariablePayload(candidate = {}) {
   const agent_first_name = getFirstName(agent_name_raw) || "Alex";
 
   const payload = {
-    seller_first_name: deriveSellerFirstName(candidate),
+    seller_first_name: seller_identity.seller_first_name || "",
+    first_name: seller_identity.seller_first_name || "",
+    owner_first_name: seller_identity.seller_first_name || "",
+    seller_name: seller_identity.seller_display_name || "",
+    seller_display_name: seller_identity.seller_display_name || "",
     owner_display_name,
     owner_name: owner_display_name || candidate.seller_name || "",
-    seller_full_name: clean(pick(candidate.seller_full_name, candidate.phone_full_name)),
+    seller_full_name: seller_identity.seller_full_name || "",
+    seller_name_source: seller_identity.seller_name_source,
+    seller_name_missing: seller_identity.seller_name_missing,
     property_address_full,
     property_address: property_street_address || property_address_full,
     property_street_address: property_street_address || property_address_full,
@@ -1938,9 +2061,51 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
     };
   }
 
+  const seller_identity = resolveSellerIdentity(candidate);
   const variable_payload = buildTemplateVariablePayload(candidate);
+  variable_payload.seller_first_name = seller_identity.seller_first_name || "";
+  variable_payload.first_name = seller_identity.seller_first_name || "";
+  variable_payload.owner_first_name = seller_identity.seller_first_name || "";
+  variable_payload.seller_name = seller_identity.seller_display_name || "";
+  variable_payload.seller_display_name = seller_identity.seller_display_name || "";
+  variable_payload.seller_full_name = seller_identity.seller_full_name || "";
+  variable_payload.seller_name_source = seller_identity.seller_name_source;
+  variable_payload.seller_name_missing = seller_identity.seller_name_missing;
   const rendered = applyTemplatePlaceholders(rewritten_source_body, variable_payload);
   const normalized_rendered = clean(decodeBasicHtmlEntities(stripHtml(rendered.rendered_text || "")));
+
+  if (hasBlankSellerGreeting(normalized_rendered)) {
+    logger.warn("feeder.blank_greeting_rendered", {
+        master_owner_id: candidate.master_owner_id,
+        property_id: candidate.property_id,
+        phone_id: candidate.phone_id || candidate.best_phone_id,
+        template_id: selected_template?.template_id || selected_template?.id || null,
+        rendered_preview: normalized_rendered.slice(0, 80),
+      });
+    return {
+      ok: false,
+      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
+      reason: "blank_greeting_rendered",
+      render_error_message: "Rendered message begins with blank seller-name greeting",
+      rendered_preview: normalized_rendered.slice(0, 200),
+      template: selected_template_with_source,
+      template_id: selected_template?.template_id || selected_template?.id || null,
+      rendered_message_body: null,
+      missing_variables: rendered.missing_variables,
+      variable_payload_preview: variable_payload,
+      selected_template_preview: {
+        id: selected_template?.id || null,
+        template_id: selected_template?.template_id || null,
+        podio_template_id: selected_template?.podio_template_id || null,
+        template_name: selected_template?.template_name || null,
+        use_case: selected_template?.use_case || null,
+        language: selected_template?.language || null,
+        stage_code: selected_template?.stage_code || null,
+        stage_label: selected_template?.stage_label || null,
+      },
+      template_rotation,
+    };
+  }
 
   // Hard block: if template uses a seller/owner name variable but it resolved empty,
   // drop the candidate — never queue a row with a blank greeting.
@@ -1960,39 +2125,6 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
       reason: "missing_required_variable",
       render_error_message: `Template requires seller name variable(s) that could not be resolved: ${missing_name_vars.join(", ")}`,
       missing_required_variables: missing_name_vars,
-      template: selected_template_with_source,
-      template_id: selected_template?.template_id || selected_template?.id || null,
-      rendered_message_body: null,
-      missing_variables: rendered.missing_variables,
-      variable_payload_preview: variable_payload,
-      selected_template_preview: {
-        id: selected_template?.id || null,
-        template_id: selected_template?.template_id || null,
-        template_name: selected_template?.template_name || null,
-        use_case: selected_template?.use_case || null,
-        language: selected_template?.language || null,
-        stage_code: selected_template?.stage_code || null,
-      },
-      template_rotation,
-    };
-  }
-
-  // Belt-and-suspenders: block blank greeting even if missing_variables is empty
-  // (e.g. template uses a non-standard variable that resolved to empty string).
-  const RENDER_BLANK_GREETING_RE = /^(hi|hey|hello|hola|ola|marhaba)\s*,/i;
-  if (RENDER_BLANK_GREETING_RE.test(normalized_rendered)) {
-    logger.warn("feeder.blank_greeting_detected", {
-        master_owner_id: candidate.master_owner_id,
-        property_id: candidate.property_id,
-        phone_id: candidate.phone_id || candidate.best_phone_id,
-        template_id: selected_template?.template_id || selected_template?.id || null,
-        rendered_preview: normalized_rendered.slice(0, 80),
-      });
-    return {
-      ok: false,
-      reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED,
-      reason: "blank_greeting_detected",
-      render_error_message: "Rendered message begins with blank greeting (missing seller first name)",
       template: selected_template_with_source,
       template_id: selected_template?.template_id || selected_template?.id || null,
       rendered_message_body: null,
@@ -2177,6 +2309,7 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
   const queue_key = buildQueueKeyFromIdempotencyKey(idempotency_key);
   const scheduled_for = options.scheduled_for || new Date().toISOString();
   const queue_status = new Date(scheduled_for).getTime() > Date.now() ? "scheduled" : "queued";
+  const seller_identity = resolveSellerIdentity(candidate);
 
   const payload = {
     queue_key,
@@ -2199,8 +2332,8 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
     contact_window: candidate.contact_window || null,
     use_case_template: options.template_use_case,
     dedupe_key,
-    seller_first_name: clean(candidate.seller_first_name || candidate.owner_first_name || candidate.prospect_first_name || "") || null,
-    seller_display_name: clean(candidate.owner_display_name || candidate.seller_display_name || "") || null,
+    seller_first_name: clean(seller_identity.seller_first_name || candidate.owner_first_name || candidate.prospect_first_name || "") || null,
+    seller_display_name: clean(seller_identity.seller_display_name || candidate.owner_display_name || candidate.seller_full_name || "") || null,
     metadata: {
       idempotency_key,
       campaign_session_id: candidate.campaign_session_id,
@@ -2214,6 +2347,7 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
       selection_reason: options.selection_reason,
       routing_allowed: options.routing_allowed,
       routing_block_reason: options.routing_block_reason,
+      seller_identity,
       candidate_snapshot: {
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
@@ -2224,12 +2358,13 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
         seller_state: candidate.state,
         touch_number: candidate.touch_number,
         // Seller identity fields — required for re-render and audit.
-        seller_first_name: clean(candidate.seller_first_name) || null,
-        seller_full_name: clean(candidate.seller_full_name || candidate.phone_full_name) || null,
+        seller_first_name: clean(seller_identity.seller_first_name) || null,
+        seller_full_name: clean(seller_identity.seller_full_name || candidate.seller_full_name || candidate.phone_full_name) || null,
         owner_display_name: clean(candidate.owner_display_name || candidate.display_name) || null,
         prospect_first_name: clean(candidate.prospect_first_name) || null,
         phone_first_name: clean(candidate.phone_first_name) || null,
-        seller_name_source: clean(candidate.seller_first_name)
+        seller_name_source: clean(candidate.seller_name_source || seller_identity.seller_name_source) || (
+          clean(candidate.seller_first_name)
           ? "seller_first_name"
           : clean(candidate.prospect_first_name)
           ? "prospect_first_name"
@@ -2239,7 +2374,9 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
           ? "owner_first_name"
           : clean(candidate.owner_display_name)
           ? "owner_display_parsed"
-          : null,
+          : null
+        ),
+        seller_name_missing: Boolean(candidate.seller_name_missing || seller_identity.seller_name_missing),
       },
       template: {
         id: options.template_id,

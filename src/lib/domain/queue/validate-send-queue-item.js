@@ -18,18 +18,34 @@ function isTerminalStatus(status) {
   return ["sent", "failed", "cancelled", "blocked"].includes(lower(status));
 }
 
+function hasBlankSellerGreeting(text = "") {
+  const normalized = clean(text).replace(/\s+/g, " ");
+  return /^(hi|hey|hello|hola)\s+,/i.test(normalized);
+}
+
 export function validateSendQueueItem(queue_item = null) {
-  if (!queue_item?.item_id) {
+  const queue_item_id = queue_item?.item_id || queue_item?.id || queue_item?.queue_row_id;
+  if (!queue_item_id) {
     return {
       ok: false,
       reason: "missing_queue_item",
     };
   }
 
-  const queue_status = getCategoryValue(queue_item, "queue-status", null);
-  const phone_item_id = getFirstAppReferenceId(queue_item, "phone-number", null);
-  const textgrid_number_item_id = getFirstAppReferenceId(queue_item, "textgrid-number", null);
-  const message_text = getTextValue(queue_item, "message-text", "");
+  const queue_status = getCategoryValue(queue_item, "queue-status", null) || clean(queue_item.queue_status);
+  const phone_item_id =
+    getFirstAppReferenceId(queue_item, "phone-number", null) ||
+    queue_item.phone_item_id ||
+    queue_item.phone_id ||
+    null;
+  const textgrid_number_item_id =
+    getFirstAppReferenceId(queue_item, "textgrid-number", null) ||
+    queue_item.textgrid_number_item_id ||
+    queue_item.textgrid_number_id ||
+    null;
+  const message_text =
+    getTextValue(queue_item, "message-text", "") ||
+    clean(queue_item.message_text || queue_item.message_body || queue_item.rendered_message_text || "");
   const retry_count = Number(getNumberValue(queue_item, "retry-count", 0) || 0);
   const max_retries = Number(getNumberValue(queue_item, "max-retries", 3) || 3);
   const touch_number = Number(getNumberValue(queue_item, "touch-number", 0) || 0);
@@ -75,6 +91,15 @@ export function validateSendQueueItem(queue_item = null) {
   // shorter is never intentional outreach and would be caught by carrier content
   // filters anyway.
   const normalized_body = clean(message_text);
+  if (hasBlankSellerGreeting(normalized_body)) {
+    return {
+      ok: false,
+      reason: "blank_greeting_message_body",
+      queue_status,
+      message_body: normalized_body,
+    };
+  }
+
   const word_count = normalized_body.split(/\s+/).filter(Boolean).length;
   if (word_count < 3) {
     return {

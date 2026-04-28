@@ -109,6 +109,43 @@ test("validateSendQueueItem accepts a body with 3 or more words", () => {
   assert.equal(result.ok, true, "valid 3+ word body must pass validation");
 });
 
+test("validateSendQueueItem rejects blank seller greeting bodies", () => {
+  for (const [index, greeting] of ["Hey", "Hi", "Hello", "Hola"].entries()) {
+    const message = `${greeting} , this is Chris. Do you still own 123 Main St?`;
+    const item = makeQueueItem(1004 + index, {
+      "queue-status": categoryField("Queued"),
+      "phone-number": appRefField(401),
+      "textgrid-number": appRefField(501),
+      "message-text": textField(message),
+      "retry-count": numberField(0),
+      "max-retries": numberField(3),
+      "template-2": appRefField(9001),
+    });
+
+    const result = validateSendQueueItem(item);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "blank_greeting_message_body");
+    assert.equal(result.message_body, message);
+  }
+});
+
+test("validateSendQueueItem allows hydrated seller greeting bodies", () => {
+  const item = makeQueueItem(1005, {
+    "queue-status": categoryField("Queued"),
+    "phone-number": appRefField(401),
+    "textgrid-number": appRefField(501),
+    "message-text": textField("Hey John, this is Chris. Do you still own 123 Main St?"),
+    "retry-count": numberField(0),
+    "max-retries": numberField(3),
+    "template-2": appRefField(9001),
+  });
+
+  const result = validateSendQueueItem(item);
+
+  assert.equal(result.ok, true, `expected ok=true, got reason: ${result.reason}`);
+});
+
 // ── test 4: failed event does NOT block findRecentDuplicate ───────────────────
 
 test("findRecentDuplicate does not count a failed message event as a recent touch", () => {
