@@ -257,8 +257,10 @@ test("handleQueueRunRequest returns early without calling runSendQueue when auth
 
 // ─── test: statusForResult maps correctly ────────────────────────────────────
 
-test("statusForResult returns 400 for ok=false and 200 otherwise", () => {
-  assert.equal(statusForResult({ ok: false }), 400);
+test("statusForResult prefers result.status, else 500 for ok=false and 200 otherwise", () => {
+  assert.equal(statusForResult({ ok: false }), 500);
+  assert.equal(statusForResult({ ok: false, status: 423 }), 423);
+  assert.equal(statusForResult({ ok: true, status: 200 }), 200);
   assert.equal(statusForResult({ ok: true }), 200);
   assert.equal(statusForResult({ ok: true, skipped: true }), 200);
   assert.equal(statusForResult(null), 200);

@@ -18,7 +18,8 @@ function asNumber(value, fallback = null) {
 }
 
 export function statusForResult(result) {
-  return result?.ok === false ? 400 : 200;
+  if (result?.status != null) return result.status;
+  return result?.ok === false ? 500 : 200;
 }
 
 export async function handleQueueRunRequest(request, method, deps = {}) {
