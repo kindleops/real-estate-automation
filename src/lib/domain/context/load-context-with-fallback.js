@@ -6,6 +6,10 @@ import loadContext from "@/lib/domain/context/load-context.js";
 import { findRecentOutboundContextPair } from "@/lib/domain/context/find-recent-outbound-pair.js";
 import { info, warn } from "@/lib/logging/logger.js";
 
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
 /**
  * Load context with fallback to recent outbound pair.
  *
@@ -119,13 +123,27 @@ export async function loadContextWithFallback({
 
   fallback_pair_match = true;
   fallback_match_source = fallback_result.source;
+  const fallback_match = fallback_result.context?.match || {};
   fallback_match_data = {
     queue_row_id: fallback_result.context?.queue_row_id || null,
     event_id: fallback_result.context?.event_id || null,
+    matched_queue_id:
+      fallback_match.matched_queue_id ||
+      fallback_result.context?.queue_row_id ||
+      null,
+    matched_queue_status: fallback_match.matched_queue_status || null,
+    matched_sent_at: fallback_match.matched_sent_at || null,
+    matched_source: fallback_match.matched_source || null,
+    skipped_newer_orphan_count: fallback_match.skipped_newer_orphan_count || 0,
+    match_strategy: fallback_match.match_strategy || null,
+    context_verified: Boolean(fallback_match.context_verified),
   };
 
   // Extract the match ID (whichever one exists from the pair)
   const fallback_match_id = fallback_result.context?.queue_row_id || fallback_result.context?.event_id || null;
+  const fallback_ids = fallback_result.context?.ids || {};
+  const conversation_brain_id = fallback_ids.conversation_brain_id || null;
+  const brain_item_id = /^\d+$/.test(clean(conversation_brain_id)) ? conversation_brain_id : null;
 
   // Build a synthetic context from the fallback data
   const fallback_context = {
@@ -142,11 +160,14 @@ export async function loadContextWithFallback({
     // IDs extracted from the outbound record
     ids: {
       phone_item_id: null, // Not available from outbound pair
-      brain_item_id: null, // Will need to be resolved separately
-      master_owner_id: fallback_result.context?.ids?.master_owner_id || null,
+      brain_item_id,
+      conversation_brain_id,
+      master_owner_id: fallback_ids.master_owner_id || null,
       owner_id: null,
-      prospect_id: fallback_result.context?.ids?.prospect_id || null,
-      property_id: fallback_result.context?.ids?.property_id || null,
+      prospect_id: fallback_ids.prospect_id || null,
+      property_id: fallback_ids.property_id || null,
+      template_id: fallback_ids.template_id || null,
+      textgrid_number_id: fallback_ids.textgrid_number_id || null,
       assigned_agent_id: null,
       market_id: null,
     },
@@ -183,6 +204,7 @@ export async function loadContextWithFallback({
       last_inbound_message: "",
       last_outbound_message: fallback_result.context?.recent?.last_outbound_message || "",
       recent_events: [],
+      outbound_pair_match: fallback_match_data,
     },
 
     summary: {

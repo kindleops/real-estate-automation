@@ -116,6 +116,35 @@ function previewText(value = "", max = 180) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function buildInboundContextMatchMetadata(context = {}) {
+  const match =
+    context?.fallback_match_data ||
+    context?.recent?.outbound_pair_match ||
+    context?.match ||
+    null;
+
+  if (!match || typeof match !== "object") return {};
+
+  return {
+    fallback_pair_match: Boolean(context?.fallback_pair_match),
+    fallback_match_source: context?.fallback_match_source || null,
+    fallback_match_id: context?.fallback_match_id || null,
+    matched_queue_id:
+      match.matched_queue_id ||
+      match.queue_row_id ||
+      context?.fallback_match_id ||
+      null,
+    matched_queue_status: match.matched_queue_status || null,
+    matched_sent_at: match.matched_sent_at || null,
+    matched_source: match.matched_source || null,
+    skipped_newer_orphan_count: Number(match.skipped_newer_orphan_count || 0),
+    match_strategy: match.match_strategy || null,
+    context_verified: Boolean(match.context_verified),
+    conversation_brain_id: context?.ids?.conversation_brain_id || null,
+    textgrid_number_id: context?.ids?.textgrid_number_id || null,
+  };
+}
+
 function buildAutopilotStatusText({
   autopilot_enabled = false,
   autopilot_delay_seconds = 60,
@@ -716,7 +745,8 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     }
 
     let brain_item = context.items?.brain_item || null;
-    let brain_id = context.ids?.brain_item_id || null;
+    const fallback_conversation_brain_id = asPositiveInt(context.ids?.conversation_brain_id, null) || null;
+    let brain_id = context.ids?.brain_item_id || fallback_conversation_brain_id;
     const master_owner_id = context.ids?.master_owner_id || null;
     const prospect_id = context.ids?.prospect_id || null;
     const property_id = context.ids?.property_id || null;
@@ -729,10 +759,13 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         (event) => clean(event?.direction).toLowerCase() === "outbound"
       ) || null;
     const inbound_number_item_id =
-      latest_outbound_event?.textgrid_number_item_id || null;
+      latest_outbound_event?.textgrid_number_item_id ||
+      context.ids?.textgrid_number_id ||
+      null;
     const prior_message_id = latest_outbound_event?.message_id || null;
     const response_to_message_id = prior_message_id;
     const stage_before = context.summary?.conversation_stage || null;
+    const inbound_context_match_metadata = buildInboundContextMatchMetadata(context);
 
     if (inbound_debug_stage === "after_brain_lookup") {
       return { ok: true, stage: "after_brain_lookup", brain_id, master_owner_id };
@@ -774,6 +807,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         prior_message_id,
         response_to_message_id,
         stage_before,
+        metadata: inbound_context_match_metadata,
       });
       inbound_message_event_id = inbound_event?.item_id || null;
       message_event_enriched = true;
@@ -1434,6 +1468,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             seller_stage_reply?.plan?.selected_use_case === SELLER_FLOW_STAGES.STOP_OR_OPT_OUT ||
             inbound_is_negative,
           metadata: {
+            ...inbound_context_match_metadata,
             classification_source: classification?.source || null,
             classification_result:
               classification?.objection ||

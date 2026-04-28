@@ -26,6 +26,46 @@ function normalizeInboundTextgridPhone(phone) {
   return null;
 }
 
+function makeMockSupabase({ send_queue = [], message_events = [] } = {}) {
+  const calls = [];
+  const tables = { send_queue, message_events };
+
+  return {
+    calls,
+    client: {
+      from(table) {
+        const state = { table, filters: [], limit: null };
+        calls.push(state);
+
+        const chain = {
+          select() {
+            return chain;
+          },
+          eq(column, value) {
+            state.filters.push({ column, value });
+            return chain;
+          },
+          order() {
+            return chain;
+          },
+          limit(value) {
+            state.limit = value;
+            const rows = (tables[table] || []).filter((row) =>
+              state.filters.every(({ column, value }) => String(row[column] ?? "") === String(value))
+            );
+            return Promise.resolve({
+              data: rows.slice(0, value),
+              error: null,
+            });
+          },
+        };
+
+        return chain;
+      },
+    },
+  };
+}
+
 // ── Test 1: Primary path succeeds (phone found) ─────────────────────────────
 
 test("loadContextWithFallback: phone found via primary lookup", async () => {
@@ -82,48 +122,156 @@ test("loadContextWithFallback: phone found via primary lookup", async () => {
 // ── Test 2: Primary fails, fallback send_queue succeeds ──────────────────────
 
 test("findRecentOutboundContextPair: finds send_queue match", async () => {
-  // This is a unit test of the fallback function
-  // In real scenario, Supabase would have a send_queue row
-
   const inbound_from = "+16128072000"; // Seller's number (was 'to' in outbound)
   const inbound_to = "+16128060495";   // Our number (was 'from' in outbound)
-
-  // The function signature is correct:
-  // to_phone_number = inbound_from = "+16128072000"
-  // from_phone_number = inbound_to = "+16128060495"
-
-  // We can't fully test without a real Supabase, but we verify:
-  // 1. Function accepts correct parameters
-  // 2. Function normalizes phone numbers
-  // 3. Function returns correct structure on success
+  const normalized_from = "6128072000";
+  const normalized_to = "6128060495";
+  const { client, calls } = makeMockSupabase({
+    send_queue: [
+      {
+        id: "sq_valid",
+        queue_status: "sent",
+        source: "campaign",
+        master_owner_id: "mo_123",
+        prospect_id: "prospect_101",
+        property_id: "property_202",
+        template_id: "template_303",
+        textgrid_number_id: "tg_404",
+        conversation_brain_id: "505",
+        message_body: "Hey John, this is Chris.",
+        to_phone_number: normalized_from,
+        from_phone_number: normalized_to,
+        sent_at: "2026-04-27T23:36:00Z",
+        created_at: "2026-04-27T23:35:00Z",
+      },
+    ],
+  });
 
   assert.strictEqual(typeof findRecentOutboundContextPair, "function");
 
-  // Verify parameter order by checking what the function expects
-  // Based on implementation: findRecentOutboundContextPair(inbound_from, inbound_to)
   const result = await findRecentOutboundContextPair(
     inbound_from,
-    inbound_to
+    inbound_to,
+    { supabase: client }
   );
 
-  // Result structure
-  assert(result.hasOwnProperty("found"));
-  assert(result.hasOwnProperty("source"));
-  assert(result.hasOwnProperty("reason") || result.found);
+  assert.equal(calls[0].table, "send_queue");
+  assert.deepEqual(
+    calls[0].filters.map(({ column, value }) => [column, value]),
+    [
+      ["to_phone_number", normalized_from],
+      ["from_phone_number", normalized_to],
+    ]
+  );
+  assert.equal(result.found, true);
+  assert.equal(result.source, "recent_outbound_send_queue");
+  assert.equal(result.context.ids.master_owner_id, "mo_123");
+  assert.equal(result.context.ids.property_id, "property_202");
+  assert.equal(result.context.ids.template_id, "template_303");
+  assert.equal(result.context.ids.textgrid_number_id, "tg_404");
+  assert.equal(result.context.ids.conversation_brain_id, "505");
+  assert.equal(result.context.queue_row_id, "sq_valid");
+  assert.equal(result.context.match.match_strategy, "valid_sent_contextual_outbound");
+  assert.equal(result.context.match.context_verified, true);
+});
 
-  if (result.found) {
-    assert.match(
-      result.source,
-      /recent_outbound_(send_queue|message_event)/,
-      "source must be send_queue or message_event"
-    );
-    assert(result.context);
-    assert(result.context.ids);
-    assert(
-      typeof result.context.ids.master_owner_id === "string" ||
-        result.context.ids.master_owner_id === null
-    );
-  }
+test("findRecentOutboundContextPair: valid sent contextual queue row wins over newer orphan", async () => {
+  const seller_number = "+17133781814";
+  const textgrid_number = "+12818458577";
+  const normalized_seller_number = "7133781814";
+  const normalized_textgrid_number = "2818458577";
+  const { client } = makeMockSupabase({
+    send_queue: [
+      {
+        id: "sq_newer_orphan",
+        queue_status: "blocked",
+        source: "leadcommand_inbox",
+        master_owner_id: null,
+        prospect_id: null,
+        property_id: null,
+        template_id: null,
+        textgrid_number_id: null,
+        message_body: "manual blocked row",
+        to_phone_number: normalized_seller_number,
+        from_phone_number: normalized_textgrid_number,
+        sent_at: null,
+        created_at: "2026-04-28T08:45:00Z",
+      },
+      {
+        id: "sq_older_campaign",
+        queue_status: "sent",
+        source: "campaign",
+        master_owner_id: "mo_0800e0b6471fc707d4d4d8c1",
+        prospect_id: "prospect_123",
+        property_id: "2131331228",
+        template_id: "200194",
+        textgrid_number_id: "43badc35-d6f3-4733-976c-7903cce143b3",
+        conversation_brain_id: "789",
+        message_body: "Hey Maria, this is Chris.",
+        to_phone_number: normalized_seller_number,
+        from_phone_number: normalized_textgrid_number,
+        sent_at: "2026-04-27T23:36:00Z",
+        created_at: "2026-04-27T23:35:00Z",
+      },
+    ],
+  });
+
+  const result = await findRecentOutboundContextPair(seller_number, textgrid_number, {
+    supabase: client,
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.context.queue_row_id, "sq_older_campaign");
+  assert.equal(result.context.ids.master_owner_id, "mo_0800e0b6471fc707d4d4d8c1");
+  assert.equal(result.context.ids.prospect_id, "prospect_123");
+  assert.equal(result.context.ids.property_id, "2131331228");
+  assert.equal(result.context.ids.template_id, "200194");
+  assert.equal(result.context.ids.textgrid_number_id, "43badc35-d6f3-4733-976c-7903cce143b3");
+  assert.equal(result.context.ids.conversation_brain_id, "789");
+  assert.equal(result.context.match.matched_queue_id, "sq_older_campaign");
+  assert.equal(result.context.match.matched_queue_status, "sent");
+  assert.equal(result.context.match.matched_sent_at, "2026-04-27T23:36:00Z");
+  assert.equal(result.context.match.matched_source, "campaign");
+  assert.equal(result.context.match.skipped_newer_orphan_count, 1);
+  assert.equal(result.context.match.match_strategy, "valid_sent_contextual_outbound");
+  assert.equal(result.context.match.context_verified, true);
+});
+
+test("findRecentOutboundContextPair: orphan-only pair falls back without verified context", async () => {
+  const seller_number = "+17133781814";
+  const textgrid_number = "+12818458577";
+  const normalized_seller_number = "7133781814";
+  const normalized_textgrid_number = "2818458577";
+  const { client } = makeMockSupabase({
+    send_queue: [
+      {
+        id: "sq_orphan_only",
+        queue_status: "blocked",
+        source: "inbox",
+        master_owner_id: null,
+        prospect_id: null,
+        property_id: null,
+        template_id: null,
+        textgrid_number_id: null,
+        message_body: "manual blocked row",
+        to_phone_number: normalized_seller_number,
+        from_phone_number: normalized_textgrid_number,
+        sent_at: null,
+        created_at: "2026-04-28T08:45:00Z",
+      },
+    ],
+  });
+
+  const result = await findRecentOutboundContextPair(seller_number, textgrid_number, {
+    supabase: client,
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.context.queue_row_id, "sq_orphan_only");
+  assert.equal(result.context.ids.master_owner_id, null);
+  assert.equal(result.context.ids.property_id, null);
+  assert.equal(result.context.match.match_strategy, "fallback_latest_pair_match");
+  assert.equal(result.context.match.context_verified, false);
 });
 
 // ── Test 3: Response includes correct diagnostics ───────────────────────────
@@ -159,6 +307,59 @@ test("loadContextWithFallback: response includes lookup diagnostics", async () =
   assert.strictEqual(mockContextFallbackSuccess.fallback_pair_match, true);
   assert.match(mockContextFallbackSuccess.fallback_match_source, /recent_outbound/);
   assert(mockContextFallbackSuccess.fallback_match_data.queue_row_id > 0);
+});
+
+test("loadContextWithFallback: copies outbound pair ids and verified match diagnostics", async () => {
+  const result = await loadContextWithFallback({
+    inbound_from: "+17133781814",
+    inbound_to: "+12818458577",
+    loadContextImpl: async () => ({
+      found: false,
+      reason: "phone_not_found",
+    }),
+    findRecentOutboundContextPairImpl: async () => ({
+      found: true,
+      source: "recent_outbound_send_queue",
+      context: {
+        ids: {
+          master_owner_id: "mo_0800e0b6471fc707d4d4d8c1",
+          prospect_id: "prospect_123",
+          property_id: "2131331228",
+          template_id: "200194",
+          textgrid_number_id: "43badc35-d6f3-4733-976c-7903cce143b3",
+          conversation_brain_id: "789",
+        },
+        recent: {
+          last_outbound_message: "Hey Maria, this is Chris.",
+          last_outbound_at: "2026-04-27T23:36:00Z",
+        },
+        queue_row_id: "sq_older_campaign",
+        match: {
+          matched_queue_id: "sq_older_campaign",
+          matched_queue_status: "sent",
+          matched_sent_at: "2026-04-27T23:36:00Z",
+          matched_source: "campaign",
+          skipped_newer_orphan_count: 1,
+          match_strategy: "valid_sent_contextual_outbound",
+          context_verified: true,
+        },
+      },
+    }),
+  });
+
+  assert.equal(result.found, true);
+  assert.equal(result.ids.master_owner_id, "mo_0800e0b6471fc707d4d4d8c1");
+  assert.equal(result.ids.property_id, "2131331228");
+  assert.equal(result.ids.template_id, "200194");
+  assert.equal(result.ids.textgrid_number_id, "43badc35-d6f3-4733-976c-7903cce143b3");
+  assert.equal(result.ids.brain_item_id, "789");
+  assert.equal(result.ids.conversation_brain_id, "789");
+  assert.equal(result.fallback_match_data.matched_queue_id, "sq_older_campaign");
+  assert.equal(result.fallback_match_data.matched_queue_status, "sent");
+  assert.equal(result.fallback_match_data.skipped_newer_orphan_count, 1);
+  assert.equal(result.fallback_match_data.match_strategy, "valid_sent_contextual_outbound");
+  assert.equal(result.fallback_match_data.context_verified, true);
+  assert.deepEqual(result.lookup_sources_tried, ["phone", "fallback_outbound_pair"]);
 });
 
 // ── Test 4: Phone number normalization in pair lookup ────────────────────────
@@ -266,25 +467,15 @@ test("findRecentOutboundContextPair: matches inbound pair to outbound reversal",
   // from_phone_number (in send_queue) = inbound_to ✓
 });
 
-// ── Test 7: Fallback uses correct sort order (sent_at desc) ──────────────────
+// ── Test 7: Fallback ranks valid contextual rows before latest orphans ───────
 
-test("findRecentOutboundContextPair: query uses correct sort (sent_at desc)", async () => {
-  // The function queries with:
-  //   .order("sent_at", { ascending: false, nullsFirst: false })
-  //   .order("created_at", { ascending: false })
-  //   .limit(1)
-  //
-  // This ensures the most recent outbound message (by sent_at or created_at)
-  // is returned, which is the right one for context resolution.
-
-  // Verify this behavior by checking the implementation comment
+test("findRecentOutboundContextPair: fetches a pair window for local validity ranking", async () => {
   const description =
-    "Order by sent_at desc (most recent)," +
-    " with nulls last, then by created_at desc as tiebreaker";
+    "Fetch recent pair rows, then select the most recent sent row with usable ownership/property context.";
 
   assert.strictEqual(typeof description, "string");
-  assert.match(description, /desc/);
-  assert.match(description, /recent/);
+  assert.match(description, /recent pair rows/);
+  assert.match(description, /usable ownership/);
 });
 
 // ── Test 8: No phone and no pair returns phone_not_found ──────────────────
