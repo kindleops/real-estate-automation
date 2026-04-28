@@ -1179,6 +1179,49 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
     if (!message_fields.from) throw new Error("missing_from_phone_number");
     if (!message_fields.body) throw new Error("missing_message_body");
 
+    // ── Seller name guard ────────────────────────────────────────────────
+    const seller_first_name = clean(
+      queue_row.seller_first_name ||
+      (queue_row.metadata?.seller_first_name) ||
+      (queue_row.metadata?.queue_context?.seller_first_name) ||
+      ""
+    ) || null;
+
+    if (!seller_first_name) {
+      // Mark row as blocked — do not send.
+      const supabase_client = getSupabase(deps);
+      await supabase_client
+        .from(QUEUE_TABLE)
+        .update({
+          queue_status: "paused_name_missing",
+          guard_status: "blocked",
+          guard_reason: "missing_seller_first_name",
+          last_guard_checked_at: now,
+          paused_reason: "missing_seller_first_name",
+          is_locked: false,
+          locked_at: null,
+          lock_token: null,
+          updated_at: now,
+        })
+        .eq("id", queue_row_id);
+
+      info("send.blocked_missing_name", {
+        queue_row_id,
+        master_owner_id: queue_row.master_owner_id,
+        property_id: queue_row.property_id,
+        reason: "missing_seller_first_name",
+      });
+
+      return {
+        ok: false,
+        skipped: true,
+        reason: "missing_seller_first_name",
+        queue_status: "paused_name_missing",
+        queue_row_id,
+        queue_item_id: queue_row_id,
+      };
+    }
+
     console.log("ABOUT TO SEND MESSAGE");
     console.log("SENDING SMS", {
       to: message_fields.to,
@@ -1199,6 +1242,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       to: message_fields.to,
       from: message_fields.from,
       body: message_fields.body,
+      seller_first_name,
     });
 
     console.log("TEXTGRID RAW RESPONSE", send_result?.raw ?? null);

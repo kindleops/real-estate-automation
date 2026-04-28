@@ -3,8 +3,13 @@ import crypto from "node:crypto";
 
 import ENV from "@/lib/config/env.js";
 import { recordSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
-import { warn } from "@/lib/logging/logger.js";
+import { warn, info } from "@/lib/logging/logger.js";
 import { normalizeUsPhoneToE164 } from "@/lib/sms/sanitize.js";
+import { getSystemFlag } from "@/lib/system-control.js";
+
+// Pre-send content guard patterns.
+const BLANK_GREETING_RE = /(Hello|Hi|Hey|Hola)\s*,/i;
+const UNRESOLVED_PLACEHOLDER_RE = /\{\{[^}]+\}\}/;
 
 // ══════════════════════════════════════════════════════════════════════════
 // CONFIG & ENV VALIDATION
@@ -283,15 +288,25 @@ export async function sendTextgridSMS({
   media_urls = [],
   client_reference_id = null,
   message_type = "sms",
+  seller_first_name = null,
 }) {
+  // ── System control gate ────────────────────────────────────────────────
+  const sms_enabled = await getSystemFlag("outbound_sms_enabled", { failClosedOnError: false });
+  if (!sms_enabled) {
+    info("send.blocked_system_control", {
+      flag: "outbound_sms_enabled",
+      to_input: to,
+      client_reference_id,
+    });
+    throw new TextGridError(
+      "sendTextgridSMS: outbound_sms_enabled flag is false — send blocked by system_control",
+      { to, from, body }
+    );
+  }
+
   const normalized_to = normalizePhone(to);
   const normalized_from = normalizePhone(from);
   const credentials = getTextgridSendCredentials();
-
-  console.log("TEXTGRID ENV:", {
-    sid: process.env.TEXTGRID_ACCOUNT_SID,
-    token_exists: !!process.env.TEXTGRID_AUTH_TOKEN,
-  });
 
   if (!normalized_to) {
     throw new TextGridError(`sendTextgridSMS: invalid 'to' number — "${to}"`);
@@ -304,6 +319,46 @@ export async function sendTextgridSMS({
   const trimmed_body = String(body ?? "").trim();
   if (!trimmed_body) {
     throw new TextGridError("sendTextgridSMS: message body is empty");
+  }
+
+  // ── Content guards ────────────────────────────────────────────────────
+  // Block messages with blank seller greeting ("Hello ,").
+  if (BLANK_GREETING_RE.test(trimmed_body)) {
+    info("send.blocked_missing_name", {
+      reason: "blank_seller_greeting",
+      client_reference_id,
+      to: normalized_to,
+    });
+    throw new TextGridError(
+      "sendTextgridSMS: message contains blank greeting (missing seller_first_name)",
+      { to: normalized_to, from: normalized_from, body: trimmed_body }
+    );
+  }
+
+  // Block messages with unresolved template placeholders.
+  if (UNRESOLVED_PLACEHOLDER_RE.test(trimmed_body)) {
+    info("send.blocked_missing_name", {
+      reason: "unresolved_placeholder",
+      client_reference_id,
+      to: normalized_to,
+    });
+    throw new TextGridError(
+      "sendTextgridSMS: message contains unresolved placeholder",
+      { to: normalized_to, from: normalized_from, body: trimmed_body }
+    );
+  }
+
+  // Block if explicit seller_first_name is empty.
+  if (seller_first_name !== null && String(seller_first_name).trim() === "") {
+    info("send.blocked_missing_name", {
+      reason: "seller_first_name_blank",
+      client_reference_id,
+      to: normalized_to,
+    });
+    throw new TextGridError(
+      "sendTextgridSMS: seller_first_name is blank — send blocked",
+      { to: normalized_to, from: normalized_from, body: trimmed_body }
+    );
   }
 
   try {

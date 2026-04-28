@@ -21,6 +21,7 @@ import {
 import { recordSystemAlert, resolveSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
 import { getTextgridProviderCapabilities } from "@/lib/providers/textgrid.js";
+import { getSystemFlag } from "@/lib/system-control.js";
 
 import { info, warn } from "@/lib/logging/logger.js";
 
@@ -261,6 +262,33 @@ export async function runQueueReconcileRunner({
   now = new Date().toISOString(),
   master_owner_id = null,
 } = {}, deps = {}) {
+  const reconcile_enabled = await getSystemFlag("reconcile_enabled");
+  if (!reconcile_enabled) {
+    warn("queue.reconcile_runner_disabled", {
+      limit,
+      stale_after_minutes,
+      master_owner_id: Number(master_owner_id || 0) || null,
+      flag_key: "reconcile_enabled",
+    });
+
+    return {
+      ok: true,
+      skipped: true,
+      reason: "system_control_disabled",
+      flag_key: "reconcile_enabled",
+      scanned_count: 0,
+      processed_count: 0,
+      recovered_delivered_count: 0,
+      recovered_failed_count: 0,
+      recovered_sent_count: 0,
+      manual_review_count: 0,
+      skipped_count: 0,
+      results: [],
+      retry_after_seconds: null,
+      retry_after_at: null,
+    };
+  }
+
   const provider_capabilities = getTextgridProviderCapabilities();
   const now_ts = toTimestamp(now) ?? Date.now();
   const stale_after_ms = Math.max(Number(stale_after_minutes) || 0, 1) * 60_000;

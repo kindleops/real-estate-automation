@@ -10,6 +10,8 @@
  * - No-ops when the target webhook URL env var is not configured.
  */
 
+import { getSystemFlag } from "@/lib/system-control.js";
+
 // ---------------------------------------------------------------------------
 // Channel → env var mapping
 // ---------------------------------------------------------------------------
@@ -125,6 +127,9 @@ export function __resetDiscordDeps() {
  */
 export async function sendDiscordAlert(channel, payload) {
   try {
+    const alerts_enabled = await getSystemFlag("discord_alerts_enabled");
+    if (!alerts_enabled) return;
+
     const env_key = CHANNEL_ENV_MAP[channel];
     if (!env_key) return;
 

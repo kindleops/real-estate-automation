@@ -10,6 +10,7 @@ import {
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
 import { runQueueReconcileRunner } from "@/lib/workers/queue-reconcile-runner.js";
 import { reconcileSupabaseDeliveryStatuses } from "@/lib/domain/events/normalize-delivery-status.js";
+import { buildDisabledResponse, getSystemFlag } from "@/lib/system-control.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,6 +32,13 @@ export async function GET(request) {
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
+
+    const reconcile_enabled = await getSystemFlag("reconcile_enabled");
+    if (!reconcile_enabled) {
+      return NextResponse.json(buildDisabledResponse("reconcile_enabled", "queue-reconcile-route"), {
+        status: 423,
+      });
+    }
 
     const { searchParams } = new URL(request.url);
     const rollout = getRolloutControls();
@@ -139,6 +147,13 @@ export async function POST(request) {
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
+
+    const reconcile_enabled = await getSystemFlag("reconcile_enabled");
+    if (!reconcile_enabled) {
+      return NextResponse.json(buildDisabledResponse("reconcile_enabled", "queue-reconcile-route"), {
+        status: 423,
+      });
+    }
 
     const body = await request.json().catch(() => ({}));
     const rollout = getRolloutControls();

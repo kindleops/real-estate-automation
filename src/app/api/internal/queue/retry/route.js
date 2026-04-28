@@ -9,6 +9,7 @@ import {
 } from "@/lib/providers/podio.js";
 import { runRetryRunner } from "@/lib/workers/retry-runner.js";
 import { requireCronAuth } from "@/lib/security/cron-auth.js";
+import { buildDisabledResponse, getSystemFlag } from "@/lib/system-control.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,6 +31,13 @@ export async function GET(request) {
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
+
+    const retry_enabled = await getSystemFlag("retry_enabled");
+    if (!retry_enabled) {
+      return NextResponse.json(buildDisabledResponse("retry_enabled", "queue-retry-route"), {
+        status: 423,
+      });
+    }
 
     const { searchParams } = new URL(request.url);
     const rollout = getRolloutControls();
@@ -127,6 +135,13 @@ export async function POST(request) {
   try {
     const auth = requireCronAuth(request, logger);
     if (!auth.authorized) return auth.response;
+
+    const retry_enabled = await getSystemFlag("retry_enabled");
+    if (!retry_enabled) {
+      return NextResponse.json(buildDisabledResponse("retry_enabled", "queue-retry-route"), {
+        status: 423,
+      });
+    }
 
     const body = await request.json().catch(() => ({}));
     const rollout = getRolloutControls();

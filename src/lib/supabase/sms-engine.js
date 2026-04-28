@@ -522,22 +522,69 @@ function parseContactWindow(window_text = "") {
 
 export function evaluateContactWindow(row, deps = {}) {
   const normalized = normalizeSendQueueRow(row);
-  const timezone = clean(normalized.timezone) || "America/Chicago";
+  const timezone_raw = clean(normalized.timezone) || "America/Chicago";
   const current_time = deps.now ? new Date(deps.now) : new Date();
-  let resolved_timezone = timezone;
+  let resolved_timezone = timezone_raw;
+
+  // Resolve abbreviated labels (Eastern, Central, etc.) to IANA names.
+  const TIMEZONE_MAP = {
+    eastern: "America/New_York",
+    et: "America/New_York",
+    est: "America/New_York",
+    edt: "America/New_York",
+    central: "America/Chicago",
+    ct: "America/Chicago",
+    cst: "America/Chicago",
+    cdt: "America/Chicago",
+    mountain: "America/Denver",
+    mt: "America/Denver",
+    mst: "America/Denver",
+    mdt: "America/Denver",
+    pacific: "America/Los_Angeles",
+    pt: "America/Los_Angeles",
+    pst: "America/Los_Angeles",
+    pdt: "America/Los_Angeles",
+  };
+  const tz_lower = timezone_raw.toLowerCase();
+  if (TIMEZONE_MAP[tz_lower]) {
+    resolved_timezone = TIMEZONE_MAP[tz_lower];
+  }
 
   try {
-    buildTimeFormatter(timezone).format(current_time);
+    buildTimeFormatter(resolved_timezone).format(current_time);
   } catch {
     resolved_timezone = "America/Chicago";
   }
 
+  // Hard local-time window: 08:00 ≤ local < 21:00 (8 AM – 9 PM).
+  const LOCAL_SEND_START = 8 * 60;   // 480
+  const LOCAL_SEND_END   = 21 * 60;  // 1260 (exclusive)
+
+  const local_parts = buildDateParts(current_time, resolved_timezone);
+  const current_minutes = local_parts.minutes_of_day;
+
+  if (current_minutes < LOCAL_SEND_START || current_minutes >= LOCAL_SEND_END) {
+    return {
+      allowed: false,
+      reason: "outside_local_send_window",
+      timezone: resolved_timezone,
+      valid_window: true,
+      current_minutes,
+      start_minutes: LOCAL_SEND_START,
+      end_minutes: LOCAL_SEND_END,
+    };
+  }
+
+  // If the row has a finer-grained contact_window, also honour that.
   if (!clean(normalized.contact_window)) {
     return {
       allowed: true,
-      reason: "no_contact_window",
+      reason: "inside_local_send_window",
       timezone: resolved_timezone,
-      valid_window: false,
+      valid_window: true,
+      current_minutes,
+      start_minutes: LOCAL_SEND_START,
+      end_minutes: LOCAL_SEND_END,
     };
   }
 
@@ -545,14 +592,13 @@ export function evaluateContactWindow(row, deps = {}) {
   if (!parsed_window.valid) {
     return {
       allowed: true,
-      reason: parsed_window.reason,
+      reason: "inside_local_send_window_contact_window_unparseable",
       timezone: resolved_timezone,
       valid_window: false,
+      current_minutes,
     };
   }
 
-  const now_parts = buildDateParts(current_time, resolved_timezone);
-  const current_minutes = now_parts.minutes_of_day;
   const start_minutes = parsed_window.start_minutes;
   const end_minutes = parsed_window.end_minutes;
 
@@ -1310,6 +1356,29 @@ export async function syncDeliveryEvent(payload, options = {}) {
   };
 }
 
+/**
+ * Build the canonical dedupe key for a send_queue row.
+ * The unique partial index on send_queue prevents active rows with the same key.
+ */
+export function buildSendQueueDedupeKey({
+  master_owner_id,
+  property_id,
+  to_phone_number,
+  template_use_case,
+  touch_number,
+  campaign_session_id,
+} = {}) {
+  const parts = [
+    clean(master_owner_id) || "no_owner",
+    clean(property_id) || "no_property",
+    clean(to_phone_number) || "no_phone",
+    clean(template_use_case) || "no_use_case",
+    String(touch_number ?? "0"),
+    clean(campaign_session_id) || "no_session",
+  ];
+  return parts.join(":");
+}
+
 export async function insertSupabaseSendQueueRow(payload, deps = {}) {
   const now = deps.now || nowIso();
   const row = normalizeSendQueueRow({
@@ -1368,6 +1437,10 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     personalization_tags_used: row.personalization_tags_used || null,
     character_count: row.character_count || row.message_body.length,
     provider_message_id: row.provider_message_id || null,
+    // Hardening columns (added 2026-04-28)
+    dedupe_key: clean(payload.dedupe_key || row.metadata?.idempotency_key || row.queue_key) || null,
+    seller_first_name: clean(payload.seller_first_name || row.metadata?.seller_first_name || row.metadata?.queue_context?.seller_first_name) || null,
+    seller_display_name: clean(payload.seller_display_name || row.metadata?.seller_display_name) || null,
   };
 
   if (typeof deps.insertSupabaseSendQueueRow === "function") {

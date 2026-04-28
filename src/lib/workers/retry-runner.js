@@ -8,6 +8,7 @@ import {
   isPodioRateLimitError,
 } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
+import { getSystemFlag } from "@/lib/system-control.js";
 
 const DEFAULT_RETRY_LIMIT = 50;
 
@@ -15,6 +16,31 @@ export async function runRetryRunner({
   limit = DEFAULT_RETRY_LIMIT,
   master_owner_id = null,
 } = {}, deps = {}) {
+  const retry_enabled = await getSystemFlag("retry_enabled");
+  if (!retry_enabled) {
+    warn("queue.retry_runner_disabled", {
+      limit,
+      master_owner_id: Number(master_owner_id || 0) || null,
+      flag_key: "retry_enabled",
+    });
+
+    return {
+      ok: true,
+      skipped: true,
+      reason: "system_control_disabled",
+      flag_key: "retry_enabled",
+      processed_count: 0,
+      retried_count: 0,
+      scheduled_count: 0,
+      terminal_count: 0,
+      skipped_count: 0,
+      scanned_count: 0,
+      results: [],
+      retry_after_seconds: null,
+      retry_after_at: null,
+    };
+  }
+
   const scoped_master_owner_id = Number(master_owner_id || 0) || null;
   const with_run_lock = deps.withRunLock || withRunLock;
   const record_system_alert = deps.recordSystemAlert || recordSystemAlert;

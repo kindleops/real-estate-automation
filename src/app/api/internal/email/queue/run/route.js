@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { child } from "@/lib/logging/logger.js";
 import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
 import { processEmailQueue } from "@/lib/email/process-email-queue.js";
+import { buildDisabledResponse, getSystemFlag } from "@/lib/system-control.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,6 +49,13 @@ export async function GET(request) {
     });
     if (!auth.authorized) return auth.response;
 
+    const email_enabled = await getSystemFlag("email_enabled");
+    if (!email_enabled) {
+      return NextResponse.json(buildDisabledResponse("email_enabled", "email-queue-run-route"), {
+        status: 423,
+      });
+    }
+
     const { searchParams } = new URL(request.url);
     const response = await runFromPayload({
       limit: searchParams.get("limit"),
@@ -68,6 +76,13 @@ export async function POST(request) {
       header_names: ["x-internal-api-secret"],
     });
     if (!auth.authorized) return auth.response;
+
+    const email_enabled = await getSystemFlag("email_enabled");
+    if (!email_enabled) {
+      return NextResponse.json(buildDisabledResponse("email_enabled", "email-queue-run-route"), {
+        status: 423,
+      });
+    }
 
     const body = await request.json().catch(() => ({}));
     const response = await runFromPayload(body || {});

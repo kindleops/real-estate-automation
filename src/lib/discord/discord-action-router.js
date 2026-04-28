@@ -159,6 +159,7 @@ import {
   editOriginalInteractionResponse,
 } from "./discord-followups.js";
 import { info, warn, error as logError } from "../logging/logger.js";
+import { getSystemFlag } from "@/lib/system-control.js";
 
 // ---------------------------------------------------------------------------
 // Test dependency injection
@@ -3718,6 +3719,16 @@ async function handleApproval({ interaction, custom_id }) {
  * @returns {Promise<object>}   - Discord interaction response object.
  */
 export async function routeDiscordInteraction(interaction) {
+  // Discord's health-check ping must always pass.
+  if (interaction?.type === 1) {
+    return { type: 1 };
+  }
+
+  const discord_actions_enabled = await getSystemFlag("discord_actions_enabled");
+  if (!discord_actions_enabled) {
+    return ephemeralMessage("⛔ Discord actions are currently disabled via system control.");
+  }
+
   const context = extractMemberContext(interaction);
   const role_ids = context.role_ids;
 

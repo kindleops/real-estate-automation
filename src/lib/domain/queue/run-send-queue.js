@@ -5,14 +5,16 @@ import {
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
 import { isRevisionLimitExceeded } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
-import { hasSupabaseConfig } from "@/lib/supabase/client.js";
+import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/client.js";
 import {
   claimSendQueueRow,
+  evaluateContactWindow,
   loadRunnableSendQueueRows,
   normalizeQueueRowId,
 } from "@/lib/supabase/sms-engine.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
+import { getSystemFlags, buildDisabledResponse, SystemControlDisabledError } from "@/lib/system-control.js";
 
 const DEFAULT_BATCH_SIZE = 50;
 const QUEUE_RUN_LOCK_SCOPE = "queue-run";
@@ -352,6 +354,19 @@ export async function runSendQueue(
   } = {},
   deps = {}
 ) {
+  // ── System control gate ────────────────────────────────────────────────
+  if (!dry_run) {
+    const flags = await getSystemFlags(["queue_runner_enabled", "outbound_sms_enabled"]);
+    if (!flags.queue_runner_enabled) {
+      info("queue_runner.blocked", { flag: "queue_runner_enabled" });
+      return { ok: false, status: 423, ...buildDisabledResponse("queue_runner_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
+    }
+    if (!flags.outbound_sms_enabled) {
+      info("queue_runner.blocked", { flag: "outbound_sms_enabled" });
+      return { ok: false, status: 423, ...buildDisabledResponse("outbound_sms_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
+    }
+  }
+
   const with_run_lock = deps.withRunLock || withRunLock;
   const build_podio_cooldown_skip_result =
     typeof deps.buildPodioCooldownSkipResult === "function"
@@ -511,6 +526,47 @@ export async function runSendQueue(
 
       const results = [];
       const skipped_reasons = [];
+
+      // ── After-hours sweep ───────────────────────────────────────────────
+      // Before processing any rows, mark runnable rows that are currently
+      // outside the local send window (8 AM – 9 PM) as paused_after_hours.
+      // This prevents the runner from accidentally sending them later.
+      if (!dry_run && hasSupabaseConfig()) {
+        try {
+          const supabase_client = deps.supabase || defaultSupabase;
+          // We do this as a raw DB-side update: fetch candidate rows and
+          // for each one evaluate the local time.  We keep it simple by
+          // updating rows row-by-row using the already-loaded candidate list.
+          const after_hours_rows = rows.filter((row) => {
+            const eval_fn = deps.evaluateContactWindow || evaluateContactWindow;
+            const { allowed } = eval_fn(row, { ...deps, now });
+            return !allowed;
+          });
+          if (after_hours_rows.length > 0) {
+            const after_hours_ids = after_hours_rows
+              .map((row) => getQueueRowId(row))
+              .filter(Boolean);
+            await supabase_client
+              .from("send_queue")
+              .update({
+                queue_status: "paused_after_hours",
+                guard_status: "blocked",
+                guard_reason: "outside_local_send_window",
+                paused_reason: "after_local_9pm",
+                last_guard_checked_at: now,
+                updated_at: now,
+              })
+              .in("id", after_hours_ids)
+              .in("queue_status", ["queued","ready","runnable","scheduled","pending"]);
+            info("queue.after_hours_paused", {
+              count: after_hours_ids.length,
+              ids: after_hours_ids.slice(0, 10),
+            });
+          }
+        } catch (sweep_err) {
+          warn("queue.after_hours_sweep_failed", { message: sweep_err?.message });
+        }
+      }
       let attempted_count = 0;
       let claimed_count = 0;
       let started_count = 0;

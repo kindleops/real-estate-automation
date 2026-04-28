@@ -3,7 +3,8 @@ import crypto from "node:crypto";
 import { child } from "@/lib/logging/logger.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/client.js";
-import { evaluateContactWindow, insertSupabaseSendQueueRow } from "@/lib/supabase/sms-engine.js";
+import { evaluateContactWindow, insertSupabaseSendQueueRow, buildSendQueueDedupeKey } from "@/lib/supabase/sms-engine.js";
+import { getSystemFlags, buildDisabledResponse } from "@/lib/system-control.js";
 
 const SEND_QUEUE_TABLE = "send_queue";
 const TEXTGRID_NUMBERS_TABLE = "textgrid_numbers";
@@ -2039,6 +2040,15 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
     campaign_session_id: candidate.campaign_session_id,
   });
 
+  const dedupe_key = buildSendQueueDedupeKey({
+    master_owner_id: candidate.master_owner_id,
+    property_id: candidate.property_id,
+    to_phone_number: candidate.canonical_e164,
+    template_use_case: options.template_use_case,
+    touch_number: candidate.touch_number,
+    campaign_session_id: candidate.campaign_session_id,
+  });
+
   const queue_key = buildQueueKeyFromIdempotencyKey(idempotency_key);
   const scheduled_for = options.scheduled_for || new Date().toISOString();
   const queue_status = new Date(scheduled_for).getTime() > Date.now() ? "scheduled" : "queued";
@@ -2063,6 +2073,9 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
     timezone: candidate.timezone,
     contact_window: candidate.contact_window || null,
     use_case_template: options.template_use_case,
+    dedupe_key,
+    seller_first_name: clean(candidate.seller_first_name || candidate.owner_first_name || candidate.prospect_first_name || "") || null,
+    seller_display_name: clean(candidate.owner_display_name || candidate.seller_display_name || "") || null,
     metadata: {
       idempotency_key,
       campaign_session_id: candidate.campaign_session_id,
@@ -2223,6 +2236,18 @@ export function buildFeederDiagnostics(summary = {}) {
 
 export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
   const now = input.now || new Date().toISOString();
+
+  // ── System control gate ────────────────────────────────────────────────
+  if (!input.dry_run) {
+    const flags = await getSystemFlags(["feeder_enabled", "outbound_sms_enabled"]);
+    if (!flags.feeder_enabled) {
+      return { ok: false, status: 423, ...buildDisabledResponse("feeder_enabled", "runSupabaseCandidateFeeder"), queued_count: 0 };
+    }
+    if (!flags.outbound_sms_enabled) {
+      return { ok: false, status: 423, ...buildDisabledResponse("outbound_sms_enabled", "runSupabaseCandidateFeeder"), queued_count: 0 };
+    }
+  }
+
   const limit = Math.max(1, Math.min(asPositiveInteger(input.limit, 25), 500));
   const scan_limit = Math.max(limit, Math.min(asPositiveInteger(input.scan_limit ?? input.candidate_fetch_limit, 500), 5000));
   const candidate_offset = Math.max(0, Math.trunc(Number(input.candidate_offset ?? input.scan_offset ?? input.offset) || 0));

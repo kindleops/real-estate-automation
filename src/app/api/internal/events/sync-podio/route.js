@@ -11,6 +11,7 @@ import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
 import { syncSupabaseMessageEventsToPodio } from "@/lib/domain/events/sync-supabase-message-events-to-podio.js";
 import { captureRouteException } from "@/lib/monitoring/sentry.js";
 import { notifyDiscordOps } from "@/lib/discord/notify-discord-ops.js";
+import { getSystemFlag } from "@/lib/system-control.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,6 +75,13 @@ async function handle(request) {
       limit,
       authenticated: auth.auth.authenticated,
     });
+
+    // System control gate.
+    const sync_enabled = await getSystemFlag("podio_sync_enabled");
+    if (!sync_enabled) {
+      logger.info("podio.sync.auth_ok_but_disabled", { flag: "podio_sync_enabled" });
+      return NextResponse.json({ ok: false, status: 423, error: "podio_sync_disabled", message: "podio_sync_enabled flag is false" }, { status: 423 });
+    }
 
     const result = await syncSupabaseMessageEventsToPodio({ limit });
 

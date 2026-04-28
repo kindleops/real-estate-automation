@@ -1,6 +1,7 @@
 import { supabase as defaultSupabase } from "@/lib/supabase/client.js";
 import { sendBrevoTransactionalEmail } from "@/lib/email/brevo-client.js";
 import { isEmailSuppressed } from "@/lib/email/email-suppression.js";
+import { getSystemFlag } from "@/lib/system-control.js";
 
 let _deps = {
   supabase_override: null,
@@ -39,6 +40,46 @@ function isDue(row = {}, now_ts = Date.now()) {
   if (!row?.scheduled_for) return true;
   const ts = new Date(row.scheduled_for).getTime();
   return Number.isFinite(ts) ? ts <= now_ts : true;
+}
+
+async function hasRecentSmsOutreach(db, row = {}) {
+  const owner_id = clean(row.owner_id);
+  const property_id = clean(row.property_id);
+  if (!owner_id || !property_id) return false;
+
+  const since_iso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await db
+    .from("contact_outreach_state")
+    .select("id")
+    .eq("master_owner_id", owner_id)
+    .eq("property_id", property_id)
+    .in("channel", ["sms", "discord_manual_sms"])
+    .gte("last_outreach_at", since_iso)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return false;
+  return Boolean(data?.id);
+}
+
+async function recordEmailOutreach(db, row = {}, message_id = null) {
+  const owner_id = clean(row.owner_id);
+  const property_id = clean(row.property_id);
+  if (!owner_id || !property_id) return;
+
+  await db
+    .from("contact_outreach_state")
+    .upsert(
+      {
+        master_owner_id: owner_id,
+        property_id,
+        channel: "email",
+        last_outreach_at: nowIso(),
+        last_queue_id: clean(row.queue_id) || null,
+        last_provider_message_id: clean(message_id) || null,
+      },
+      { onConflict: "master_owner_id,property_id,channel" }
+    );
 }
 
 async function resolveSenderIdentity(db, row = {}) {
@@ -90,6 +131,20 @@ export async function processEmailQueue({ limit = 25, dry_run = false } = {}) {
   const db = getDb();
   const final_limit = asLimit(limit, 25);
 
+  const email_enabled = await getSystemFlag("email_enabled");
+  if (!email_enabled) {
+    return {
+      ok: false,
+      reason: "system_control_disabled",
+      flag_key: "email_enabled",
+      attempted_count: 0,
+      sent_count: 0,
+      failed_count: 0,
+      skipped_count: 0,
+      results: [],
+    };
+  }
+
   const { data, error } = await db
     .from("email_send_queue")
     .select("*")
@@ -129,6 +184,26 @@ export async function processEmailQueue({ limit = 25, dry_run = false } = {}) {
 
   for (const row of rows) {
     const normalized_email = clean(row.email_address).toLowerCase();
+
+    const has_recent_sms = await hasRecentSmsOutreach(db, row);
+    if (has_recent_sms) {
+      await db
+        .from("email_send_queue")
+        .update({
+          status: "failed",
+          failure_reason: "overlap_recent_sms_24h",
+          updated_at: nowIso(),
+        })
+        .eq("id", row.id);
+
+      result.failed_count += 1;
+      result.results.push({
+        queue_id: row.queue_id,
+        status: "failed",
+        reason: "overlap_recent_sms_24h",
+      });
+      continue;
+    }
 
     const suppression = await getIsSuppressed()(normalized_email);
     if (suppression?.suppressed) {
@@ -186,6 +261,8 @@ export async function processEmailQueue({ limit = 25, dry_run = false } = {}) {
           updated_at: nowIso(),
         })
         .eq("id", row.id);
+
+      await recordEmailOutreach(db, row, clean(send_result?.message_id) || null);
 
       result.sent_count += 1;
       result.results.push({
