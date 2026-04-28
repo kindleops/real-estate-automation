@@ -4,7 +4,7 @@ import { child } from "@/lib/logging/logger.js";
 import { normalizePhone } from "@/lib/providers/textgrid.js";
 import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/client.js";
 import { evaluateContactWindow, insertSupabaseSendQueueRow, buildSendQueueDedupeKey } from "@/lib/supabase/sms-engine.js";
-import { getSystemFlags, buildDisabledResponse } from "@/lib/system-control.js";
+import { getSystemFlag, buildDisabledResponse } from "@/lib/system-control.js";
 
 const SEND_QUEUE_TABLE = "send_queue";
 const TEXTGRID_NUMBERS_TABLE = "textgrid_numbers";
@@ -2239,11 +2239,12 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
 
   // ── System control gate ────────────────────────────────────────────────
   if (!input.dry_run) {
-    const flags = await getSystemFlags(["feeder_enabled", "outbound_sms_enabled"]);
-    if (!flags.feeder_enabled) {
+    const feeder_enabled = await getSystemFlag("feeder_enabled");
+    if (!feeder_enabled) {
       return { ok: false, status: 423, ...buildDisabledResponse("feeder_enabled", "runSupabaseCandidateFeeder"), queued_count: 0 };
     }
-    if (!flags.outbound_sms_enabled) {
+    const outbound_sms_enabled = await getSystemFlag("outbound_sms_enabled");
+    if (!outbound_sms_enabled) {
       return { ok: false, status: 423, ...buildDisabledResponse("outbound_sms_enabled", "runSupabaseCandidateFeeder"), queued_count: 0 };
     }
   }

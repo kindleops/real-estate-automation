@@ -5,11 +5,48 @@
 
 CREATE TABLE IF NOT EXISTS public.system_control (
   key        text        PRIMARY KEY,
-  enabled    boolean     NOT NULL DEFAULT true,
-  reason     text,
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  updated_by text
+  value      text        NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Align any pre-existing variant schema to key/value/updated_at.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'system_control' AND column_name = 'value'
+  ) THEN
+    ALTER TABLE public.system_control ADD COLUMN value text;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'system_control' AND column_name = 'enabled'
+  ) THEN
+    ALTER TABLE public.system_control DROP COLUMN enabled;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'system_control' AND column_name = 'reason'
+  ) THEN
+    ALTER TABLE public.system_control DROP COLUMN reason;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'system_control' AND column_name = 'updated_by'
+  ) THEN
+    ALTER TABLE public.system_control DROP COLUMN updated_by;
+  END IF;
+
+  UPDATE public.system_control SET value = 'false' WHERE value IS NULL;
+  ALTER TABLE public.system_control ALTER COLUMN value SET NOT NULL;
+END $$;
 
 -- Ensure updated_at stays current.
 CREATE OR REPLACE FUNCTION public.set_system_control_updated_at()
@@ -26,17 +63,17 @@ CREATE TRIGGER trg_system_control_updated_at
   FOR EACH ROW EXECUTE FUNCTION public.set_system_control_updated_at();
 
 -- Seed default flags.
-INSERT INTO public.system_control (key, enabled, reason) VALUES
-  ('outbound_sms_enabled',     true,  'Global SMS send gate — false halts all outbound sends'),
-  ('feeder_enabled',           true,  'Feeder queue generation gate'),
-  ('queue_runner_enabled',     true,  'Send queue runner gate'),
-  ('retry_enabled',            true,  'Retry runner gate'),
-  ('reconcile_enabled',        true,  'Queue reconcile runner gate'),
-  ('podio_sync_enabled',       true,  'Podio message-event sync gate'),
-  ('discord_alerts_enabled',   true,  'Discord alert delivery gate'),
-  ('discord_actions_enabled',  true,  'Discord slash-command action gate'),
-  ('dashboard_live_enabled',   true,  'Use live Supabase data on dashboard — false disables mock fallback'),
-  ('email_enabled',            false, 'Email send gate — kept false until provider config is confirmed')
+INSERT INTO public.system_control (key, value) VALUES
+  ('outbound_sms_enabled',     'true'),
+  ('feeder_enabled',           'true'),
+  ('queue_runner_enabled',     'true'),
+  ('retry_enabled',            'true'),
+  ('reconcile_enabled',        'true'),
+  ('podio_sync_enabled',       'true'),
+  ('discord_alerts_enabled',   'true'),
+  ('discord_actions_enabled',  'true'),
+  ('dashboard_live_enabled',   'true'),
+  ('email_enabled',            'false')
 ON CONFLICT (key) DO NOTHING;
 
 -- RLS: service role can manage; authenticated browser can read all.
@@ -64,6 +101,6 @@ CREATE POLICY system_control_anon_read ON public.system_control
 
 -- Handy helper view that orders by key.
 CREATE OR REPLACE VIEW public.v_system_control AS
-  SELECT key, enabled, reason, updated_at, updated_by
+  SELECT key, value, updated_at
   FROM public.system_control
   ORDER BY key;

@@ -9,8 +9,8 @@
  *   import { requireSystemFlag } from '@/lib/system-control.js';
  *   await requireSystemFlag('outbound_sms_enabled', 'sms-send');
  *
- * getSystemFlag() returns true when the flag is enabled (or when Supabase is
- * unreachable and the caller does not opt-in to fail-closed).
+ * getSystemFlag() returns true only when value is one of:
+ * true, 1, yes, on, enabled (case-insensitive).
  */
 
 import { supabase as defaultSupabase } from "@/lib/supabase/client.js";
@@ -21,7 +21,9 @@ const TABLE = "system_control";
 // In-process cache so we don't hammer Supabase on every message send.
 const CACHE_TTL_MS = 30_000; // 30 seconds
 
-const _cache = new Map(); // key -> { enabled, expires_at }
+const _cache = new Map(); // key -> { value, expires_at }
+
+const TRUE_FLAG_VALUES = new Set(["true", "1", "yes", "on", "enabled"]);
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -34,11 +36,16 @@ function getCachedFlag(key) {
     _cache.delete(key);
     return null;
   }
-  return entry.enabled;
+  return entry.value;
 }
 
-function setCachedFlag(key, enabled) {
-  _cache.set(key, { enabled, expires_at: Date.now() + CACHE_TTL_MS });
+function setCachedFlag(key, value) {
+  _cache.set(key, { value, expires_at: Date.now() + CACHE_TTL_MS });
+}
+
+function parseSystemControlValue(raw) {
+  const normalized = clean(raw).toLowerCase();
+  return TRUE_FLAG_VALUES.has(normalized);
 }
 
 /**
@@ -51,7 +58,7 @@ function setCachedFlag(key, enabled) {
  * @returns {Promise<boolean>}
  */
 export async function getSystemFlag(key, opts = {}) {
-  const { failClosedOnError = false, supabase = defaultSupabase } = opts;
+  const { supabase = defaultSupabase } = opts;
   const normalized_key = clean(key);
 
   const cached = getCachedFlag(normalized_key);
@@ -60,26 +67,28 @@ export async function getSystemFlag(key, opts = {}) {
   try {
     const { data, error } = await supabase
       .from(TABLE)
-      .select("enabled")
+      .select("value")
       .eq("key", normalized_key)
       .maybeSingle();
 
     if (error) {
       warn("system_control.fetch_error", { key: normalized_key, message: error.message });
-      const fallback = !failClosedOnError;
-      setCachedFlag(normalized_key, fallback);
-      return fallback;
+      setCachedFlag(normalized_key, false);
+      return false;
     }
 
-    // Row missing ⇒ treat as enabled (unknown flags default to on).
-    const enabled = data == null ? true : Boolean(data.enabled);
-    setCachedFlag(normalized_key, enabled);
-    return enabled;
+    if (!data) {
+      setCachedFlag(normalized_key, false);
+      return false;
+    }
+
+    const parsed = parseSystemControlValue(data.value);
+    setCachedFlag(normalized_key, parsed);
+    return parsed;
   } catch (err) {
     warn("system_control.unexpected_error", { key: normalized_key, message: err?.message });
-    const fallback = !failClosedOnError;
-    setCachedFlag(normalized_key, fallback);
-    return fallback;
+    setCachedFlag(normalized_key, false);
+    return false;
   }
 }
 
@@ -91,7 +100,7 @@ export async function getSystemFlag(key, opts = {}) {
  * @returns {Promise<Record<string, boolean>>}
  */
 export async function getSystemFlags(keys, opts = {}) {
-  const { failClosedOnError = false, supabase = defaultSupabase } = opts;
+  const { supabase = defaultSupabase } = opts;
   const normalized_keys = keys.map(clean).filter(Boolean);
   if (!normalized_keys.length) return {};
 
@@ -113,32 +122,30 @@ export async function getSystemFlags(keys, opts = {}) {
   try {
     const { data, error } = await supabase
       .from(TABLE)
-      .select("key, enabled")
+      .select("key, value")
       .in("key", to_fetch);
 
     if (error) {
       warn("system_control.fetch_multi_error", { message: error.message });
-      const fallback = !failClosedOnError;
       for (const key of to_fetch) {
-        result[key] = fallback;
-        setCachedFlag(key, fallback);
+        result[key] = false;
+        setCachedFlag(key, false);
       }
       return result;
     }
 
-    const found = new Map((data ?? []).map((row) => [row.key, Boolean(row.enabled)]));
+    const found = new Map((data ?? []).map((row) => [row.key, parseSystemControlValue(row.value)]));
 
     for (const key of to_fetch) {
-      const enabled = found.has(key) ? found.get(key) : true; // unknown → enabled
-      result[key] = enabled;
-      setCachedFlag(key, enabled);
+      const parsed = found.has(key) ? found.get(key) : false;
+      result[key] = parsed;
+      setCachedFlag(key, parsed);
     }
   } catch (err) {
     warn("system_control.unexpected_multi_error", { message: err?.message });
-    const fallback = !failClosedOnError;
     for (const key of to_fetch) {
-      result[key] = fallback;
-      setCachedFlag(key, fallback);
+      result[key] = false;
+      setCachedFlag(key, false);
     }
   }
 

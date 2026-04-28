@@ -1,23 +1,21 @@
 -- Production health checks for queue + messaging pipeline.
 -- Run with: psql "$DATABASE_URL" -f scripts/check-production-health.sql
 
--- 1) System control flags (ensure expected runtime gates are enabled/disabled).
+-- 1) System control flags (stored as key/value text).
 select
   key,
-  enabled,
-  reason,
-  updated_at,
-  updated_by
+  value,
+  updated_at
 from public.system_control
 order by key;
 
--- 2) Runnable send_queue count.
+-- 2) Runnable send_queue count (must be 0 when global lock is active).
 select
-  count(*) as runnable_count
+  count(*) as runnable_now
 from public.send_queue
 where coalesce(sent_at, null) is null
-  and queue_status in ('queued', 'pending', 'retry_pending')
-  and coalesce(local_send_allowed, true) = true;
+  and queue_status in ('queued', 'ready', 'runnable', 'scheduled', 'pending')
+  and coalesce(provider_message_id, '') = '';
 
 -- 3) Rows missing seller first name (should be zero for runnable rows).
 select

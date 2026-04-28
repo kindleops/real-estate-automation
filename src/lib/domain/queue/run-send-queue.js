@@ -14,7 +14,7 @@ import {
 } from "@/lib/supabase/sms-engine.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
-import { getSystemFlags, buildDisabledResponse, SystemControlDisabledError } from "@/lib/system-control.js";
+import { getSystemFlag, buildDisabledResponse, SystemControlDisabledError } from "@/lib/system-control.js";
 
 const DEFAULT_BATCH_SIZE = 50;
 const QUEUE_RUN_LOCK_SCOPE = "queue-run";
@@ -356,12 +356,13 @@ export async function runSendQueue(
 ) {
   // ── System control gate ────────────────────────────────────────────────
   if (!dry_run) {
-    const flags = await getSystemFlags(["queue_runner_enabled", "outbound_sms_enabled"]);
-    if (!flags.queue_runner_enabled) {
+    const queue_runner_enabled = await getSystemFlag("queue_runner_enabled");
+    if (!queue_runner_enabled) {
       info("queue_runner.blocked", { flag: "queue_runner_enabled" });
       return { ok: false, status: 423, ...buildDisabledResponse("queue_runner_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
     }
-    if (!flags.outbound_sms_enabled) {
+    const outbound_sms_enabled = await getSystemFlag("outbound_sms_enabled");
+    if (!outbound_sms_enabled) {
       info("queue_runner.blocked", { flag: "outbound_sms_enabled" });
       return { ok: false, status: 423, ...buildDisabledResponse("outbound_sms_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
     }
