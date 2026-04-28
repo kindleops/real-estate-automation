@@ -176,6 +176,9 @@ export function normalizeSendQueueRow(row) {
     sent_at: safe_row.sent_at || null,
     delivered_at: safe_row.delivered_at || null,
     failed_reason: safe_row.failed_reason || null,
+    guard_status: safe_row.guard_status || null,
+    guard_reason: safe_row.guard_reason || null,
+    paused_reason: safe_row.paused_reason || null,
     delivery_confirmed: safe_row.delivery_confirmed || null,
     // Offer record sync tracking (added 2026-04-22)
     cash_offer_snapshot_id:    safe_row.cash_offer_snapshot_id    || null,
@@ -325,6 +328,7 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
       skipped.push({
         id: decision.row?.id || null,
         reason: decision.reason,
+        row: decision.row,
       });
     }
   }
@@ -349,11 +353,21 @@ export async function claimSendQueueRow(row, deps = {}) {
   }
   const claimed_at = deps.now || nowIso();
   const lock_token = crypto.randomUUID();
+  const metadata = ensureObject(normalized.metadata);
+  const processing_run_id = clean(deps.processing_run_id || deps.run_id || metadata.processing_run_id || lock_token);
+  const run_started_at = clean(deps.run_started_at || metadata.run_started_at || claimed_at);
   const payload = {
     queue_status: "sending",
     is_locked: true,
     locked_at: claimed_at,
     lock_token,
+    metadata: {
+      ...metadata,
+      processing_run_id,
+      run_started_at,
+      claimed_at: metadata.claimed_at || claimed_at,
+      claimed_by: metadata.claimed_by || "queue_runner",
+    },
     updated_at: claimed_at,
   };
 
@@ -1040,16 +1054,29 @@ export async function finalizeSendQueueFailure(row, lock_token, error, options =
   const now = options.now || nowIso();
   const next_retry_count = normalized.retry_count + 1;
   const is_final_failure = next_retry_count >= normalized.max_retries;
+  const error_message = clean(error?.message) || "send_failed";
 
   const payload = {
     queue_status: is_final_failure ? "failed" : "queued",
-    failed_reason: clean(error?.message) || "send_failed",
+    failed_reason: error_message,
     retry_count: next_retry_count,
     next_retry_at: is_final_failure ? null : addMinutesIso(now, 5),
     is_locked: false,
     locked_at: null,
     lock_token: null,
     updated_at: now,
+    metadata: {
+      ...normalized.metadata,
+      provider_error: {
+        message: error_message,
+        status: error?.status || null,
+        retryable: !is_final_failure,
+        final_queue_status: is_final_failure ? "failed" : "queued",
+        recorded_at: now,
+      },
+      final_queue_status: is_final_failure ? "failed" : "queued",
+      finalized_at: now,
+    },
   };
 
   const updated_row = await updateSendQueueRowWithLock(
@@ -1068,6 +1095,7 @@ export async function finalizeSendQueueFailure(row, lock_token, error, options =
 export async function releaseSkippedQueueRow(row, lock_token, reason, options = {}) {
   const normalized = normalizeSendQueueRow(row);
   const now = options.now || nowIso();
+  const skip_reason = clean(reason) || "skipped";
 
   const payload = {
     queue_status: "queued",
@@ -1075,6 +1103,12 @@ export async function releaseSkippedQueueRow(row, lock_token, reason, options = 
     locked_at: null,
     lock_token: null,
     updated_at: now,
+    metadata: {
+      ...normalized.metadata,
+      skip_reason,
+      final_queue_status: "queued",
+      finalized_at: now,
+    },
   };
 
   const updated_row = await updateSendQueueRowWithLock(
@@ -1087,7 +1121,262 @@ export async function releaseSkippedQueueRow(row, lock_token, reason, options = 
   return updated_row || {
     ...normalized,
     ...payload,
-    skip_reason: reason,
+    skip_reason,
+  };
+}
+
+export async function pauseInvalidQueueRow(row, reason = "invalid_queue_row", options = {}) {
+  const normalized = normalizeSendQueueRow(row);
+  const now = options.now || nowIso();
+  const queue_row_id = normalizeQueueRowId(normalized.id, null);
+  const skip_reason = clean(reason) || "invalid_queue_row";
+
+  if (!queue_row_id) {
+    throw new Error("missing_queue_row_id");
+  }
+
+  const payload = {
+    queue_status: "paused_invalid_queue_row",
+    guard_status: "blocked",
+    guard_reason: skip_reason,
+    paused_reason: skip_reason,
+    is_locked: false,
+    locked_at: null,
+    lock_token: null,
+    updated_at: now,
+    metadata: {
+      ...normalized.metadata,
+      skip_reason,
+      invalid_queue_row: true,
+      final_queue_status: "paused_invalid_queue_row",
+      finalized_at: now,
+    },
+  };
+
+  if (typeof options.pauseInvalidQueueRow === "function") {
+    return options.pauseInvalidQueueRow(normalized, payload);
+  }
+
+  if (typeof options.updateQueueRow === "function") {
+    await options.updateQueueRow(queue_row_id, payload);
+    return {
+      ...normalized,
+      ...payload,
+    };
+  }
+
+  const supabase = getSupabase(options);
+  const { data, error } = await supabase
+    .from(SEND_QUEUE_TABLE)
+    .update(payload)
+    .eq("id", queue_row_id)
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data ? normalizeSendQueueRow(data) : {
+    ...normalized,
+    ...payload,
+  };
+}
+
+export async function pauseMaxRetriesQueueRow(row, reason = "max_retries_reached", options = {}) {
+  const normalized = normalizeSendQueueRow(row);
+  const now = options.now || nowIso();
+  const queue_row_id = normalizeQueueRowId(normalized.id, null);
+  const skip_reason = clean(reason) || "max_retries_reached";
+
+  if (!queue_row_id) {
+    throw new Error("missing_queue_row_id");
+  }
+
+  const payload = {
+    queue_status: "paused_max_retries",
+    guard_status: "blocked",
+    guard_reason: skip_reason,
+    paused_reason: skip_reason,
+    is_locked: false,
+    locked_at: null,
+    lock_token: null,
+    updated_at: now,
+    metadata: {
+      ...normalized.metadata,
+      skip_reason,
+      final_queue_status: "paused_max_retries",
+      finalized_at: now,
+    },
+  };
+
+  if (typeof options.pauseMaxRetriesQueueRow === "function") {
+    return options.pauseMaxRetriesQueueRow(normalized, payload);
+  }
+
+  if (typeof options.updateQueueRow === "function") {
+    await options.updateQueueRow(queue_row_id, payload);
+    return {
+      ...normalized,
+      ...payload,
+    };
+  }
+
+  const supabase = getSupabase(options);
+  const { data, error } = await supabase
+    .from(SEND_QUEUE_TABLE)
+    .update(payload)
+    .eq("id", queue_row_id)
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data ? normalizeSendQueueRow(data) : {
+    ...normalized,
+    ...payload,
+  };
+}
+
+export async function loadClaimedQueueRow(row, options = {}) {
+  const normalized = normalizeSendQueueRow(row);
+  const queue_row_id = normalizeQueueRowId(normalized.id, null);
+
+  if (!queue_row_id) return null;
+
+  if (typeof options.loadQueueRowById === "function") {
+    const loaded = await options.loadQueueRowById(queue_row_id);
+    return loaded ? normalizeSendQueueRow(loaded) : null;
+  }
+
+  const supabase = getSupabase(options);
+  const { data, error } = await supabase
+    .from(SEND_QUEUE_TABLE)
+    .select("*")
+    .eq("id", queue_row_id)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data ? normalizeSendQueueRow(data) : null;
+}
+
+export async function recycleClaimedSendingRow(row, lock_token, reason = "finalize_safety_net", options = {}) {
+  const latest = normalizeSendQueueRow(row);
+  const now = options.now || nowIso();
+  const queue_row_id = normalizeQueueRowId(latest.id, null);
+  const resolved_lock_token = clean(lock_token || latest.lock_token);
+
+  if (!queue_row_id) {
+    return null;
+  }
+
+  if (lower(latest.queue_status) !== "sending") {
+    return null;
+  }
+
+  const next_retry_count = latest.retry_count + 1;
+  const final_queue_status = next_retry_count >= latest.max_retries ? "failed" : "queued";
+  const finalization_reason = clean(reason) || "finalize_safety_net";
+  const payload = {
+    queue_status: final_queue_status,
+    failed_reason: final_queue_status === "failed" ? finalization_reason : latest.failed_reason || null,
+    retry_count: next_retry_count,
+    next_retry_at: final_queue_status === "failed" ? null : addMinutesIso(now, 5),
+    is_locked: false,
+    locked_at: null,
+    lock_token: null,
+    updated_at: now,
+    metadata: {
+      ...latest.metadata,
+      finalize_safety_net: true,
+      skip_reason: latest.metadata?.skip_reason || finalization_reason,
+      finalization_error: finalization_reason,
+      final_queue_status,
+      finalized_at: now,
+    },
+  };
+
+  if (typeof options.recycleClaimedSendingRow === "function") {
+    return options.recycleClaimedSendingRow(latest, resolved_lock_token, payload);
+  }
+
+  if (resolved_lock_token) {
+    const updated = await updateSendQueueRowWithLock(
+      queue_row_id,
+      resolved_lock_token,
+      payload,
+      options
+    );
+    return updated || null;
+  }
+
+  if (typeof options.updateQueueRow === "function") {
+    await options.updateQueueRow(queue_row_id, payload);
+    return {
+      ...latest,
+      ...payload,
+    };
+  }
+
+  const supabase = getSupabase(options);
+  const { data, error } = await supabase
+    .from(SEND_QUEUE_TABLE)
+    .update(payload)
+    .eq("id", queue_row_id)
+    .eq("queue_status", "sending")
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  return data ? normalizeSendQueueRow(data) : null;
+}
+
+export async function finalizeClaimedSendQueueRows(claimed_rows = [], options = {}) {
+  const rows = Array.isArray(claimed_rows) ? claimed_rows : [];
+  const finalized = [];
+  const errors = [];
+
+  if (typeof options.finalizeClaimedSendQueueRows === "function") {
+    return options.finalizeClaimedSendQueueRows(rows, options);
+  }
+
+  for (const claimed of rows) {
+    const row = claimed?.row || claimed;
+    const lock_token = clean(claimed?.lock_token || row?.lock_token);
+    const queue_row_id = normalizeQueueRowId(row?.id ?? row?.queue_row_id, null);
+    if (!queue_row_id) continue;
+
+    try {
+      const latest = await loadClaimedQueueRow(row, options);
+      if (!latest || lower(latest.queue_status) !== "sending") {
+        continue;
+      }
+      if (lock_token && clean(latest.lock_token) && clean(latest.lock_token) !== lock_token) {
+        continue;
+      }
+
+      const recycled = await recycleClaimedSendingRow(
+        latest,
+        lock_token || latest.lock_token,
+        claimed?.reason || "finalize_safety_net",
+        options
+      );
+
+      if (recycled) {
+        finalized.push(recycled);
+      }
+    } catch (error) {
+      errors.push({
+        queue_row_id,
+        error: clean(error?.message) || "finalize_safety_net_failed",
+      });
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    finalized_count: finalized.length,
+    stuck_recycled_count: finalized.length,
+    finalized,
+    errors,
   };
 }
 

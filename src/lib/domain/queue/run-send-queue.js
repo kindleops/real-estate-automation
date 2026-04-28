@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import {
   failQueueItem,
   processSendQueueItem,
@@ -9,8 +11,12 @@ import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/c
 import {
   claimSendQueueRow,
   evaluateContactWindow,
+  finalizeClaimedSendQueueRows,
   loadRunnableSendQueueRows,
   normalizeQueueRowId,
+  normalizeSendQueueRow,
+  pauseInvalidQueueRow,
+  pauseMaxRetriesQueueRow,
 } from "@/lib/supabase/sms-engine.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
@@ -248,11 +254,13 @@ async function buildLegacyCandidateSummary(limit = 50, now = nowIso(), deps = {}
       item_id: getQueueRowId(row),
       reason: "not_due_yet",
     })),
+    skipped: [],
   };
 }
 
 async function buildSupabaseCandidateSummary(limit = 50, now = nowIso(), deps = {}) {
-  const loaded = await loadRunnableSendQueueRows(limit, {
+  const load_runnable_send_queue_rows = deps.loadRunnableSendQueueRows || loadRunnableSendQueueRows;
+  const loaded = await load_runnable_send_queue_rows(limit, {
     ...deps,
     now,
   });
@@ -279,6 +287,7 @@ async function buildSupabaseCandidateSummary(limit = 50, now = nowIso(), deps = 
       item_id: asPositiveInteger(entry?.id, null),
       reason: entry?.reason || "excluded",
     })),
+    skipped,
   };
 }
 
@@ -346,6 +355,40 @@ function buildSkippedSummary(queue_item_id, reason) {
   };
 }
 
+function metadataValue(row = null, key = "") {
+  const metadata = row && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata
+    : {};
+  return metadata[key];
+}
+
+function hasCandidateSnapshot(row = null) {
+  const snapshot = metadataValue(row, "candidate_snapshot");
+  return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot);
+}
+
+function invalidQueueRowReason(row = null) {
+  const normalized = normalizeSendQueueRow(row);
+  const selected_template_id = clean(metadataValue(normalized, "selected_template_id"));
+  if (!selected_template_id) return "missing_selected_template_id";
+  if (!hasCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
+  if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
+  if (!clean(normalized.to_phone_number)) return "missing_to_phone_number";
+  if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
+  return null;
+}
+
+function finalQueueStatusForResult(result = {}) {
+  return clean(result.final_queue_status || result.queue_status) || null;
+}
+
+function withFinalQueueStatus(result = {}, fallback = null) {
+  return {
+    ...result,
+    final_queue_status: finalQueueStatusForResult(result) || fallback || null,
+  };
+}
+
 export async function runSendQueue(
   {
     limit = DEFAULT_BATCH_SIZE,
@@ -354,14 +397,15 @@ export async function runSendQueue(
   } = {},
   deps = {}
 ) {
+  const get_system_flag = deps.getSystemFlag || getSystemFlag;
   // ── System control gate ────────────────────────────────────────────────
   if (!dry_run) {
-    const queue_runner_enabled = await getSystemFlag("queue_runner_enabled");
+    const queue_runner_enabled = await get_system_flag("queue_runner_enabled");
     if (!queue_runner_enabled) {
       info("queue_runner.blocked", { flag: "queue_runner_enabled" });
       return { ok: false, status: 423, ...buildDisabledResponse("queue_runner_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
     }
-    const outbound_sms_enabled = await getSystemFlag("outbound_sms_enabled");
+    const outbound_sms_enabled = await get_system_flag("outbound_sms_enabled");
     if (!outbound_sms_enabled) {
       info("queue_runner.blocked", { flag: "outbound_sms_enabled" });
       return { ok: false, status: 423, ...buildDisabledResponse("outbound_sms_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
@@ -377,11 +421,16 @@ export async function runSendQueue(
     deps.processSendQueueItem || processSendQueueItem;
   const fail_queue_item = deps.failQueueItem || failQueueItem;
   const claim_send_queue_row = deps.claimSendQueueRow || claimSendQueueRow;
+  const pause_invalid_queue_row = deps.pauseInvalidQueueRow || pauseInvalidQueueRow;
+  const pause_max_retries_queue_row = deps.pauseMaxRetriesQueueRow || pauseMaxRetriesQueueRow;
+  const finalize_claimed_send_queue_rows =
+    deps.finalizeClaimedSendQueueRows || finalizeClaimedSendQueueRows;
   const record_system_alert = deps.recordSystemAlert || (async () => ({}));
   const resolve_system_alert = deps.resolveSystemAlert || (async () => ({}));
   const log_info = deps.info || info;
   const log_warn = deps.warn || warn;
   const run_started_at = now;
+  const processing_run_id = clean(deps.processing_run_id) || crypto.randomUUID();
 
   if (!dry_run && build_podio_cooldown_skip_result) {
     const cooldown_skip = await build_podio_cooldown_skip_result({
@@ -420,6 +469,7 @@ export async function runSendQueue(
       limit,
       dry_run,
       run_started_at,
+      processing_run_id,
     },
     onLocked: async (lock) => {
       const lock_meta = lock?.meta || {};
@@ -494,9 +544,11 @@ export async function runSendQueue(
 
       const started_at_ms = Date.now();
       const candidate_summary = await buildQueueCandidates(limit, now, deps);
-      const { deduped: rows, duplicates } = dedupeRowsByOwnerPhoneTouch(
+      const dedupe_result = dedupeRowsByOwnerPhoneTouch(
         candidate_summary.rows
       );
+      let rows = dedupe_result.deduped;
+      const duplicates = dedupe_result.duplicates;
 
       console.log("ROWS LOADED", {
         total_rows_loaded: candidate_summary.total_rows_loaded,
@@ -527,6 +579,134 @@ export async function runSendQueue(
 
       const results = [];
       const skipped_reasons = [];
+      const claimed_rows = [];
+      let invalid_queue_row_count = 0;
+      let finalize_safety_net_count = 0;
+      let stuck_recycled_count = 0;
+      let attempted_count = 0;
+      let claimed_count = 0;
+      let started_count = 0;
+      let processed_count = 0;
+      let sent_count = 0;
+      let failed_count = 0;
+      let blocked_count = 0;
+      let skipped_count = 0;
+      let duplicate_locked_count = 0;
+      let partial = false;
+      let first_failing_queue_item_id = null;
+      let first_failing_reason = null;
+      let first_failure_queue_item_id = null;
+      let first_failure_reason = null;
+
+      if (!dry_run) {
+        const preflight_skipped = normalizeRows(candidate_summary.skipped);
+        for (const skipped of preflight_skipped) {
+          const skipped_row = skipped?.row ? normalizeSendQueueRow(skipped.row) : null;
+          const queue_item_id = getQueueRowId(skipped_row || skipped);
+          const reason = clean(skipped?.reason) || "excluded";
+          if (!skipped_row || !queue_item_id) continue;
+
+          if (reason === "max_retries_reached") {
+            try {
+              const paused = await pause_max_retries_queue_row(skipped_row, reason, {
+                ...deps,
+                now,
+              });
+              skipped_count += 1;
+              blocked_count += 1;
+              skipped_reasons.push(buildSkippedSummary(queue_item_id, reason));
+              results.push(withFinalQueueStatus({
+                ok: false,
+                skipped: true,
+                reason,
+                queue_status: "paused_max_retries",
+                queue_item_id,
+                queue_row_id: queue_item_id,
+              }, paused?.queue_status || "paused_max_retries"));
+            } catch (error) {
+              partial = true;
+              failed_count += 1;
+              log_warn("queue.max_retries_pause_failed", {
+                queue_item_id,
+                reason,
+                message: clean(error?.message) || "pause_max_retries_failed",
+              });
+            }
+          }
+
+          if (["missing_message_body", "missing_to_phone_number"].includes(reason)) {
+            try {
+              const paused = await pause_invalid_queue_row(skipped_row, reason, {
+                ...deps,
+                now,
+              });
+              invalid_queue_row_count += 1;
+              skipped_count += 1;
+              blocked_count += 1;
+              skipped_reasons.push(buildSkippedSummary(queue_item_id, reason));
+              results.push(withFinalQueueStatus({
+                ok: false,
+                skipped: true,
+                reason,
+                queue_status: "paused_invalid_queue_row",
+                queue_item_id,
+                queue_row_id: queue_item_id,
+              }, paused?.queue_status || "paused_invalid_queue_row"));
+            } catch (error) {
+              partial = true;
+              failed_count += 1;
+              log_warn("queue.invalid_row_pause_failed", {
+                queue_item_id,
+                reason,
+                message: clean(error?.message) || "pause_invalid_queue_row_failed",
+              });
+            }
+          }
+        }
+
+        const runnable_rows = [];
+        for (const row of rows) {
+          if (isLegacyQueueRow(row)) {
+            runnable_rows.push(row);
+            continue;
+          }
+
+          const invalid_reason = invalidQueueRowReason(row);
+          if (!invalid_reason) {
+            runnable_rows.push(row);
+            continue;
+          }
+
+          const queue_item_id = getQueueRowId(row);
+          try {
+            const paused = await pause_invalid_queue_row(row, invalid_reason, {
+              ...deps,
+              now,
+            });
+            invalid_queue_row_count += 1;
+            skipped_count += 1;
+            blocked_count += 1;
+            skipped_reasons.push(buildSkippedSummary(queue_item_id, invalid_reason));
+            results.push(withFinalQueueStatus({
+              ok: false,
+              skipped: true,
+              reason: invalid_reason,
+              queue_status: "paused_invalid_queue_row",
+              queue_item_id,
+              queue_row_id: queue_item_id,
+            }, paused?.queue_status || "paused_invalid_queue_row"));
+          } catch (error) {
+            partial = true;
+            failed_count += 1;
+            log_warn("queue.invalid_row_pause_failed", {
+              queue_item_id,
+              reason: invalid_reason,
+              message: clean(error?.message) || "pause_invalid_queue_row_failed",
+            });
+          }
+        }
+        rows = runnable_rows;
+      }
 
       // ── After-hours sweep ───────────────────────────────────────────────
       // Before processing any rows, mark runnable rows that are currently
@@ -568,20 +748,6 @@ export async function runSendQueue(
           warn("queue.after_hours_sweep_failed", { message: sweep_err?.message });
         }
       }
-      let attempted_count = 0;
-      let claimed_count = 0;
-      let started_count = 0;
-      let processed_count = 0;
-      let sent_count = 0;
-      let failed_count = 0;
-      let blocked_count = 0;
-      let skipped_count = 0;
-      let duplicate_locked_count = 0;
-      let partial = false;
-      let first_failing_queue_item_id = null;
-      let first_failing_reason = null;
-      let first_failure_queue_item_id = null;
-      let first_failure_reason = null;
 
       for (const duplicate of duplicates) {
         const queue_item_id = getQueueRowId(duplicate);
@@ -628,6 +794,8 @@ export async function runSendQueue(
           const claim_result = await claim_send_queue_row(queue_row, {
             ...deps,
             now,
+            processing_run_id,
+            run_started_at,
           });
 
           if (!claim_result?.claimed) {
@@ -649,6 +817,12 @@ export async function runSendQueue(
           claimed_count += 1;
           queue_row = claim_result.row || queue_row;
           lock_token = claim_result.lock_token || lock_token;
+          claimed_rows.push({
+            row: queue_row,
+            lock_token,
+            queue_row_id: getQueueRowId(queue_row),
+            reason: "row_process_finally_safety_net",
+          });
         }
 
         try {
@@ -713,6 +887,15 @@ export async function runSendQueue(
 
           results.push({
             ...result,
+            final_queue_status:
+              finalQueueStatusForResult(result) ||
+              (classification.disposition === "sent"
+                ? "sent"
+                : classification.disposition === "failed"
+                ? "failed"
+                : classification.disposition === "blocked"
+                ? lower(result?.queue_status) || "blocked"
+                : null),
             queue_item_id:
               result?.queue_row_id ??
               result?.queue_item_id ??
@@ -778,6 +961,7 @@ export async function runSendQueue(
             first_failure_reason = "queue_processing_exception";
           }
 
+          let fail_result = null;
           try {
             const fail_payload = {
               queue_status: legacy_mode ? "Failed" : "failed",
@@ -786,9 +970,9 @@ export async function runSendQueue(
             };
 
             if (legacy_mode && deps.failQueueItem) {
-              await fail_queue_item(queue_item_id, fail_payload);
+              fail_result = await fail_queue_item(queue_item_id, fail_payload);
             } else {
-              await fail_queue_item(queue_row, fail_payload, {
+              fail_result = await fail_queue_item(queue_row, fail_payload, {
                 ...deps,
                 now,
                 lock_token: lock_token || queue_row?.lock_token || null,
@@ -814,11 +998,62 @@ export async function runSendQueue(
           results.push({
             ok: false,
             sent: false,
-            queue_status: "failed",
+            queue_status: fail_result?.queue_status || "failed",
+            final_queue_status: fail_result?.queue_status || "failed",
             reason: "queue_processing_exception",
             failed_reason: clean(error?.message) || "queue_processing_exception",
             queue_item_id,
             queue_row_id: queue_item_id,
+          });
+        } finally {
+          // Claimed rows are swept after the batch. Keeping this hook explicit
+          // makes every per-row path pass through a finalization checkpoint.
+        }
+      }
+
+      if (!dry_run && claimed_rows.length > 0) {
+        try {
+          const safety = await finalize_claimed_send_queue_rows(claimed_rows, {
+            ...deps,
+            now,
+            processing_run_id,
+            run_started_at,
+          });
+          finalize_safety_net_count = Number(
+            safety?.finalized_count ?? safety?.finalize_safety_net_count ?? 0
+          );
+          stuck_recycled_count = Number(
+            safety?.stuck_recycled_count ?? finalize_safety_net_count
+          );
+
+          if (Array.isArray(safety?.finalized) && safety.finalized.length > 0) {
+            const finalized_by_id = new Map(
+              safety.finalized.map((row) => [String(getQueueRowId(row)), row])
+            );
+            for (const result of results) {
+              const result_id = String(result?.queue_row_id ?? result?.queue_item_id ?? "");
+              const finalized = finalized_by_id.get(result_id);
+              if (finalized) {
+                result.final_queue_status = finalized.queue_status || result.final_queue_status || null;
+                result.finalize_safety_net = true;
+              }
+            }
+          }
+
+          if (safety?.errors?.length) {
+            partial = true;
+            log_warn("queue.finalize_safety_net_errors", {
+              processing_run_id,
+              error_count: safety.errors.length,
+              errors: safety.errors.slice(0, 10),
+            });
+          }
+        } catch (error) {
+          partial = true;
+          log_warn("queue.finalize_safety_net_failed", {
+            processing_run_id,
+            claimed_count: claimed_rows.length,
+            message: clean(error?.message) || "finalize_safety_net_failed",
           });
         }
       }
@@ -839,6 +1074,9 @@ export async function runSendQueue(
         blocked_count,
         skipped_count,
         duplicate_locked_count,
+        invalid_queue_row_count,
+        finalize_safety_net_count,
+        stuck_recycled_count,
         first_failing_queue_item_id,
         first_failing_reason,
         first_failure_queue_item_id,
@@ -852,6 +1090,7 @@ export async function runSendQueue(
         first_10_candidate_item_ids: candidate_summary.first_10_candidate_item_ids,
         first_10_excluded: candidate_summary.first_10_excluded,
         run_started_at,
+        processing_run_id,
         results,
       };
 
@@ -874,6 +1113,9 @@ export async function runSendQueue(
         blocked_count: summary.blocked_count,
         skipped_count: summary.skipped_count,
         duplicate_locked_count: summary.duplicate_locked_count,
+        invalid_queue_row_count: summary.invalid_queue_row_count,
+        finalize_safety_net_count: summary.finalize_safety_net_count,
+        stuck_recycled_count: summary.stuck_recycled_count,
         batch_duration_ms: summary.batch_duration_ms,
         total_rows_loaded: summary.total_rows_loaded,
         due_rows: summary.due_rows,

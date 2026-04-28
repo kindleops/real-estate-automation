@@ -315,6 +315,7 @@ function toFailureResult(queue_row = null, error = null) {
     ok: false,
     sent: false,
     queue_status: "failed",
+    final_queue_status: "failed",
     reason: clean(error?.message) || "queue_processing_failed",
     failed_reason: clean(error?.message) || "queue_processing_failed",
     queue_row_id,
@@ -460,6 +461,7 @@ export async function failQueueItem(queue_row_or_id, error_or_options = {}, deps
           ok: false,
           sent: false,
           queue_status: failed_row?.queue_status || "failed",
+          final_queue_status: failed_row?.queue_status || "failed",
           failed_reason: failure_message,
           queue_row_id,
           queue_item_id: queue_row_id,
@@ -487,6 +489,7 @@ export async function failQueueItem(queue_row_or_id, error_or_options = {}, deps
     ok: false,
     sent: false,
     queue_status: "failed",
+    final_queue_status: "failed",
     failed_reason: failure_message,
     queue_row_id,
     queue_item_id: queue_row_id,
@@ -1135,6 +1138,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
         skipped: true,
         reason: "outside_contact_window",
         queue_status: "queued",
+        final_queue_status: "queued",
         queue_row_id,
         queue_item_id: queue_row_id,
       };
@@ -1202,6 +1206,12 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
           locked_at: null,
           lock_token: null,
           updated_at: now,
+          metadata: {
+            ...(queue_row.metadata ?? {}),
+            skip_reason: "missing_seller_first_name",
+            final_queue_status: "paused_name_missing",
+            finalized_at: now,
+          },
         })
         .eq("id", queue_row_id);
 
@@ -1217,6 +1227,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
         skipped: true,
         reason: "missing_seller_first_name",
         queue_status: "paused_name_missing",
+        final_queue_status: "paused_name_missing",
         queue_row_id,
         queue_item_id: queue_row_id,
       };
@@ -1248,8 +1259,11 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
           updated_at: now,
           metadata: {
             ...(queue_row.metadata ?? {}),
+            skip_reason: "blank_greeting_before_send",
+            final_queue_status: "paused_name_missing",
             paused_reason: "blocked_blank_greeting_before_send",
             blocked_by: "process_send_queue_guard",
+            finalized_at: now,
             blocked_at: now,
           },
         })
@@ -1268,6 +1282,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
         skipped: true,
         reason: "blank_greeting_before_send",
         queue_status: "paused_name_missing",
+        final_queue_status: "paused_name_missing",
         queue_row_id,
         queue_item_id: queue_row_id,
       };
@@ -1401,6 +1416,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       partial: bookkeeping_errors.length > 0,
       sent: true,
       queue_status: "sent",
+      final_queue_status: "sent",
       queue_row_id,
       queue_item_id: queue_row_id,
       provider_message_id: provider_message_sid,
@@ -1431,8 +1447,11 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
             updated_at: now,
             metadata: {
               ...(queue_row.metadata ?? {}),
+              skip_reason: "blank_greeting_textgrid_guard",
+              final_queue_status: "paused_name_missing",
               paused_reason: "blocked_blank_greeting_before_send",
               blocked_by: "textgrid_send_guard",
+              finalized_at: now,
               blocked_at: now,
             },
           })
@@ -1445,6 +1464,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
         skipped: true,
         reason: "blank_greeting_textgrid_guard",
         queue_status: "paused_name_missing",
+        final_queue_status: "paused_name_missing",
         queue_row_id,
         queue_item_id: queue_row_id,
       };
@@ -1485,6 +1505,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       return {
         ...toFailureResult(queue_row, error),
         queue_status: failed_row?.queue_status || "failed",
+        final_queue_status: failed_row?.queue_status || "failed",
       };
     } catch (update_error) {
       warn("queue.send.fail_update_failed", {
