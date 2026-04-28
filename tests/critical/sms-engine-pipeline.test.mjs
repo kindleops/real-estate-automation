@@ -340,6 +340,27 @@ test("personalization: placeholders fill correctly", () => {
   assert.deepEqual(result.placeholders_used.sort(), ["agent_name", "property_address", "seller_first_name"]);
 });
 
+test("personalization: agent aliases render first name only", () => {
+  const result = personalizeTemplate(
+    "{{agent_name}}/{{agent_first_name}}/{{sms_agent_name}}/{{sender_name}}/{{rep_name}}",
+    {
+      agent_name_raw: "Andre Williams",
+      agent_name: "Andre Williams",
+      agent_first_name: "Andre Williams",
+      sms_agent_name: "Andre Williams",
+      sender_name: "Andre Williams",
+      rep_name: "Andre Williams",
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.text, "Andre/Andre/Andre/Andre/Andre");
+  assert.deepEqual(
+    result.placeholders_used.sort(),
+    ["agent_first_name", "agent_name", "rep_name", "sender_name", "sms_agent_name"]
+  );
+});
+
 test("personalization: unresolved placeholders block send", () => {
   const result = personalizeTemplate(
     "Hi {{seller_first_name}} about {{property_address}} for {{offer_price}}.",

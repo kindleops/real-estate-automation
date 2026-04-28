@@ -1769,7 +1769,7 @@ test("S1 ownership_check English renders first-name-only agent alias", async () 
       touch_number: 1,
       template_use_case: "ownership_check",
       stage_code: "S1",
-      agent_persona: "Helen Crawford",
+      agent_persona: "Andre Williams",
     }),
     {},
     {
@@ -1788,9 +1788,15 @@ test("S1 ownership_check English renders first-name-only agent alias", async () 
   );
 
   assert.equal(result.ok, true);
-  assert.equal(result.rendered_message_body, "Hi, this is Helen");
-  assert.equal(result.variable_payload_preview.agent_first_name, "Helen");
-  assert.equal(result.variable_payload_preview.agent_name, "Helen");
+  assert.equal(result.rendered_message_body, "Hi, this is Andre");
+  assert.equal(result.variable_payload_preview.agent_first_name, "Andre");
+  assert.equal(result.variable_payload_preview.agent_name, "Andre");
+  assert.equal(result.variable_payload_preview.sms_agent_name, "Andre");
+  assert.equal(result.variable_payload_preview.sender_name, "Andre");
+  assert.equal(result.variable_payload_preview.rep_name, "Andre");
+  assert.equal(result.variable_payload_preview.agent_name_raw, "Andre Williams");
+  assert.equal(result.variable_payload_preview.agent_full_name_raw, "Andre Williams");
+  assert.equal(result.variable_payload_preview.selected_agent_display_name, "Andre Williams");
 });
 
 test("S1 ownership_check Spanish renders first-name-only sender alias", async () => {
@@ -1857,6 +1863,39 @@ test("S1 ownership_check Portuguese renders first-name-only sms_agent_name alias
   assert.equal(result.rendered_message_body, "Ana aqui");
 });
 
+test("S1 ownership_check renders first-name-only rep_name alias", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      display_name: "Owner Agent Rep",
+      property_address_full: "60 Oak St, Tampa, FL 33602",
+      property_address_state: "FL",
+      touch_number: 1,
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      agent_persona: "Helen Marie Carter",
+    }),
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-agent-rep",
+          template_id: "ownership-s1-agent-rep",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+          is_active: true,
+          template_body: "{rep_name} checking on {property_address}",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.rendered_message_body, "Helen checking on 60 Oak St");
+  assert.equal(result.variable_payload_preview.rep_name, "Helen");
+  assert.equal(result.variable_payload_preview.agent_name_raw, "Helen Marie Carter");
+});
+
 test("S1 ownership_check Mandarin renders first token for agent aliases", async () => {
   const result = await renderOutboundTemplate(
     normalizeCandidateRow({
@@ -1899,7 +1938,7 @@ test("S1 ownership_check blocks full agent name rendering and reports diagnostic
       touch_number: 1,
       template_use_case: "ownership_check",
       stage_code: "S1",
-      agent_persona: "Alejandro Vega",
+      agent_persona: "Andre Williams",
     }),
     {},
     {
@@ -1911,7 +1950,7 @@ test("S1 ownership_check blocks full agent name rendering and reports diagnostic
           stage_code: "S1",
           language: "Spanish",
           is_active: true,
-          template_body: "Alejandro Vega aqui para ayudarte",
+          template_body: "Andre Williams aqui para ayudarte",
         },
       ],
     }
@@ -1920,9 +1959,42 @@ test("S1 ownership_check blocks full agent name rendering and reports diagnostic
   assert.equal(result.ok, false);
   assert.equal(result.reason_code, REASON_CODES.TEMPLATE_RENDER_FAILED);
   assert.equal(result.reason, "agent_full_name_rendered");
-  assert.equal(result.agent_name_raw, "Alejandro Vega");
-  assert.equal(result.agent_first_name, "Alejandro");
-  assert.ok(result.rendered_preview.includes("Alejandro Vega"));
+  assert.equal(result.agent_name_raw, "Andre Williams");
+  assert.equal(result.agent_first_name, "Andre");
+  assert.ok(result.rendered_preview.includes("Andre Williams"));
+});
+
+test("S1 ownership_check blocks raw agent name placeholders", async () => {
+  const result = await renderOutboundTemplate(
+    normalizeCandidateRow({
+      display_name: "Owner Agent Raw Gate",
+      property_address_full: "102 Gate St, Austin, TX 78701",
+      property_address_state: "TX",
+      touch_number: 1,
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      agent_persona: "Andre Williams",
+    }),
+    {},
+    {
+      fetchSmsTemplates: async () => [
+        {
+          id: "tpl-agent-raw-name",
+          template_id: "ownership-s1-agent-raw-name",
+          use_case: "ownership_check",
+          stage_code: "S1",
+          language: "English",
+          is_active: true,
+          template_body: "{agent_name_raw} checking on {property_address}",
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason_code, REASON_CODES.TEMPLATE_RENDER_FAILED);
+  assert.equal(result.reason, "agent_full_name_rendered");
+  assert.ok(result.rendered_preview.includes("Andre Williams"));
 });
 
 test("Template rendering strips HTML content", async () => {

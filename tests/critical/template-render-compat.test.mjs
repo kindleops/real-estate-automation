@@ -39,6 +39,21 @@ test("renderTemplate still replaces double-brace placeholders", () => {
   );
 });
 
+test("renderTemplate agent aliases render first name only", () => {
+  const result = renderTemplate({
+    template_text:
+      "{{agent_name}}/{{agent_first_name}}/{{sms_agent_name}}/{{sender_name}}/{{rep_name}}",
+    context: {
+      summary: {
+        agent_name: "Helen Marie Carter",
+        agent_first_name: "Helen Marie Carter",
+      },
+    },
+  });
+
+  assert.equal(result.rendered_text, "Helen/Helen/Helen/Helen/Helen");
+});
+
 test("renderTemplate maps legacy Stage 1 first_name and street_address placeholders to seller data", () => {
   const result = renderTemplate({
     template_text:

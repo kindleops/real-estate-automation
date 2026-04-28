@@ -90,6 +90,16 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function firstNameOnly(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw
+    .replace(/\s+/g, " ")
+    .split(" ")[0]
+    .replace(/[^\p{L}\p{M}'-]/gu, "")
+    .trim();
+}
+
 // Fix malformed punctuation spacing that can arise from template rendering:
 //   "Hi Jose ,"  → "Hi Jose,"
 //   "this is Ricky ."  → "this is Ricky."
@@ -694,11 +704,25 @@ export async function buildSendQueueItem({
     getTextValue(property_item, "title", "") ||
     "";
 
-  const agent_name =
+  const agent_name_raw =
+    context.summary?.agent_name_raw ||
+    context.summary?.agent_full_name_raw ||
+    context.summary?.selected_agent_display_name ||
     context.summary?.agent_name ||
+    context.summary?.agent_first_name ||
+    context.summary?.sms_agent_name ||
+    context.summary?.sender_name ||
+    context.summary?.rep_name ||
     getTextValue(agent_item, "title", "") ||
     getTextValue(agent_item, "agent-name", "") ||
     "";
+  const agent_name = firstNameOnly(
+    context.summary?.agent_first_name ||
+      context.summary?.sms_agent_name ||
+      context.summary?.sender_name ||
+      context.summary?.rep_name ||
+      agent_name_raw
+  );
 
   const market_name =
     context.summary?.market_name ||
@@ -1110,6 +1134,11 @@ export async function buildSendQueueItem({
         phone_hidden: phone_hidden || null,
         raw_phone_number: raw_phone_number || null,
         property_address: property_address || null,
+        agent_name: agent_name || null,
+        agent_first_name: agent_name || null,
+        agent_name_raw: agent_name_raw || null,
+        agent_full_name_raw: agent_name_raw || null,
+        selected_agent_display_name: agent_name_raw || null,
         selected_template_source: selected_template_source ?? null,
         selected_template_item_id: template_reference.selected_template_item_id ?? null,
         selected_template_id: template_reference.selected_template_id ?? null,

@@ -597,10 +597,18 @@ function deriveSellerFirstName(candidate = {}) {
   return "";
 }
 
-function getFirstName(value = "") {
-  const normalized = clean(String(value || "").replace(/\s+/g, " "));
-  if (!normalized) return "";
-  return clean(normalized.split(/\s+/)[0] || "");
+function firstNameOnly(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw
+    .replace(/\s+/g, " ")
+    .split(" ")[0]
+    .replace(/[^\p{L}\p{M}'-]/gu, "")
+    .trim();
+}
+
+function hasMultipleNameTokens(value) {
+  return clean(value).replace(/\s+/g, " ").split(" ").filter(Boolean).length >= 2;
 }
 
 function parseCityStateFromAddress(address = "") {
@@ -775,6 +783,9 @@ function buildTemplateVariablePayload(candidate = {}) {
   const agent_name_raw = clean(
     pick(
       candidate.agent_persona,
+      candidate.agent_name_raw,
+      candidate.agent_full_name_raw,
+      candidate.selected_agent_display_name,
       candidate.agent_name,
       candidate.sms_agent_name,
       candidate.assigned_agent_name,
@@ -788,7 +799,15 @@ function buildTemplateVariablePayload(candidate = {}) {
       "Alex"
     )
   ) || "Alex";
-  const agent_first_name = getFirstName(agent_name_raw) || "Alex";
+  const agent_first_name = firstNameOnly(
+    pick(
+      candidate.agent_first_name,
+      candidate.sms_agent_first_name,
+      candidate.raw?.agent_first_name,
+      candidate.raw?.sms_agent_first_name,
+      agent_name_raw
+    )
+  ) || "Alex";
 
   const payload = {
     seller_first_name: seller_identity.seller_first_name || "",
@@ -822,7 +841,10 @@ function buildTemplateVariablePayload(candidate = {}) {
     sender_name: agent_first_name,
     sms_agent_name: agent_first_name,
     acquisition_agent_name: agent_first_name,
+    rep_name: agent_first_name,
     agent_name_raw,
+    agent_full_name_raw: agent_name_raw,
+    selected_agent_display_name: agent_name_raw,
     language,
   };
 
@@ -2071,6 +2093,40 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
   variable_payload.seller_full_name = seller_identity.seller_full_name || "";
   variable_payload.seller_name_source = seller_identity.seller_name_source;
   variable_payload.seller_name_missing = seller_identity.seller_name_missing;
+  const raw_agent_name = clean(
+    pick(
+      variable_payload.agent_name_raw,
+      variable_payload.agent_full_name_raw,
+      variable_payload.selected_agent_display_name,
+      variable_payload.agent_name,
+      variable_payload.agent_first_name,
+      variable_payload.sms_agent_name,
+      variable_payload.sender_name,
+      variable_payload.rep_name,
+      variable_payload.acquisition_agent_name,
+      "Alex"
+    )
+  ) || "Alex";
+  const agent_first_name_safe = firstNameOnly(
+    pick(
+      variable_payload.agent_first_name,
+      variable_payload.agent_name,
+      variable_payload.sms_agent_name,
+      variable_payload.sender_name,
+      variable_payload.rep_name,
+      variable_payload.acquisition_agent_name,
+      raw_agent_name
+    )
+  ) || "Alex";
+  variable_payload.agent_name = agent_first_name_safe;
+  variable_payload.agent_first_name = agent_first_name_safe;
+  variable_payload.sms_agent_name = agent_first_name_safe;
+  variable_payload.sender_name = agent_first_name_safe;
+  variable_payload.rep_name = agent_first_name_safe;
+  variable_payload.acquisition_agent_name = agent_first_name_safe;
+  variable_payload.agent_name_raw = raw_agent_name;
+  variable_payload.agent_full_name_raw = raw_agent_name;
+  variable_payload.selected_agent_display_name = raw_agent_name;
   const rendered = applyTemplatePlaceholders(rewritten_source_body, variable_payload);
   const normalized_rendered = clean(decodeBasicHtmlEntities(stripHtml(rendered.rendered_text || "")));
 
@@ -2228,10 +2284,9 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
 
   const agent_name_raw = clean(variable_payload.agent_name_raw);
   const agent_first_name = clean(variable_payload.agent_first_name);
-  const has_full_agent_name = /\s+/.test(agent_name_raw);
+  const has_full_agent_name = hasMultipleNameTokens(agent_name_raw);
   const rendered_lower = lower(normalized_rendered);
   if (
-    isColdOutboundS1OwnershipCheck(selector) &&
     has_full_agent_name &&
     rendered_lower.includes(lower(agent_name_raw))
   ) {
@@ -2310,6 +2365,34 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
   const scheduled_for = options.scheduled_for || new Date().toISOString();
   const queue_status = new Date(scheduled_for).getTime() > Date.now() ? "scheduled" : "queued";
   const seller_identity = resolveSellerIdentity(candidate);
+  const agent_name_raw = clean(
+    pick(
+      candidate.agent_persona,
+      candidate.agent_name_raw,
+      candidate.agent_full_name_raw,
+      candidate.selected_agent_display_name,
+      candidate.agent_name,
+      candidate.sms_agent_name,
+      candidate.assigned_agent_name,
+      candidate.raw?.agent_persona,
+      candidate.raw?.agent_name,
+      candidate.raw?.sms_agent_name,
+      candidate.raw?.assigned_agent_name,
+      candidate.raw?.acquisition_agent_name,
+      candidate.raw?.agent_family,
+      candidate.agent_family,
+      ""
+    )
+  );
+  const agent_first_name = firstNameOnly(
+    pick(
+      candidate.agent_first_name,
+      candidate.sms_agent_first_name,
+      candidate.raw?.agent_first_name,
+      candidate.raw?.sms_agent_first_name,
+      agent_name_raw
+    )
+  );
 
   const payload = {
     queue_key,
@@ -2347,6 +2430,11 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
       selection_reason: options.selection_reason,
       routing_allowed: options.routing_allowed,
       routing_block_reason: options.routing_block_reason,
+      agent_name: agent_first_name || null,
+      agent_first_name: agent_first_name || null,
+      agent_name_raw: agent_name_raw || null,
+      agent_full_name_raw: agent_name_raw || null,
+      selected_agent_display_name: agent_name_raw || null,
       seller_identity,
       candidate_snapshot: {
         master_owner_id: candidate.master_owner_id,
@@ -2357,6 +2445,11 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
         seller_market: candidate.market,
         seller_state: candidate.state,
         touch_number: candidate.touch_number,
+        agent_name: agent_first_name || null,
+        agent_first_name: agent_first_name || null,
+        agent_name_raw: agent_name_raw || null,
+        agent_full_name_raw: agent_name_raw || null,
+        selected_agent_display_name: agent_name_raw || null,
         // Seller identity fields — required for re-render and audit.
         seller_first_name: clean(seller_identity.seller_first_name) || null,
         seller_full_name: clean(seller_identity.seller_full_name || candidate.seller_full_name || candidate.phone_full_name) || null,

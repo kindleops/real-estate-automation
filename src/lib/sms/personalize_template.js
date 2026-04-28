@@ -14,6 +14,10 @@ const PLACEHOLDER_PATTERN = /\{\{([^}]+)\}\}/g;
 const KNOWN_PLACEHOLDERS = Object.freeze([
   "seller_first_name",
   "agent_name",
+  "agent_first_name",
+  "sms_agent_name",
+  "sender_name",
+  "rep_name",
   "property_address",
   "property_city",
   "city",
@@ -66,6 +70,16 @@ function cleanText(value) {
   return sanitizeSmsTextValue(value) || null;
 }
 
+function firstNameOnly(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw
+    .replace(/\s+/g, " ")
+    .split(" ")[0]
+    .replace(/[^\p{L}\p{M}'-]/gu, "")
+    .trim();
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // SMART PUNCTUATION NORMALIZATION
 // ══════════════════════════════════════════════════════════════════════════
@@ -89,6 +103,10 @@ function normalizePunctuation(text) {
  * @param {object} context
  * @param {string} [context.seller_first_name]
  * @param {string} [context.agent_name]
+ * @param {string} [context.agent_first_name]
+ * @param {string} [context.sms_agent_name]
+ * @param {string} [context.sender_name]
+ * @param {string} [context.rep_name]
  * @param {string} [context.property_address]
  * @param {string} [context.property_city]
  * @param {string} [context.city] - Alias for property_city
@@ -100,9 +118,24 @@ function normalizePunctuation(text) {
  */
 function buildValueMap(context = {}) {
   const safe_context = sanitizeSmsTextMap(context);
+  const agent_name_raw = cleanText(
+    safe_context.agent_first_name ||
+      safe_context.sms_agent_name ||
+      safe_context.sender_name ||
+      safe_context.rep_name ||
+      safe_context.agent_name ||
+      safe_context.agent_name_raw ||
+      safe_context.agent_full_name_raw ||
+      safe_context.selected_agent_display_name
+  );
+  const agent_first_name = cleanText(firstNameOnly(agent_name_raw));
   const map = new Map();
   map.set("seller_first_name", cleanText(safe_context.seller_first_name));
-  map.set("agent_name", cleanText(safe_context.agent_name));
+  map.set("agent_name", agent_first_name);
+  map.set("agent_first_name", agent_first_name);
+  map.set("sms_agent_name", agent_first_name);
+  map.set("sender_name", agent_first_name);
+  map.set("rep_name", agent_first_name);
   map.set("property_address", cleanText(safe_context.property_address));
   map.set(
     "property_city",

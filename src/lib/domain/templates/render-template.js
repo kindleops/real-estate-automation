@@ -20,6 +20,9 @@ const LEGACY_PLACEHOLDER_ALIASES = Object.freeze({
   owner_name: "seller_first_name",
   seller_name: "seller_first_name",
   agent_name: "agent_first_name",
+  sms_agent_name: "agent_first_name",
+  sender_name: "agent_first_name",
+  rep_name: "agent_first_name",
   market: "property_city",
   city: "property_city",
   street_address: "property_address",
@@ -72,6 +75,16 @@ function firstNonEmpty(...values) {
   return "";
 }
 
+function firstNameOnly(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw
+    .replace(/\s+/g, " ")
+    .split(" ")[0]
+    .replace(/[^\p{L}\p{M}'-]/gu, "")
+    .trim();
+}
+
 export function buildVariableMap(context = {}, overrides = {}) {
   const summary = sanitizeSmsTextMap(context?.summary || {});
   const safe_overrides = sanitizeSmsTextMap(overrides);
@@ -109,16 +122,26 @@ export function buildVariableMap(context = {}, overrides = {}) {
     summary.property_zip
   );
 
-  const agent_name = firstNonEmpty(
+  const agent_name_raw = firstNonEmpty(
+    safe_overrides.agent_first_name,
+    safe_overrides.sms_agent_name,
+    safe_overrides.sender_name,
+    safe_overrides.rep_name,
     safe_overrides.agent_name,
-    summary.agent_name
+    summary.agent_first_name,
+    summary.sms_agent_name,
+    summary.sender_name,
+    summary.rep_name,
+    summary.agent_name,
+    safe_overrides.agent_name_raw,
+    safe_overrides.agent_full_name_raw,
+    safe_overrides.selected_agent_display_name,
+    summary.agent_name_raw,
+    summary.agent_full_name_raw,
+    summary.selected_agent_display_name
   );
 
-  const agent_first_name = firstNonEmpty(
-    safe_overrides.agent_first_name,
-    summary.agent_first_name,
-    agent_name ? agent_name.split(" ")[0] : ""
-  );
+  const agent_first_name = firstNameOnly(agent_name_raw);
 
   const property_city = firstNonEmpty(
     safe_overrides.property_city,
@@ -191,6 +214,9 @@ export function buildVariableMap(context = {}, overrides = {}) {
     owner_name: owner_name || seller_first_name,
     seller_name: seller_first_name,
     agent_name: agent_first_name,
+    sms_agent_name: agent_first_name,
+    sender_name: agent_first_name,
+    rep_name: agent_first_name,
     street_address: property_address,
     city: property_city,
     market: property_city,
