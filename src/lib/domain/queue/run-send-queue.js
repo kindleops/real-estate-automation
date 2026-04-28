@@ -246,6 +246,10 @@ async function buildLegacyCandidateSummary(limit = 50, now = nowIso(), deps = {}
     due_rows: due_rows.length,
     future_rows: future_rows.length,
     outside_window_rows: 0,
+    preclaim_outside_window_excluded_count: 0,
+    preclaim_retry_pending_excluded_count: 0,
+    preclaim_scanned_count: loaded_rows.length,
+    eligible_claim_count: runnable_rows.length,
     first_10_candidate_item_ids: runnable_rows
       .map((row) => getQueueRowId(row))
       .filter(Boolean)
@@ -278,13 +282,21 @@ async function buildSupabaseCandidateSummary(limit = 50, now = nowIso(), deps = 
     future_rows: skipped.filter((entry) =>
       ["scheduled_for_in_future", "next_retry_pending"].includes(entry?.reason)
     ).length,
-    outside_window_rows: 0,
+    outside_window_rows: Number(loaded.preclaim_outside_window_excluded_count || 0),
+    preclaim_outside_window_excluded_count: Number(
+      loaded.preclaim_outside_window_excluded_count || 0
+    ),
+    preclaim_retry_pending_excluded_count: Number(
+      loaded.preclaim_retry_pending_excluded_count || 0
+    ),
+    preclaim_scanned_count: Number(loaded.preclaim_scanned_count || raw_rows.length),
+    eligible_claim_count: Number(loaded.eligible_claim_count || rows.length),
     first_10_candidate_item_ids: rows
       .map((row) => getQueueRowId(row))
       .filter(Boolean)
       .slice(0, 10),
     first_10_excluded: skipped.slice(0, 10).map((entry) => ({
-      item_id: asPositiveInteger(entry?.id, null),
+      item_id: getQueueRowId(entry?.row || entry),
       reason: entry?.reason || "excluded",
     })),
     skipped,
@@ -553,6 +565,11 @@ export async function runSendQueue(
       console.log("ROWS LOADED", {
         total_rows_loaded: candidate_summary.total_rows_loaded,
         runnable_count: rows.length,
+        preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
+        preclaim_outside_window_excluded_count:
+          candidate_summary.preclaim_outside_window_excluded_count,
+        preclaim_retry_pending_excluded_count:
+          candidate_summary.preclaim_retry_pending_excluded_count,
       });
       console.log("RAW ROWS", candidate_summary.raw_rows);
 
@@ -562,6 +579,12 @@ export async function runSendQueue(
         due_rows: candidate_summary.due_rows,
         future_rows: candidate_summary.future_rows,
         runnable_count: rows.length,
+        preclaim_outside_window_excluded_count:
+          candidate_summary.preclaim_outside_window_excluded_count,
+        preclaim_retry_pending_excluded_count:
+          candidate_summary.preclaim_retry_pending_excluded_count,
+        preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
+        eligible_claim_count: candidate_summary.eligible_claim_count,
         now_utc: now,
         first_10_candidate_item_ids: candidate_summary.first_10_candidate_item_ids,
         first_10_filter_excluded: candidate_summary.first_10_excluded,
@@ -1077,6 +1100,12 @@ export async function runSendQueue(
         invalid_queue_row_count,
         finalize_safety_net_count,
         stuck_recycled_count,
+        preclaim_outside_window_excluded_count:
+          candidate_summary.preclaim_outside_window_excluded_count,
+        preclaim_retry_pending_excluded_count:
+          candidate_summary.preclaim_retry_pending_excluded_count,
+        preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
+        eligible_claim_count: rows.length,
         first_failing_queue_item_id,
         first_failing_reason,
         first_failure_queue_item_id,
@@ -1116,6 +1145,12 @@ export async function runSendQueue(
         invalid_queue_row_count: summary.invalid_queue_row_count,
         finalize_safety_net_count: summary.finalize_safety_net_count,
         stuck_recycled_count: summary.stuck_recycled_count,
+        preclaim_outside_window_excluded_count:
+          summary.preclaim_outside_window_excluded_count,
+        preclaim_retry_pending_excluded_count:
+          summary.preclaim_retry_pending_excluded_count,
+        preclaim_scanned_count: summary.preclaim_scanned_count,
+        eligible_claim_count: summary.eligible_claim_count,
         batch_duration_ms: summary.batch_duration_ms,
         total_rows_loaded: summary.total_rows_loaded,
         due_rows: summary.due_rows,

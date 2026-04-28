@@ -300,9 +300,31 @@ export function sortQueuedRows(rows = []) {
   });
 }
 
+function resolvePreclaimScanLimit(limit = 50, deps = {}) {
+  const requested_limit = Math.max(1, Math.trunc(asNumber(limit, 50)));
+  const requested_scan_cap = Math.trunc(
+    asNumber(
+      deps.preclaim_scan_cap ??
+        deps.preclaimScanCap ??
+        deps.scan_cap ??
+        deps.scanLimit,
+      0
+    )
+  );
+
+  if (requested_scan_cap > 0) {
+    return Math.max(requested_limit, Math.min(requested_scan_cap, 5000));
+  }
+
+  return Math.min(Math.max(requested_limit * 20, 250), 1000);
+}
+
 export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   const supabase = getSupabase(deps);
   const now = deps.now || nowIso();
+  const requested_limit = Math.max(1, Math.trunc(asNumber(limit, 50)));
+  const preclaim_scan_limit = resolvePreclaimScanLimit(requested_limit, deps);
+  const evaluate_contact_window = deps.evaluateContactWindow || evaluateContactWindow;
 
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
@@ -312,32 +334,58 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
     .not("is_locked", "is", "true")
     .order("send_priority", { ascending: false, nullsFirst: false })
     .order("scheduled_for", { ascending: true, nullsFirst: true })
-    .limit(Math.max(limit * 4, 100));
+    .limit(preclaim_scan_limit);
 
   if (error) throw error;
 
   const raw_rows = Array.isArray(data) ? data : [];
   const runnable = [];
   const skipped = [];
+  let preclaim_scanned_count = 0;
+  let preclaim_outside_window_excluded_count = 0;
+  let preclaim_retry_pending_excluded_count = 0;
 
   for (const row of sortQueuedRows(raw_rows)) {
+    preclaim_scanned_count += 1;
     const decision = shouldRunSendQueueRow(row, now);
-    if (decision.ok) {
-      runnable.push(decision.row);
-    } else {
+    if (!decision.ok) {
+      if (decision.reason === "next_retry_pending") {
+        preclaim_retry_pending_excluded_count += 1;
+      }
       skipped.push({
         id: decision.row?.id || null,
         reason: decision.reason,
         row: decision.row,
       });
+      continue;
     }
+
+    const contact_window = evaluate_contact_window(decision.row, { ...deps, now });
+    if (contact_window && contact_window.allowed === false) {
+      preclaim_outside_window_excluded_count += 1;
+      skipped.push({
+        id: decision.row?.id || null,
+        reason: contact_window.reason || "outside_contact_window",
+        row: decision.row,
+        contact_window,
+      });
+      continue;
+    }
+
+    runnable.push(decision.row);
+    if (runnable.length >= requested_limit) break;
   }
 
   return {
-    rows: runnable.slice(0, limit),
+    rows: runnable.slice(0, requested_limit),
     raw_rows,
     skipped,
     now,
+    preclaim_outside_window_excluded_count,
+    preclaim_retry_pending_excluded_count,
+    preclaim_scanned_count,
+    eligible_claim_count: Math.min(runnable.length, requested_limit),
+    preclaim_scan_limit,
   };
 }
 

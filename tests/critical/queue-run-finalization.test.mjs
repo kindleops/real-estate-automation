@@ -163,6 +163,127 @@ function makeHarness(initial_rows = [], overrides = {}) {
   };
 }
 
+function makeSelectionSupabase(rows = []) {
+  return {
+    from() {
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        not() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return Promise.resolve({
+            data: rows,
+            error: null,
+          });
+        },
+      };
+      return query;
+    },
+  };
+}
+
+function makePreclaimHarness(initial_rows = [], overrides = {}) {
+  const rows = new Map(initial_rows.map((row) => [String(row.id), { ...row, metadata: { ...(row.metadata || {}) } }]));
+  const claimed_ids = [];
+  const processed_ids = [];
+
+  const deps = {
+    getSystemFlag: async () => true,
+    withRunLock: async ({ fn }) => fn(),
+    info: () => {},
+    warn: () => {},
+    recordSystemAlert: async () => ({}),
+    resolveSystemAlert: async () => ({}),
+    supabase: makeSelectionSupabase([...rows.values()]),
+    evaluateContactWindow: (row) => {
+      if (row?.metadata?.window_state === "outside") {
+        return {
+          allowed: false,
+          reason: "outside_contact_window",
+          timezone: "America/Chicago",
+          valid_window: true,
+        };
+      }
+      return {
+        allowed: true,
+        reason: "inside_contact_window",
+        timezone: "America/Chicago",
+        valid_window: true,
+      };
+    },
+    claimSendQueueRow: async (row, options = {}) => {
+      const current = rows.get(String(row.id));
+      if (!current || current.queue_status !== "queued") {
+        return { claimed: false, reason: "queue_item_claim_conflict", row };
+      }
+      const lock_token = `lock-${row.id}`;
+      Object.assign(current, {
+        queue_status: "sending",
+        is_locked: true,
+        lock_token,
+        locked_at: options.now,
+        metadata: {
+          ...(current.metadata || {}),
+          processing_run_id: options.processing_run_id,
+          run_started_at: options.run_started_at,
+          claimed_at: options.now,
+        },
+      });
+      claimed_ids.push(current.id);
+      return {
+        claimed: true,
+        row: current,
+        lock_token,
+      };
+    },
+    processSendQueueItem: async (row) => {
+      const current = rows.get(String(row.id));
+      Object.assign(current, {
+        queue_status: "sent",
+        is_locked: false,
+        lock_token: null,
+        sent_at: NOW,
+      });
+      processed_ids.push(current.id);
+      return {
+        ok: true,
+        sent: true,
+        queue_status: "sent",
+        final_queue_status: "sent",
+        provider_message_id: `SM-${row.id}`,
+        queue_row_id: row.id,
+      };
+    },
+    finalizeClaimedSendQueueRows: async () => ({
+      ok: true,
+      finalized_count: 0,
+      stuck_recycled_count: 0,
+      finalized: [],
+      errors: [],
+    }),
+    ...overrides,
+  };
+
+  return {
+    rows,
+    deps,
+    claimed_ids,
+    processed_ids,
+  };
+}
+
 test("outside contact window claimed row does not remain sending", async () => {
   const row = makeRow(9001);
   const harness = makeHarness([row], {
@@ -288,4 +409,72 @@ test("batch of 25 claimed rows leaves zero rows in sending", async () => {
   assert.equal(result.finalize_safety_net_count, 20);
   assert.equal(result.stuck_recycled_count, 20);
   assert.equal(sending_rows.length, 0);
+});
+
+test("preclaim selection skips outside-window rows and claims later eligible rows", async () => {
+  const outside_rows = Array.from({ length: 30 }, (_, index) =>
+    makeRow(9200 + index, {
+      metadata: {
+        selected_template_id: "200194",
+        candidate_snapshot: {
+          master_owner_id: "mo_test",
+          property_id: "prop_test",
+        },
+        window_state: "outside",
+      },
+    })
+  );
+  const eligible_rows = Array.from({ length: 20 }, (_, index) => makeRow(9300 + index));
+  const harness = makePreclaimHarness([...outside_rows, ...eligible_rows]);
+
+  const result = await runSendQueue({ limit: 20, now: NOW }, harness.deps);
+
+  assert.equal(result.preclaim_scanned_count, 50);
+  assert.equal(result.preclaim_outside_window_excluded_count, 30);
+  assert.equal(result.eligible_claim_count, 20);
+  assert.equal(result.attempted_count, 20);
+  assert.equal(result.claimed_count, 20);
+  assert.deepEqual(harness.claimed_ids, eligible_rows.map((row) => row.id));
+  assert.equal([...harness.rows.values()].filter((row) => row.metadata?.window_state === "outside" && row.queue_status === "queued").length, 30);
+});
+
+test("preclaim selection does not claim next_retry_pending rows", async () => {
+  const retry_pending = makeRow(9401, {
+    next_retry_at: "2026-04-28T16:00:00.000Z",
+  });
+  const eligible = makeRow(9402);
+  const harness = makePreclaimHarness([retry_pending, eligible]);
+
+  const result = await runSendQueue({ limit: 2, now: NOW }, harness.deps);
+
+  assert.equal(result.preclaim_retry_pending_excluded_count, 1);
+  assert.equal(result.eligible_claim_count, 1);
+  assert.equal(result.claimed_count, 1);
+  assert.deepEqual(harness.claimed_ids, [9402]);
+  assert.equal(harness.rows.get("9401").queue_status, "queued");
+});
+
+test("outside-window rows do not increase claimed_count", async () => {
+  const outside_rows = Array.from({ length: 3 }, (_, index) =>
+    makeRow(9500 + index, {
+      metadata: {
+        selected_template_id: "200194",
+        candidate_snapshot: {
+          master_owner_id: "mo_test",
+          property_id: "prop_test",
+        },
+        window_state: "outside",
+      },
+    })
+  );
+  const harness = makePreclaimHarness(outside_rows);
+
+  const result = await runSendQueue({ limit: 3, now: NOW }, harness.deps);
+
+  assert.equal(result.preclaim_outside_window_excluded_count, 3);
+  assert.equal(result.eligible_claim_count, 0);
+  assert.equal(result.attempted_count, 0);
+  assert.equal(result.claimed_count, 0);
+  assert.equal(harness.claimed_ids.length, 0);
+  assert.equal([...harness.rows.values()].every((row) => row.queue_status === "queued"), true);
 });
