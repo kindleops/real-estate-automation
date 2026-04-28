@@ -73,7 +73,9 @@ INSERT INTO public.system_control (key, value) VALUES
   ('discord_alerts_enabled',   'true'),
   ('discord_actions_enabled',  'true'),
   ('dashboard_live_enabled',   'true'),
-  ('email_enabled',            'false')
+  ('email_enabled',            'false'),
+  ('verification_textgrid_send_enabled', 'false'),
+  ('buyer_sms_blast_enabled',  'false')
 ON CONFLICT (key) DO NOTHING;
 
 -- RLS: service role can manage; authenticated browser can read all.

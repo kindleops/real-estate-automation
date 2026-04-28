@@ -10,6 +10,7 @@ import {
   parseMessageEventMetadata,
   serializeMessageEventMetadata,
 } from "@/lib/domain/events/message-event-metadata.js";
+import { getSystemFlag } from "@/lib/system-control.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -32,13 +33,33 @@ function toVerificationMessageBody(body = "", note = "") {
   return `Verification ping ${new Date().toISOString()}`;
 }
 
+async function resolveLiveTextgridVerificationSendGate(deps = {}) {
+  const env = deps.env || process.env;
+  const get_system_flag = deps.getSystemFlag || getSystemFlag;
+  const system_control_enabled = await get_system_flag("verification_textgrid_send_enabled");
+  const env_enabled = clean(env.ALLOW_LIVE_TEXTGRID_VERIFICATION_SENDS) === "true";
+
+  if (system_control_enabled && env_enabled) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    skipped: true,
+    status: 423,
+    reason: "verification_textgrid_send_disabled",
+    system_control_enabled: Boolean(system_control_enabled),
+    env_enabled,
+  };
+}
+
 export async function runLiveTextgridSendVerification({
   to,
   from,
   body = "",
   note = "",
   confirm_live = false,
-} = {}) {
+} = {}, deps = {}) {
   if (!confirm_live) {
     return {
       ok: false,
@@ -46,7 +67,6 @@ export async function runLiveTextgridSendVerification({
     };
   }
 
-  const { createMessageEvent } = await import("@/lib/podio/apps/message-events.js");
   const run_id = `textgrid-live-${crypto.randomUUID()}`;
   const client_reference_id = buildVerificationTextgridClientReferenceId(run_id);
   const message_body = toVerificationMessageBody(body, note);
@@ -60,9 +80,20 @@ export async function runLiveTextgridSendVerification({
     };
   }
 
+  const send_gate = await resolveLiveTextgridVerificationSendGate(deps);
+  if (!send_gate.ok) {
+    return {
+      ok: false,
+      ...send_gate,
+      run_id,
+      client_reference_id,
+    };
+  }
+
+  const send_textgrid_sms = deps.sendTextgridSMS || sendTextgridSMS;
   let send_result;
   try {
-    send_result = await sendTextgridSMS({
+    send_result = await send_textgrid_sms({
       to,
       from,
       body: message_body,
@@ -108,6 +139,7 @@ export async function runLiveTextgridSendVerification({
   let bookkeeping_error = null;
 
   try {
+    const { createMessageEvent } = await import("@/lib/podio/apps/message-events.js");
     event = await createMessageEvent({
       "message-id": provider_sid,
       "text-2": provider_sid,

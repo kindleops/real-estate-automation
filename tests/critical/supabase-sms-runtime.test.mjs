@@ -10,7 +10,7 @@ import {
   runDevSendTest,
 } from "@/app/api/dev/send-test/route.js";
 import { GET as getDevEnvCheck } from "@/app/api/dev/env-check/route.js";
-import { GET as getDevForceSend } from "@/app/api/dev/force-send/route.js";
+import { GET as getDevForceSend, handleDevForceSendRequest } from "@/app/api/dev/force-send/route.js";
 import {
   finalizeSendQueueSuccess,
   loadRunnableSendQueueRows,
@@ -716,6 +716,44 @@ test("dev SMS routes return 404 in production without x-internal-api-secret", as
       process.env.INTERNAL_API_SECRET = original_internal_api_secret;
     }
   }
+});
+
+test("dev force-send returns 404 in production before sendTextgridSMS", async () => {
+  let send_calls = 0;
+  let access_guard_calls = 0;
+  const warnings = [];
+
+  const response = await handleDevForceSendRequest(
+    {
+      headers: new Headers({
+        "x-internal-api-secret": "internal-secret",
+      }),
+    },
+    {
+      env: {
+        NODE_ENV: "development",
+        VERCEL_ENV: "production",
+      },
+      logger: {
+        warn: (event, meta) => warnings.push({ event, meta }),
+        log: () => {},
+        error: () => {},
+      },
+      requireDevRouteAccess: () => {
+        access_guard_calls += 1;
+        return null;
+      },
+      sendTextgridSMS: async () => {
+        send_calls += 1;
+        throw new Error("sendTextgridSMS must not run in production");
+      },
+    }
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(access_guard_calls, 0);
+  assert.equal(send_calls, 0);
+  assert.equal(warnings[0]?.event, "dev_force_send_blocked_in_production");
 });
 
 test("dev SMS routes allow access in production with x-internal-api-secret", async () => {

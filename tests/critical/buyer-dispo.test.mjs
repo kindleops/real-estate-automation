@@ -11,6 +11,7 @@ import {
   buildBuyerSmsBlastText,
   buildPreviewRecipients,
   pickBuyerBlastChannel,
+  sendBuyerBlast,
 } from "@/lib/domain/buyers/send-buyer-blast.js";
 import { buildPipelinePayload } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import {
@@ -175,6 +176,33 @@ test("buyer blast can prefer SMS when the recipient wants texts or only has a ph
     ),
     "email"
   );
+});
+
+test("buyer blast live direct send path returns 423 when SMS blast flag is disabled", async () => {
+  const checked_flags = [];
+
+  const result = await sendBuyerBlast(
+    {
+      buyer_match_id: 123,
+      dry_run: false,
+    },
+    {
+      supportsBuyerBlastSms: () => true,
+      getSystemFlag: async (key) => {
+        checked_flags.push(key);
+        return false;
+      },
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+  assert.equal(result.status, 423);
+  assert.equal(result.error, "system_control_disabled");
+  assert.equal(result.reason, "system_control_disabled");
+  assert.equal(result.flag_key, "buyer_sms_blast_enabled");
+  assert.equal(result.context, "sendBuyerBlast");
+  assert.deepEqual(checked_flags, ["buyer_sms_blast_enabled"]);
 });
 
 test("pipeline payload surfaces buyer match stage from active disposition work", () => {

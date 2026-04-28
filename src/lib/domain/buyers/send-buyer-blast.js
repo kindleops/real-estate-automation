@@ -17,6 +17,7 @@ import {
 import { recordSystemAlert, resolveSystemAlert } from "@/lib/domain/alerts/system-alerts.js";
 import { sendEmail } from "@/lib/providers/email.js";
 import { hasTextgridSendCredentials, sendTextgridSMS } from "@/lib/providers/textgrid.js";
+import { buildDisabledResponse, getSystemFlag } from "@/lib/system-control.js";
 import {
   createMessageEvent,
   getCategoryValue,
@@ -71,6 +72,20 @@ function supportsBuyerBlastSms() {
       ENV.ENABLE_BUYER_SMS_BLAST &&
       hasTextgridSendCredentials()
   );
+}
+
+function buildBuyerSmsBlastDisabledResult() {
+  return {
+    ...buildDisabledResponse("buyer_sms_blast_enabled", "sendBuyerBlast"),
+    reason: "system_control_disabled",
+    skipped: true,
+    sent: false,
+    dry_run: false,
+    recipients: [],
+    blast_eligible_recipients: [],
+    blast_delivery_plan: [],
+    results: [],
+  };
 }
 
 function prefersSmsChannel(recipient = {}) {
@@ -228,7 +243,17 @@ export async function sendBuyerBlast({
   dry_run = true,
   max_buyers = 5,
   force = false,
-} = {}) {
+} = {}, deps = {}) {
+  const supports_buyer_blast_sms = deps.supportsBuyerBlastSms || supportsBuyerBlastSms;
+
+  if (!dry_run && supports_buyer_blast_sms()) {
+    const get_system_flag = deps.getSystemFlag || getSystemFlag;
+    const buyer_sms_blast_enabled = await get_system_flag("buyer_sms_blast_enabled");
+    if (!buyer_sms_blast_enabled) {
+      return buildBuyerSmsBlastDisabledResult();
+    }
+  }
+
   let buyer_match_item =
     buyer_match_id ? await getBuyerMatchItem(buyer_match_id) : null;
 
@@ -246,7 +271,7 @@ export async function sendBuyerBlast({
     if (!buyer_match_item?.item_id && dry_run && bootstrap?.ok) {
       const preview_recipients = buildPreviewRecipients(bootstrap?.diagnostics, max_buyers);
       const blast_delivery_plan = buildBuyerBlastDeliveryPlan(preview_recipients, {
-        sms_enabled: supportsBuyerBlastSms(),
+        sms_enabled: supports_buyer_blast_sms(),
       });
       return {
         ok: true,
@@ -257,7 +282,7 @@ export async function sendBuyerBlast({
         buyer_match_id: bootstrap?.buyer_match_id || null,
         disposition_strategy: bootstrap?.disposition_strategy || null,
         live_blast_supported: Boolean(bootstrap?.live_blast_supported),
-        live_sms_supported: supportsBuyerBlastSms(),
+        live_sms_supported: supports_buyer_blast_sms(),
         recipients: preview_recipients,
         blast_eligible_recipients: blast_delivery_plan.filter(
           (recipient) => Number(recipient?.score || 0) >= 45 && recipient?.planned_channel
@@ -328,7 +353,7 @@ export async function sendBuyerBlast({
       closing_id: linked_closing_id,
     })) || diagnostics.context;
 
-  const sms_enabled = supportsBuyerBlastSms();
+  const sms_enabled = supports_buyer_blast_sms();
   const preview_recipients = buildPreviewRecipients(diagnostics, max_buyers);
   const blast_delivery_plan = buildBuyerBlastDeliveryPlan(preview_recipients, {
     sms_enabled,
