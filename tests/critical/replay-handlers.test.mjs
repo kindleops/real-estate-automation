@@ -463,6 +463,110 @@ test("replay tenant response without verified ownership does not auto-reply", as
   assert.equal(json.safety?.queue_created, false);
 });
 
+test("replay Spanish source-of-info question routes to who_is_this dry-run reply", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+  let template_lookup = null;
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({ language: "English", confidence: 0.95 }),
+    extractUnderwritingSignals: () => ({}),
+    loadTemplate: async (query) => {
+      template_lookup = query;
+      return {
+        text: "Soy Chris. Trabajo con un comprador local y te escribi sobre la propiedad.",
+        template_id: "tmpl_who_spanish",
+        item_id: "tmpl_who_spanish",
+        language: "Spanish",
+        selector_use_case: "who_is_this",
+        use_case: "who_is_this",
+        stage_code: "ownership_check",
+        source: "local_registry",
+        template_resolution_source: "local_template_fallback",
+      };
+    },
+    personalizeTemplate: (_template, _context) => ({
+      ok: true,
+      text: "Soy Chris. Trabajo con un comprador local y te escribi sobre la propiedad.",
+      missing: [],
+    }),
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "Hola buenas como encontraste mi información??",
+      from_number: "+17133781814",
+      to_number: "+12818458577",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.classification.language, "Spanish");
+  assert.equal(json.classification.raw_language, "English");
+  assert.equal(json.detected_language, "Spanish");
+  assert.equal(json.detected_intent, "source_of_info_question");
+  assert.equal(json.selected_use_case, "who_is_this");
+  assert.equal(json.template_lookup_use_case, "who_is_this");
+  assert.equal(json.would_queue_reply, true);
+  assert.equal(json.rendered_message_text, "Soy Chris. Trabajo con un comprador local y te escribi sobre la propiedad.");
+  assert.equal(json.safety?.sms_sent, false);
+  assert.equal(json.safety?.queue_created, false);
+  assert.equal(template_lookup?.use_case, "who_is_this");
+  assert.equal(template_lookup?.language, "Spanish");
+});
+
+test("replay STOP opt-out still suppresses auto replies", async () => {
+  process.env.INTERNAL_API_SECRET = "replay_test_secret";
+  let load_template_called = false;
+
+  const {
+    POST: replayInboundPost,
+    __setReplayInboundTestDeps,
+  } = await getReplayRouteModule();
+
+  __setReplayInboundTestDeps({
+    classify: async () => ({
+      language: "English",
+      compliance_flag: "stop_texting",
+      confidence: 0.99,
+    }),
+    loadTemplate: async () => {
+      load_template_called = true;
+      return null;
+    },
+    warn: () => {},
+  });
+
+  const response = await replayInboundPost(
+    makeReplayRequest({
+      message_body: "STOP",
+      from_number: "+17133781814",
+      to_number: "+12818458577",
+      dry_run: true,
+    })
+  );
+  const json = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.selected_use_case, "stop_or_opt_out");
+  assert.equal(json.next_stage, "terminal");
+  assert.equal(json.would_queue_reply, false);
+  assert.equal(json.suppression_reason, "seller_flow_no_auto_reply_needed");
+  assert.equal(json.rendered_message_text, null);
+  assert.equal(load_template_called, false);
+  assert.equal(json.safety?.sms_sent, false);
+  assert.equal(json.safety?.queue_created, false);
+});
+
 test("replay tenant response with ownership-confirmed context routes to underwriting follow-up", async () => {
   process.env.INTERNAL_API_SECRET = "replay_test_secret";
 

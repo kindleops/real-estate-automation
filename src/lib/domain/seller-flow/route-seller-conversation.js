@@ -24,6 +24,89 @@ function includesAny(text, needles = []) {
   return needles.some((needle) => normalized.includes(lower(needle)));
 }
 
+function normalizeIntentText(value = "") {
+  return clean(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function includesAnyIntentPhrase(message = "", needles = []) {
+  const normalized = normalizeIntentText(message);
+  return needles.some((needle) => normalized.includes(normalizeIntentText(needle)));
+}
+
+function isSpanishIdentityQuestion(message = "") {
+  const normalized = normalizeIntentText(message);
+  return includesAnyIntentPhrase(normalized, [
+    "quien eres",
+    "quien es",
+    "quienes son",
+    "quien me escribe",
+    "quien habla",
+    "con quien hablo",
+    "de parte de quien",
+    "que compania es",
+    "que empresa es",
+  ]);
+}
+
+function isSpanishSourceOfInfoQuestion(message = "") {
+  const normalized = normalizeIntentText(message);
+  return includesAnyIntentPhrase(normalized, [
+    "como encontraste mi informacion",
+    "como encontro mi informacion",
+    "como encontraron mi informacion",
+    "como conseguiste mi informacion",
+    "como consiguio mi informacion",
+    "como consiguieron mi informacion",
+    "como obtuviste mi informacion",
+    "como obtuvo mi informacion",
+    "como obtuvieron mi informacion",
+    "donde encontraste mi informacion",
+    "donde encontro mi informacion",
+    "donde encontraron mi informacion",
+    "de donde sacaste mi informacion",
+    "de donde saco mi informacion",
+    "de donde sacaron mi informacion",
+    "como encontraste mi numero",
+    "como encontro mi numero",
+    "como encontraron mi numero",
+    "como conseguiste mi numero",
+    "como consiguio mi numero",
+    "como consiguieron mi numero",
+    "como obtuviste mi numero",
+    "como obtuvo mi numero",
+    "como obtuvieron mi numero",
+    "como tienes mi numero",
+    "como tiene mi numero",
+    "como tienen mi numero",
+    "donde conseguiste mi numero",
+    "donde consiguio mi numero",
+    "donde consiguieron mi numero",
+    "donde obtuviste mi numero",
+    "donde obtuvo mi numero",
+    "donde obtuvieron mi numero",
+    "de donde tienes mi numero",
+    "de donde tiene mi numero",
+    "de donde tienen mi numero",
+    "de donde sacaste mi numero",
+    "de donde saco mi numero",
+    "de donde sacaron mi numero",
+  ]);
+}
+
+function detectDeterministicLanguage(message = "") {
+  if (isSpanishIdentityQuestion(message) || isSpanishSourceOfInfoQuestion(message)) {
+    return "Spanish";
+  }
+
+  return null;
+}
+
 function hasAffirmative(message = "") {
   return /^(yes|yeah|yep|yup|correct|that'?s right|sure|ok|okay)\b/i.test(clean(message));
 }
@@ -46,25 +129,41 @@ function hasTimelineHesitation(message = "", classification = null) {
 
 function detectIdentityRoute(message = "", classification = null) {
   if (
-    includesAny(message, [
+    includesAnyIntentPhrase(message, [
       "how did you get my number",
+      "how did you get my info",
+      "how did you get my information",
       "where did you get my number",
+      "where did you get my info",
+      "where did you get my information",
       "how you got my number",
+      "how you got my info",
+      "how you got my information",
       "why do you have my number",
+      "why do you have my info",
+      "why do you have my information",
+      "how'd you get my number",
+      "how'd you get my info",
+      "how'd you get my information",
+      "where'd you get my number",
+      "where'd you get my info",
+      "where'd you get my information",
     ])
+    || isSpanishSourceOfInfoQuestion(message)
   ) {
-    return "how_got_number";
+    return "source_of_info_question";
   }
 
   if (
     classification?.objection === "who_is_this" ||
-    includesAny(message, [
+    includesAnyIntentPhrase(message, [
       "who is this",
       "who's this",
       "who are you",
       "what company is this",
       "what is this about",
-    ])
+    ]) ||
+    isSpanishIdentityQuestion(message)
   ) {
     return "who_is_this";
   }
@@ -477,8 +576,8 @@ function detectIntent({
   if (detectWrongPerson(message, classification)) return "Ownership Denied / Wrong Person";
 
   const identity_route = detectIdentityRoute(message, classification);
-  if (identity_route === "how_got_number") return "Identity Challenge / Number Source";
-  if (identity_route === "who_is_this") return "Identity Challenge";
+  if (identity_route === "source_of_info_question") return "source_of_info_question";
+  if (identity_route === "who_is_this") return "who_is_this";
 
   if (detectNotInterested(message, classification)) return "Not Interested";
   if (hasCounterSignal(message, classification)) return "Counter / Negotiation";
@@ -894,6 +993,7 @@ export function routeSellerConversation({
   existing_offer = null,
 } = {}) {
   const detected_language =
+    detectDeterministicLanguage(message) ||
     clean(classification?.language) ||
     clean(context?.summary?.language_preference) ||
     "English";
@@ -972,6 +1072,7 @@ export function routeSellerConversation({
       detected_intent,
       selected_use_case: "stop_or_opt_out",
       template_use_case: null,
+      template_lookup_use_case: null,
       selected_variant_group: "Objection — Stop / Opt Out",
       selected_tone: "Calm",
       next_expected_stage: SELLER_FLOW_STAGES.TERMINAL,
@@ -1000,13 +1101,13 @@ export function routeSellerConversation({
     });
   }
 
-  if (detected_intent === "Identity Challenge / Number Source") {
+  if (detected_intent === "source_of_info_question") {
     return buildPlan({
       detected_language,
       current_stage: previous_stage,
       detected_intent,
-      selected_use_case: "how_got_number",
-      template_use_case: "how_got_number",
+      selected_use_case: "who_is_this",
+      template_use_case: "who_is_this",
       selected_variant_group: "Stage 1 — Identity / Trust",
       selected_tone: "Calm",
       next_expected_stage: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
@@ -1015,7 +1116,7 @@ export function routeSellerConversation({
     });
   }
 
-  if (detected_intent === "Identity Challenge") {
+  if (detected_intent === "who_is_this") {
     return buildPlan({
       detected_language,
       current_stage: previous_stage,

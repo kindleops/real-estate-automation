@@ -218,7 +218,54 @@ test("seller flow routes special handlers without advancing the main stage", () 
 
   assert.equal(wrong_person.selected_use_case, SELLER_FLOW_STAGES.WRONG_PERSON);
   assert.equal(who_is_this.selected_use_case, SELLER_FLOW_STAGES.WHO_IS_THIS);
-  assert.equal(how_got_number.selected_use_case, SELLER_FLOW_STAGES.HOW_GOT_NUMBER);
+  assert.equal(how_got_number.detected_intent, "source_of_info_question");
+  assert.equal(how_got_number.selected_use_case, SELLER_FLOW_STAGES.WHO_IS_THIS);
+  assert.equal(how_got_number.template_lookup_use_case, SELLER_FLOW_STAGES.WHO_IS_THIS);
   assert.equal(stop.selected_use_case, SELLER_FLOW_STAGES.STOP_OR_OPT_OUT);
   assert.equal(stop.next_expected_stage, SELLER_FLOW_STAGES.TERMINAL);
+  assert.equal(stop.should_queue_reply, false);
+});
+
+test("seller flow routes source and identity questions to who_is_this deterministically", () => {
+  const cases = [
+    {
+      message: "Hola buenas como encontraste mi información??",
+      language: "English",
+      expected_language: "Spanish",
+      expected_intent: "source_of_info_question",
+    },
+    {
+      message: "how did you get my info",
+      language: "English",
+      expected_language: "English",
+      expected_intent: "source_of_info_question",
+    },
+    {
+      message: "where did you get my number",
+      language: "English",
+      expected_language: "English",
+      expected_intent: "source_of_info_question",
+    },
+    {
+      message: "who are you",
+      language: "English",
+      expected_language: "English",
+      expected_intent: "who_is_this",
+    },
+  ];
+
+  for (const { message, language, expected_language, expected_intent } of cases) {
+    const plan = route({
+      previous_use_case: SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+      message,
+      classification: { language, emotion: "calm" },
+    });
+
+    assert.equal(plan.detected_language, expected_language, message);
+    assert.equal(plan.detected_intent, expected_intent, message);
+    assert.equal(plan.selected_use_case, SELLER_FLOW_STAGES.WHO_IS_THIS, message);
+    assert.equal(plan.template_lookup_use_case, SELLER_FLOW_STAGES.WHO_IS_THIS, message);
+    assert.equal(plan.should_queue_reply, true, message);
+    assert.equal(plan.handled, true, message);
+  }
 });

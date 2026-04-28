@@ -457,7 +457,8 @@ export async function POST(request) {
       to_number:                normalized_to_number,
       inbound_message_body:     normalized_message_body,
       classification: {
-        language:         classification?.language,
+        language:         plan?.detected_language || classification?.language,
+        raw_language:     classification?.language,
         objection:        classification?.objection,
         emotion:          classification?.emotion,
         stage_hint:       classification?.stage_hint,
@@ -475,6 +476,7 @@ export async function POST(request) {
         template_lookup_use_case: plan?.template_lookup_use_case || null,
       },
       stage_transition_reason:  plan?.reasoning_summary || null,
+      detected_language:        plan?.detected_language || classification?.language || null,
       detected_intent:          plan?.detected_intent || null,
       selected_use_case:        plan?.selected_use_case,
       template_lookup_use_case: plan?.template_lookup_use_case || null,
