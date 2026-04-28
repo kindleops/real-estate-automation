@@ -9,6 +9,7 @@
  *   preflight:  – /launch preflight shortcuts
  *   templates:  – /templates subcommand shortcuts
  *   lead:       – /lead subcommand shortcuts
+ *   feeder:     – candidate feeder cockpit controls
  *   campaign:   – campaign control actions
  *   approval:   – approval / deny gate (new style)
  *
@@ -108,6 +109,50 @@ export function queueButtons() {
       button({ label: "Run Queue (10)", custom_id: "queue:run:10",   style: STYLE.PRIMARY   }),
     ]),
   ];
+}
+
+/**
+ * Buttons for the SMS candidate feeder cockpit.
+ *
+ * @param {object} opts
+ * @param {string} [opts.launchPayload]
+ * @param {string} [opts.dryLaunchPayload]
+ * @param {boolean} [opts.includeLaunch]
+ * @returns {object[]}
+ */
+export function feederCockpitButtons({
+  launchPayload = "",
+  dryLaunchPayload = "",
+  includeLaunch = false,
+} = {}) {
+  const rows = [
+    actionRow([
+      button({ label: "Auto Scan",      custom_id: "feeder:auto_scan",      style: STYLE.PRIMARY }),
+      button({ label: "Scan Next",      custom_id: "feeder:scan_next",      style: STYLE.SECONDARY }),
+      button({ label: "Queue Status",   custom_id: "feeder:queue_status",   style: STYLE.SECONDARY }),
+    ]),
+    actionRow([
+      button({ label: "Run Queue Dry",  custom_id: "feeder:queue_run_dry",  style: STYLE.SECONDARY }),
+      button({ label: "Run Queue Live", custom_id: "feeder:queue_run_live", style: STYLE.SUCCESS }),
+    ]),
+  ];
+
+  if (includeLaunch && launchPayload && dryLaunchPayload) {
+    rows.unshift(actionRow([
+      button({
+        label: "Dry Launch",
+        custom_id: `feeder:dry_launch:${dryLaunchPayload}`,
+        style: STYLE.SECONDARY,
+      }),
+      button({
+        label: "LIVE LAUNCH",
+        custom_id: `feeder:launch:${launchPayload}`,
+        style: STYLE.DANGER,
+      }),
+    ]));
+  }
+
+  return rows;
 }
 
 /**

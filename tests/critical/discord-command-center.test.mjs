@@ -57,6 +57,8 @@ import {
   routeDiscordInteraction,
   __setActionRouterDeps,
   __resetActionRouterDeps,
+  encodeFeederPayloadForCustomId,
+  decodeFeederPayloadFromCustomId,
 } from "@/lib/discord/discord-action-router.js";
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,26 @@ function makeSlashInteraction({
       name:    command,
       options: top_options,
     },
+  };
+}
+
+function makeComponentInteraction({
+  custom_id,
+  role_ids  = ["owner_role"],
+  member_id = "user_1234",
+  guild_id  = "guild_5678",
+  token     = "component_token",
+} = {}) {
+  return {
+    id: `component_${String(custom_id || "unknown").slice(0, 20)}`,
+    type: 3,
+    token,
+    guild_id,
+    member: {
+      user: { id: member_id, username: "TestUser" },
+      roles: role_ids,
+    },
+    data: { custom_id },
   };
 }
 
@@ -973,6 +995,203 @@ test("unknown campaign button action returns structured ephemeral diagnostic", a
     assert.ok(content.includes("campaign:warp:dallas_sfr_absentee"), "must include the received custom_id");
     const flags = result?.data?.flags ?? 0;
     assert.ok(flags & 64, "unknown campaign button response must be ephemeral");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+function componentIdsFromPayload(payload = {}) {
+  return (payload.components ?? [])
+    .flatMap((row) => row.components ?? [])
+    .map((component) => component.custom_id)
+    .filter(Boolean);
+}
+
+test("feeder auto scan ranks best offset correctly", async () => {
+  let edited_payload = null;
+  const results_by_offset = new Map([
+    [0,   { ok: true, queued_count: 20, duplicate_queue_block_count: 1 }],
+    [100, { ok: true, queued_count: 50, duplicate_queue_block_count: 10 }],
+    [200, { ok: true, queued_count: 50, duplicate_queue_block_count: 0 }],
+    [350, { ok: true, queued_count: 30, duplicate_queue_block_count: 0 }],
+  ]);
+
+  __setActionRouterDeps({
+    supabase_override: makeSupabaseMock({ discord_command_events: { rows: [] } }),
+    callInternal_override: async (path, options) => {
+      assert.equal(path, "/api/internal/outbound/feed-candidates");
+      assert.equal(options.body.dry_run, true, "auto scan must always dry-run");
+      const offset = options.body.candidate_offset;
+      return {
+        ok: true,
+        data: {
+          ok: true,
+          inserted_count: 0,
+          queued_count: 0,
+          skipped_count: 0,
+          ...(results_by_offset.get(offset) ?? {}),
+        },
+      };
+    },
+    editInteractionResponse_override: async (payload) => {
+      edited_payload = payload;
+    },
+  });
+
+  try {
+    const response = await routeDiscordInteraction(makeComponentInteraction({ custom_id: "feeder:auto_scan" }));
+    assert.equal(response.type, 5, "auto scan is deferred");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const launch_id = componentIdsFromPayload(edited_payload).find((id) => id.startsWith("feeder:launch:"));
+    assert.ok(launch_id, "auto scan should return a live launch button for the best band");
+    const decoded = decodeFeederPayloadFromCustomId(launch_id.slice("feeder:launch:".length));
+    assert.equal(decoded.candidate_offset, 200, "tie should pick lower duplicate count");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("feeder auto scan ignores ok=false and queued_count=0 bands", async () => {
+  let edited_payload = null;
+
+  __setActionRouterDeps({
+    supabase_override: makeSupabaseMock({ discord_command_events: { rows: [] } }),
+    callInternal_override: async (path, options) => {
+      const offset = options.body.candidate_offset;
+      if (offset === 0) return { ok: false, error: "HTTP 500" };
+      if (offset === 100) return { ok: true, data: { ok: true, queued_count: 0 } };
+      if (offset === 200) return { ok: true, data: { ok: true, queued_count: 7 } };
+      return { ok: true, data: { ok: true, queued_count: 0 } };
+    },
+    editInteractionResponse_override: async (payload) => {
+      edited_payload = payload;
+    },
+  });
+
+  try {
+    await routeDiscordInteraction(makeComponentInteraction({ custom_id: "feeder:auto_scan" }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const launch_id = componentIdsFromPayload(edited_payload).find((id) => id.startsWith("feeder:launch:"));
+    assert.ok(launch_id, "should still expose launch for the valid non-zero band");
+    const decoded = decodeFeederPayloadFromCustomId(launch_id.slice("feeder:launch:".length));
+    assert.equal(decoded.candidate_offset, 200);
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("feeder launch button converts dry_run to false and preserves params", async () => {
+  let captured_body = null;
+  let edited_payload = null;
+  const payload = encodeFeederPayloadForCustomId({
+    candidate_offset: 350,
+    limit: 60,
+    scan_limit: 500,
+    schedule_start_local: "13:00",
+    schedule_end_local: "18:00",
+    schedule_interval_seconds_min: 300,
+  });
+
+  __setActionRouterDeps({
+    supabase_override: makeSupabaseMock({ discord_command_events: { rows: [] } }),
+    callInternal_override: async (path, options) => {
+      captured_body = options.body;
+      return {
+        ok: true,
+        data: {
+          ok: true,
+          queued_count: 12,
+          inserted_count: 12,
+          first_scheduled_for: "2026-04-27T18:00:00.000Z",
+          last_scheduled_for: "2026-04-27T18:33:00.000Z",
+          selected_textgrid_market_counts: { houston: 12 },
+          routing_tier_counts: { exact_market_match: 12 },
+          sample_skips: [{ reason_code: "DUPLICATE_QUEUE_ITEM" }],
+        },
+      };
+    },
+    editInteractionResponse_override: async (payload) => {
+      edited_payload = payload;
+    },
+  });
+
+  try {
+    const response = await routeDiscordInteraction(makeComponentInteraction({ custom_id: `feeder:launch:${payload}` }));
+    assert.equal(response.type, 5, "live launch is deferred");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(captured_body.dry_run, false);
+    assert.equal(captured_body.candidate_offset, 350);
+    assert.equal(captured_body.limit, 60);
+    assert.equal(captured_body.scan_limit, 500);
+    assert.equal(captured_body.schedule_start_local, "13:00");
+    assert.equal(captured_body.schedule_end_local, "18:00");
+    assert.equal(captured_body.schedule_interval_seconds_min, 300);
+    assert.equal(captured_body.candidate_source, "v_sms_ready_contacts");
+    assert.equal(captured_body.routing_safe_only, true);
+    assert.ok(componentIdsFromPayload(edited_payload).includes("feeder:queue_status"), "result includes Queue Status button");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("feeder payload decoding cannot inject arbitrary URL params", async () => {
+  let captured_body = null;
+  const malicious_payload = Buffer.from(JSON.stringify({
+    o: 100,
+    l: 75,
+    n: 250,
+    s: "12:30",
+    e: "20:00",
+    i: 180,
+    dry_run: true,
+    candidate_source: "evil_view",
+    x_internal_api_secret: process.env.INTERNAL_API_SECRET,
+  }), "utf8").toString("base64url");
+
+  __setActionRouterDeps({
+    supabase_override: makeSupabaseMock({ discord_command_events: { rows: [] } }),
+    callInternal_override: async (path, options) => {
+      captured_body = options.body;
+      return { ok: true, data: { ok: true, queued_count: 1, inserted_count: 1 } };
+    },
+    editInteractionResponse_override: async () => {},
+  });
+
+  try {
+    await routeDiscordInteraction(makeComponentInteraction({ custom_id: `feeder:launch:${malicious_payload}` }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(captured_body.dry_run, false, "button handler owns dry_run mode");
+    assert.equal(captured_body.candidate_source, "v_sms_ready_contacts", "source is fixed by the cockpit");
+    assert.equal(captured_body.candidate_offset, 100);
+    assert.ok(!Object.hasOwn(captured_body, "x_internal_api_secret"), "unknown payload keys are dropped");
+  } finally {
+    __resetActionRouterDeps();
+  }
+});
+
+test("feeder cockpit responses do not expose INTERNAL_API_SECRET or CRON_SECRET", async () => {
+  let edited_payload = null;
+  __setActionRouterDeps({
+    supabase_override: makeSupabaseMock({ discord_command_events: { rows: [] } }),
+    callInternal_override: async () => ({
+      ok: false,
+      error: `boom ${process.env.INTERNAL_API_SECRET} ${process.env.CRON_SECRET}`,
+    }),
+    editInteractionResponse_override: async (payload) => {
+      edited_payload = payload;
+    },
+  });
+
+  try {
+    await routeDiscordInteraction(makeComponentInteraction({ custom_id: "feeder:auto_scan" }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const full = JSON.stringify(edited_payload);
+    assert.ok(!full.includes(process.env.INTERNAL_API_SECRET), "must not expose internal secret");
+    assert.ok(!full.includes(process.env.CRON_SECRET), "must not expose cron secret");
   } finally {
     __resetActionRouterDeps();
   }

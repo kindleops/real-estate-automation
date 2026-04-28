@@ -19,6 +19,7 @@ import { normalizeTextgridInboundPayload } from "@/lib/webhooks/textgrid-inbound
 import { captureRouteException, addSentryBreadcrumb } from "@/lib/monitoring/sentry.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendHotLeadAlert } from "@/lib/alerts/discord.js";
+import { sendInboundSmsDiscordAlert } from "@/lib/discord/inbound-alerts.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +27,22 @@ export const dynamic = "force-dynamic";
 const logger = child({
   module: "api.webhooks.textgrid.inbound",
 });
+
+const ROUTE_SECRET_ENV_NAMES = Object.freeze([
+  "INTERNAL_API_SECRET",
+  "CRON_SECRET",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SUPABASE_ANON_KEY",
+  "DISCORD_BOT_TOKEN",
+  "TEXTGRID_AUTH_TOKEN",
+  "TEXTGRID_WEBHOOK_SECRET",
+  "PODIO_CLIENT_SECRET",
+  "PODIO_PASSWORD",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "POSTHOG_KEY",
+  "SENTRY_AUTH_TOKEN",
+]);
 
 const defaultDeps = {
   logger,
@@ -35,12 +52,37 @@ const defaultDeps = {
   normalizeTextgridInboundPayloadImpl: normalizeTextgridInboundPayload,
   writeWebhookLogImpl: writeWebhookLog,
   logSupabaseInboundMessageEventImpl: logSupabaseInboundMessageEvent,
+  sendInboundSmsDiscordAlertImpl: sendInboundSmsDiscordAlert,
 };
 
 let runtimeDeps = { ...defaultDeps };
 
 function clean(value) {
   return String(value ?? "").trim();
+}
+
+function escapeRegExp(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function redactRouteSecrets(value) {
+  let text = String(value ?? "");
+  for (const key of ROUTE_SECRET_ENV_NAMES) {
+    text = text.replace(new RegExp(`\\b${escapeRegExp(key)}\\b`, "gi"), "[redacted_key]");
+    const secret = clean(process.env[key]);
+    if (secret.length >= 8) {
+      text = text.replace(new RegExp(escapeRegExp(secret), "g"), "[redacted]");
+    }
+  }
+  return text;
+}
+
+function safeErrorMessage(error, fallback = "Unknown error") {
+  return redactRouteSecrets(error?.message || fallback);
+}
+
+function safeErrorStack(error) {
+  return error?.stack ? redactRouteSecrets(error.stack) : null;
 }
 
 function asBool(value, fallback = false) {
@@ -161,6 +203,47 @@ export async function POST(request) {
   let safe_signature_bypassed = false;
   let safe_signature_failure_reason = null;
   let safe_signature_unverified_observe_mode = false;
+  let normalized_payload = null;
+  let safe_webhook_verification = null;
+  let inbound_alert_sent = false;
+  let buyer_handler_failed = false;
+  let buyer_handler_error_message = null;
+
+  async function sendAcceptedInboundAlert({
+    result = null,
+    buyer_result = null,
+    handler_name = null,
+    failure = null,
+    severity = null,
+    final_response_status = null,
+  } = {}) {
+    if (inbound_alert_sent || !accepted_logged || !normalized_payload) return;
+    inbound_alert_sent = true;
+
+    try {
+      await runtimeDeps.sendInboundSmsDiscordAlertImpl({
+        payload: normalized_payload,
+        result,
+        buyer_result,
+        provider_message_id: safe_message_id,
+        from: safe_from,
+        to: safe_to,
+        message_body: normalized_payload?.message_body || normalized_payload?.message || null,
+        handler_name,
+        failure,
+        severity,
+        final_response_status,
+        buyer_handler_failed,
+        buyer_handler_error_message,
+        webhook_verification: safe_webhook_verification,
+      });
+    } catch (alert_error) {
+      safeRouteLog("warn", "textgrid_inbound.discord_alert_failed", {
+        message_id: safe_message_id,
+        message: safeErrorMessage(alert_error, "discord_alert_failed"),
+      });
+    }
+  }
 
   try {
     const raw_body = await request.clone().text().catch(() => "");
@@ -177,6 +260,7 @@ export async function POST(request) {
     console.log("INBOUND PAYLOAD KEYS", serializeForConsole({ parsed_body_keys }));
 
     const payload = runtimeDeps.normalizeTextgridInboundPayloadImpl(body, request.headers);
+    normalized_payload = payload;
     const request_url = new URL(request.url);
     const dry_run = asBool(
       body?.dry_run ??
@@ -216,6 +300,7 @@ export async function POST(request) {
       ...verification,
       ...signature_meta,
     };
+    safe_webhook_verification = webhook_verification;
     safe_signature_verification_mode =
       webhook_verification?.signature_verification_mode || signature_verification_mode;
     safe_signature_verified = Boolean(webhook_verification?.signature_verified);
@@ -262,9 +347,6 @@ export async function POST(request) {
     }
 
     const inbound_debug_stage = request.headers.get("x-inbound-debug-stage");
-    let buyer_handler_failed = false;
-    let buyer_handler_error_message = null;
-
     if (inbound_debug_stage === "after_normalized") {
       return NextResponse.json({ ok: true, stage: "after_normalized" });
     }
@@ -457,7 +539,7 @@ export async function POST(request) {
           });
         } catch (webhook_log_error) {
           safeRouteLog("error", "textgrid_inbound.webhook_log_failed", {
-            message: webhook_log_error?.message || "webhook_log_write_failed",
+            message: safeErrorMessage(webhook_log_error, "webhook_log_write_failed"),
           });
         }
       }
@@ -641,7 +723,7 @@ export async function POST(request) {
               downstream_handler_invoked,
               podio_persistence_attempted,
               extra: {
-                message: supabase_error?.message || "Unknown Supabase inbound logging error",
+                message: safeErrorMessage(supabase_error, "Unknown Supabase inbound logging error"),
               },
             })
           );
@@ -649,6 +731,11 @@ export async function POST(request) {
       }
 
       if (inbound_debug_stage === "after_accepted") {
+        await sendAcceptedInboundAlert({
+          result: { ok: true, stage: "after_accepted" },
+          handler_name: "textgrid_inbound_route",
+          final_response_status: 200,
+        });
         return NextResponse.json({ ok: true, stage: "after_accepted" });
       }
     } catch (error) {
@@ -667,8 +754,8 @@ export async function POST(request) {
         podio_persistence_attempted,
         final_response_status: 500,
         parsed_body_keys,
-        error_message: error?.message || "Unknown error",
-        error_stack: error?.stack || null,
+        error_message: safeErrorMessage(error),
+        error_stack: safeErrorStack(error),
       };
 
       console.error("textgrid_inbound.failed_pre_accept", serializeForConsole(error_meta));
@@ -734,6 +821,11 @@ export async function POST(request) {
     }
 
     if (inbound_debug_stage === "before_handler") {
+      await sendAcceptedInboundAlert({
+        result: { ok: true, stage: "before_handler" },
+        handler_name: "textgrid_inbound_route",
+        final_response_status: 200,
+      });
       return NextResponse.json({ ok: true, stage: "before_handler" });
     }
 
@@ -788,7 +880,7 @@ export async function POST(request) {
         buyer_result = await runtimeDeps.maybeHandleBuyerTextgridInboundImpl(payload);
       } catch (error) {
         buyer_handler_failed = true;
-        buyer_handler_error_message = error?.message || "Unknown error";
+        buyer_handler_error_message = safeErrorMessage(error);
         const buyer_error_meta = buildTextgridWebhookLogMeta({
           payload,
           webhook_verification,
@@ -797,8 +889,8 @@ export async function POST(request) {
           final_response_status: 500,
           extra: {
             handler_name: "maybeHandleBuyerTextgridInbound",
-            error_message: error?.message || "Unknown error",
-            error_stack: error?.stack || null,
+            error_message: safeErrorMessage(error),
+            error_stack: safeErrorStack(error),
             inbound_debug_stage,
             will_continue_to_main_handler: true,
           },
@@ -831,12 +923,18 @@ export async function POST(request) {
           ok: false,
           matched: false,
           reason: "buyer_handler_failed",
-          error_message: error?.message || "Unknown error",
+          error_message: safeErrorMessage(error),
         };
       }
     }
 
     if (inbound_debug_stage === "after_handler") {
+      await sendAcceptedInboundAlert({
+        result: { ok: true, stage: "after_handler", buyer_matched: Boolean(buyer_result?.matched) },
+        buyer_result,
+        handler_name: "maybeHandleBuyerTextgridInbound",
+        final_response_status: 200,
+      });
       return NextResponse.json({ ok: true, stage: "after_handler", buyer_matched: Boolean(buyer_result?.matched) });
     }
 
@@ -882,6 +980,14 @@ export async function POST(request) {
           },
         })
       );
+
+      await sendAcceptedInboundAlert({
+        result: buyer_result?.result || null,
+        buyer_result,
+        handler_name: "maybeHandleBuyerTextgridInbound",
+        final_response_status: response_status,
+        severity: response_status >= 400 ? "warning" : "info",
+      });
 
       return NextResponse.json(
         {
@@ -994,6 +1100,14 @@ export async function POST(request) {
       })
     );
 
+    await sendAcceptedInboundAlert({
+      result,
+      buyer_result,
+      handler_name: "handleTextgridInbound",
+      final_response_status: main_handler_response_status,
+      severity: result?.ok === false ? (result?.retryable ? "warning" : "error") : null,
+    });
+
     if (result?.unknown_router && result?.context?.unknown_inbound) {
       return NextResponse.json(
         {
@@ -1042,8 +1156,8 @@ export async function POST(request) {
       final_response_status: 500,
       parsed_body_keys,
       accepted_logged,
-      error_message: error?.message || "Unknown error",
-      error_stack: error?.stack || null,
+      error_message: safeErrorMessage(error),
+      error_stack: safeErrorStack(error),
     };
 
     console.error("textgrid_inbound.failed", serializeForConsole(failure_meta));
@@ -1101,6 +1215,15 @@ export async function POST(request) {
         })
       );
     }
+
+    await sendAcceptedInboundAlert({
+      handler_name: downstream_handler_invoked ? "handleTextgridInbound" : "textgrid_inbound_route",
+      failure: {
+        error_message: safeErrorMessage(error),
+      },
+      severity: "error",
+      final_response_status: 500,
+    });
 
     return NextResponse.json(
       {

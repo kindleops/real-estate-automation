@@ -105,6 +105,7 @@ import {
   wireEventButtons,
   briefingActionRow,
   opsApprovalActionRow,
+  feederCockpitButtons,
 } from "./discord-components.js";
 import {
   buildCampaignKey,
@@ -206,6 +207,19 @@ const FEEDER_TECH_OPS_LIMIT = 25;
 
 /** Hard cap on feeder limit even with Owner approval. */
 const FEEDER_HARD_CAP = 200;
+
+const FEEDER_CANDIDATE_SOURCE = "v_sms_ready_contacts";
+const FEEDER_SCAN_OFFSETS = Object.freeze([
+  0, 100, 200, 350, 500, 750, 1000, 1500, 2000, 2500, 3000, 3500, 4500, 5500, 6500,
+]);
+const FEEDER_SCAN_NEXT_OFFSETS = Object.freeze([7500, 8500, 10000, 12500, 15000]);
+const FEEDER_COCKPIT_DEFAULTS = Object.freeze({
+  limit: 75,
+  scan_limit: 250,
+  schedule_start_local: "12:30",
+  schedule_end_local: "20:00",
+  schedule_interval_seconds_min: 180,
+});
 
 /** Approval button custom_id prefixes. */
 const APPROVE_PREFIX = "discord_approve:";
@@ -451,6 +465,165 @@ function sanitizeUserVisibleErrorText(raw_error) {
   ].filter(Boolean);
   if (secrets.some((s) => text.includes(String(s)))) return "unknown error";
   return text.slice(0, 160);
+}
+
+function cleanText(value) {
+  return String(value ?? "").trim();
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = Number(value);
+  const number = Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+  return Math.min(Math.max(number, min), max);
+}
+
+function normalizeLocalTimeOption(value, fallback) {
+  const raw = cleanText(value) || fallback;
+  const match = raw.match(/^(\d{1,2}):([0-5]\d)$/);
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) return fallback;
+  return `${String(hour).padStart(2, "0")}:${match[2]}`;
+}
+
+function normalizeFeederCockpitParams(input = {}) {
+  return {
+    candidate_offset: clampInteger(input.candidate_offset ?? input.offset ?? input.o, 0, 0, 100_000),
+    limit: clampInteger(input.limit ?? input.l, FEEDER_COCKPIT_DEFAULTS.limit, 1, FEEDER_HARD_CAP),
+    scan_limit: clampInteger(input.scan_limit ?? input.n, FEEDER_COCKPIT_DEFAULTS.scan_limit, 1, 10_000),
+    schedule_start_local: normalizeLocalTimeOption(
+      input.schedule_start_local ?? input.s,
+      FEEDER_COCKPIT_DEFAULTS.schedule_start_local
+    ),
+    schedule_end_local: normalizeLocalTimeOption(
+      input.schedule_end_local ?? input.e,
+      FEEDER_COCKPIT_DEFAULTS.schedule_end_local
+    ),
+    schedule_interval_seconds_min: clampInteger(
+      input.schedule_interval_seconds_min ?? input.i,
+      FEEDER_COCKPIT_DEFAULTS.schedule_interval_seconds_min,
+      1,
+      86_400
+    ),
+  };
+}
+
+function getFeederCockpitParamsFromOptions(options_array = []) {
+  return normalizeFeederCockpitParams({
+    candidate_offset: getOption(options_array, "candidate_offset"),
+    limit: getOption(options_array, "limit"),
+    scan_limit: getOption(options_array, "scan_limit"),
+    schedule_start_local: getOption(options_array, "schedule_start_local"),
+    schedule_end_local: getOption(options_array, "schedule_end_local"),
+    schedule_interval_seconds_min: getOption(options_array, "schedule_interval_seconds_min"),
+  });
+}
+
+function buildCandidateFeederBody(params = {}, { dry_run = true } = {}) {
+  const p = normalizeFeederCockpitParams(params);
+  return {
+    dry_run: Boolean(dry_run),
+    limit: p.limit,
+    scan_limit: p.scan_limit,
+    candidate_offset: p.candidate_offset,
+    candidate_source: FEEDER_CANDIDATE_SOURCE,
+    routing_safe_only: true,
+    debug_templates: false,
+    within_contact_window_now: false,
+    schedule_spread: true,
+    schedule_start_local: p.schedule_start_local,
+    schedule_end_local: p.schedule_end_local,
+    schedule_interval_seconds_min: p.schedule_interval_seconds_min,
+  };
+}
+
+export function encodeFeederPayloadForCustomId(input = {}) {
+  const p = normalizeFeederCockpitParams(input);
+  const compact = {
+    o: p.candidate_offset,
+    l: p.limit,
+    n: p.scan_limit,
+    s: p.schedule_start_local,
+    e: p.schedule_end_local,
+    i: p.schedule_interval_seconds_min,
+  };
+  return Buffer.from(JSON.stringify(compact), "utf8").toString("base64url");
+}
+
+export function decodeFeederPayloadFromCustomId(token = "") {
+  try {
+    const parsed = JSON.parse(Buffer.from(String(token), "base64url").toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return normalizeFeederCockpitParams(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function numberFromResult(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function summarizeFeederCallResult(offset, result) {
+  const data = result?.data ?? {};
+  const queued_count = numberFromResult(data.queued_count ?? data.inserted_count);
+  const ok = Boolean(result?.ok) && data.ok !== false && queued_count > 0;
+  return {
+    ok,
+    candidate_offset: offset,
+    queued_count,
+    inserted_count: numberFromResult(data.inserted_count ?? data.queued_count),
+    duplicate_queue_block_count: numberFromResult(data.duplicate_queue_block_count ?? data.duplicate_count),
+    template_block_count: numberFromResult(
+      data.template_block_count ??
+      (numberFromResult(data.no_template_count) + numberFromResult(data.template_render_failed_count))
+    ),
+    schedule_window_full_count: numberFromResult(data.schedule_window_full_count),
+    schedule_overflow_blocked_count: numberFromResult(data.schedule_overflow_blocked_count),
+    skipped_count: numberFromResult(data.skipped_count),
+    scanned_count: numberFromResult(data.scanned_count ?? data.loaded_count),
+    eligible_count: numberFromResult(data.eligible_count),
+    first_scheduled_for: data.first_scheduled_for || null,
+    last_scheduled_for: data.last_scheduled_for || null,
+    error: result?.ok ? null : sanitizeUserVisibleErrorText(result?.error),
+  };
+}
+
+export function rankFeederScanBands(bands = []) {
+  return [...bands]
+    .filter((band) => band?.ok && numberFromResult(band.queued_count) > 0)
+    .sort((left, right) =>
+      numberFromResult(right.queued_count) - numberFromResult(left.queued_count) ||
+      numberFromResult(left.duplicate_queue_block_count) - numberFromResult(right.duplicate_queue_block_count) ||
+      numberFromResult(left.template_block_count) - numberFromResult(right.template_block_count) ||
+      numberFromResult(left.schedule_window_full_count) - numberFromResult(right.schedule_window_full_count) ||
+      numberFromResult(left.schedule_overflow_blocked_count) - numberFromResult(right.schedule_overflow_blocked_count) ||
+      numberFromResult(left.candidate_offset) - numberFromResult(right.candidate_offset)
+    );
+}
+
+function formatObjectCounts(value = {}) {
+  if (!value || typeof value !== "object") return "—";
+  const lines = Object.entries(value)
+    .filter(([, count]) => Number(count) > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, 8)
+    .map(([key, count]) => `${key}: **${count}**`);
+  return lines.join("\n") || "—";
+}
+
+function formatSkipReasons(skips = []) {
+  if (!Array.isArray(skips) || skips.length === 0) return "—";
+  const counts = {};
+  for (const skip of skips.slice(0, 20)) {
+    const key = cleanText(skip?.reason_code || skip?.reason || "unknown").slice(0, 64) || "unknown";
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([key, count]) => `${key}: **${count}**`)
+    .join("\n")
+    .slice(0, 1024) || "—";
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,6 +1492,305 @@ async function handleFeederLaunch({ options_array, context, interaction }) {
     };
   }, "command", "feeder_launch", {
     fallback_content: `Feeder launch encountered an error. Check server logs.`,
+  });
+}
+
+async function runCandidateFeederDryRunBand(offset, params) {
+  const body = buildCandidateFeederBody({ ...params, candidate_offset: offset }, { dry_run: true });
+  const result = await callInternal("/api/internal/outbound/feed-candidates", {
+    method: "POST",
+    body,
+    timeout_ms: 30_000,
+  });
+  return summarizeFeederCallResult(offset, result);
+}
+
+function buildFeederAutoScanPayload({ bands = [], ranked = [], params = {}, title = "SMS Feeder Auto Scan" } = {}) {
+  const top = ranked.slice(0, 5);
+  const rejected_count = Math.max(0, bands.length - ranked.length);
+  const lines = top.map((band, index) => {
+    return [
+      `**${index + 1}. Offset ${band.candidate_offset}**`,
+      `queue **${band.queued_count}**`,
+      `dupes ${band.duplicate_queue_block_count}`,
+      `templates ${band.template_block_count}`,
+      `window ${band.schedule_window_full_count}`,
+      `overflow ${band.schedule_overflow_blocked_count}`,
+    ].join(" | ");
+  });
+
+  const best = top[0] || null;
+  const launch_payload = best
+    ? encodeFeederPayloadForCustomId({ ...params, candidate_offset: best.candidate_offset })
+    : "";
+
+  return {
+    embeds: [buildSuccessEmbed({
+      title,
+      description: best
+        ? [
+            `Best clean band: **offset ${best.candidate_offset}** with **${best.queued_count}** queueable rows.`,
+            `Window: **${params.schedule_start_local}–${params.schedule_end_local}** local, interval **${params.schedule_interval_seconds_min}s**.`,
+            rejected_count ? `Rejected dry-run bands: **${rejected_count}**.` : "No rejected dry-run bands.",
+          ].join("\n")
+        : [
+            "No clean offset band found.",
+            "Auto scan is dry-run only. Try Scan Next or adjust the window/limit.",
+            rejected_count ? `Rejected dry-run bands: **${rejected_count}**.` : "",
+          ].filter(Boolean).join("\n"),
+      fields: [
+        {
+          name: "Top Offset Bands",
+          value: lines.join("\n").slice(0, 1024) || "No dry-run band had queued_count > 0.",
+          inline: false,
+        },
+      ],
+    })],
+    components: feederCockpitButtons({
+      includeLaunch: Boolean(best && launch_payload.length < 80),
+      launchPayload: launch_payload,
+      dryLaunchPayload: launch_payload,
+    }),
+  };
+}
+
+async function runFeederAutoScan({ params = {}, offsets = FEEDER_SCAN_OFFSETS, title } = {}) {
+  const normalized = normalizeFeederCockpitParams(params);
+  const bands = await Promise.all(offsets.map((offset) => runCandidateFeederDryRunBand(offset, normalized)));
+  const ranked = rankFeederScanBands(bands);
+  return buildFeederAutoScanPayload({ bands, ranked, params: normalized, title });
+}
+
+async function handleFeederAutoScan({ options_array = [], interaction, offsets = FEEDER_SCAN_OFFSETS, title }) {
+  const params = getFeederCockpitParamsFromOptions(options_array);
+  return runDeferredDiscordHandler(interaction, async () => {
+    return runFeederAutoScan({ params, offsets, title });
+  }, "command", "feeder_auto_scan", {
+    fallback_content: "Feeder auto scan unavailable. Check server logs.",
+  });
+}
+
+async function handleFeederLaunchPreview({ options_array = [], interaction }) {
+  const params = getFeederCockpitParamsFromOptions(options_array);
+  return runDeferredDiscordHandler(interaction, async () => {
+    const body = buildCandidateFeederBody(params, { dry_run: true });
+    const result = await callInternal("/api/internal/outbound/feed-candidates", {
+      method: "POST",
+      body,
+      timeout_ms: 30_000,
+    });
+    if (!result.ok) {
+      return { content: `Feeder dry launch preview failed: ${sanitizeUserVisibleErrorText(result.error)}.` };
+    }
+    const data = result.data ?? {};
+    const payload = encodeFeederPayloadForCustomId(params);
+    return {
+      embeds: [buildSuccessEmbed({
+        title: "Feeder Launch Preview — Dry Run",
+        description: [
+          `Offset: **${params.candidate_offset}**`,
+          `Would queue: **${data.queued_count ?? data.inserted_count ?? 0}**`,
+          `Scanned: **${data.scanned_count ?? data.loaded_count ?? "—"}**`,
+          `Skipped: **${data.skipped_count ?? "—"}**`,
+          "",
+          "Use the **LIVE LAUNCH** button to enqueue this exact batch.",
+        ].join("\n"),
+        fields: [
+          {
+            name: "Schedule",
+            value: `${params.schedule_start_local}–${params.schedule_end_local} local, every ${params.schedule_interval_seconds_min}s`,
+            inline: false,
+          },
+        ],
+      })],
+      components: feederCockpitButtons({
+        includeLaunch: payload.length < 80,
+        launchPayload: payload,
+        dryLaunchPayload: payload,
+      }),
+    };
+  }, "command", "feeder_launch_preview", {
+    fallback_content: "Feeder launch preview unavailable. Check server logs.",
+  });
+}
+
+function buildFeederLaunchResultPayload(data = {}, params = {}, { dry_run = false } = {}) {
+  return {
+    embeds: [buildSuccessEmbed({
+      title: dry_run ? "Feeder Dry Launch Complete" : "Feeder LIVE LAUNCH Complete",
+      description: [
+        `Queued: **${data.queued_count ?? data.inserted_count ?? 0}**`,
+        `Inserted: **${data.inserted_count ?? data.queued_count ?? 0}**`,
+        `Offset: **${params.candidate_offset}**`,
+        `First scheduled: **${data.first_scheduled_for || "—"}**`,
+        `Last scheduled: **${data.last_scheduled_for || "—"}**`,
+      ].join("\n"),
+      fields: [
+        {
+          name: "TextGrid Markets",
+          value: formatObjectCounts(data.selected_textgrid_market_counts),
+          inline: true,
+        },
+        {
+          name: "Routing Tiers",
+          value: formatObjectCounts(data.routing_tier_counts),
+          inline: true,
+        },
+        {
+          name: "Sample Skip Reasons",
+          value: formatSkipReasons(data.sample_skips),
+          inline: false,
+        },
+      ],
+    })],
+    components: feederCockpitButtons(),
+  };
+}
+
+async function handleFeederLaunchButton({ interaction, payload_token, dry_run = false }) {
+  const params = decodeFeederPayloadFromCustomId(payload_token);
+  if (!params) {
+    return ephemeralMessage("Invalid feeder launch payload. Run a fresh auto scan.");
+  }
+
+  return runDeferredDiscordHandler(interaction, async () => {
+    const body = buildCandidateFeederBody(params, { dry_run });
+    const result = await callInternal("/api/internal/outbound/feed-candidates", {
+      method: "POST",
+      body,
+      timeout_ms: 60_000,
+    });
+    if (!result.ok) {
+      return { content: `Feeder launch failed: ${sanitizeUserVisibleErrorText(result.error)}.` };
+    }
+    return buildFeederLaunchResultPayload(result.data ?? {}, params, { dry_run });
+  }, "button", dry_run ? "feeder_dry_launch" : "feeder_live_launch", {
+    fallback_content: "Feeder launch unavailable. Check server logs.",
+  });
+}
+
+function getQueueScheduledAt(row = null) {
+  return (
+    cleanText(row?.scheduled_for) ||
+    cleanText(row?.scheduled_for_utc) ||
+    cleanText(row?.scheduled_for_local) ||
+    cleanText(row?.scheduled_at) ||
+    null
+  );
+}
+
+function normalizeQueueStatusLabel(value) {
+  return cleanText(value || "unknown").toLowerCase();
+}
+
+async function buildFeederQueueStatusPayload() {
+  const db = getDb();
+  const { data, error } = await db
+    .from("send_queue")
+    .select("queue_status,scheduled_for,scheduled_for_utc,scheduled_for_local,scheduled_at,created_at,sent_at")
+    .limit(10000);
+  if (error) throw error;
+
+  const rows = Array.isArray(data) ? data : [];
+  const counts = {};
+  const now_ms = Date.now();
+  const today_key = new Date().toISOString().slice(0, 10);
+  let first_future = null;
+  let last_future = null;
+  let next_due = null;
+  let today_sent_count = 0;
+
+  for (const row of rows) {
+    const status = normalizeQueueStatusLabel(row.queue_status);
+    counts[status] = (counts[status] || 0) + 1;
+    const scheduled = getQueueScheduledAt(row);
+    const scheduled_ms = scheduled ? new Date(scheduled).getTime() : null;
+    const sent_at = cleanText(row.sent_at || row.created_at);
+
+    if (status === "sent" && sent_at.slice(0, 10) === today_key) today_sent_count += 1;
+
+    if (scheduled_ms && Number.isFinite(scheduled_ms) && scheduled_ms > now_ms) {
+      if (!first_future || scheduled_ms < first_future.ms) first_future = { ms: scheduled_ms, iso: scheduled };
+      if (!last_future || scheduled_ms > last_future.ms) last_future = { ms: scheduled_ms, iso: scheduled };
+    }
+
+    if (status === "queued" && (!scheduled_ms || scheduled_ms <= now_ms)) {
+      const due_ms = scheduled_ms || new Date(row.created_at || 0).getTime() || 0;
+      if (!next_due || due_ms < next_due.ms) next_due = { ms: due_ms, iso: scheduled || row.created_at || "due now" };
+    }
+  }
+
+  const status_lines = [
+    ["scheduled", counts.scheduled || 0],
+    ["queued", counts.queued || 0],
+    ["sending", counts.sending || 0],
+    ["sent", counts.sent || 0],
+    ["failed", counts.failed || 0],
+    ["blocked", counts.blocked || 0],
+    ["cancelled", counts.cancelled || counts.canceled || 0],
+  ].map(([label, count]) => `${label}: **${count}**`);
+
+  return {
+    embeds: [buildSuccessEmbed({
+      title: "SMS Feeder Queue Status",
+      description: status_lines.join(" | "),
+      fields: [
+        {
+          name: "Future Schedule",
+          value: [
+            `First future row: **${first_future?.iso || "—"}**`,
+            `Last future row: **${last_future?.iso || "—"}**`,
+          ].join("\n"),
+          inline: false,
+        },
+        {
+          name: "Due / Sent",
+          value: [
+            `Next due row: **${next_due?.iso || "—"}**`,
+            `Today sent count: **${today_sent_count}**`,
+          ].join("\n"),
+          inline: false,
+        },
+      ],
+    })],
+    components: feederCockpitButtons(),
+  };
+}
+
+async function handleFeederQueueStatus() {
+  try {
+    return cinematicMessage(await buildFeederQueueStatusPayload());
+  } catch {
+    return errorResponse("Failed to read feeder queue status.");
+  }
+}
+
+async function handleFeederQueueRun({ interaction, dry_run = true, limit = 25 }) {
+  return runDeferredDiscordHandler(interaction, async () => {
+    const result = await callInternal("/api/internal/queue/run", {
+      method: "POST",
+      body: { limit, dry_run },
+      timeout_ms: 30_000,
+    });
+    if (!result.ok) {
+      return { content: `Queue run failed: ${sanitizeUserVisibleErrorText(result.error)}.` };
+    }
+    const run = result.data?.result ?? result.data ?? {};
+    return {
+      embeds: [buildSuccessEmbed({
+        title: dry_run ? "Queue Run — Dry" : "Queue Run — Live",
+        description: [
+          `Processed: **${run.processed_count ?? run.started_count ?? "—"}**`,
+          `Sent: **${run.sent_count ?? "—"}**`,
+          `Failed: **${run.failed_count ?? "—"}**`,
+          `Skipped: **${run.skipped_count ?? "—"}**`,
+          `Future rows: **${run.future_rows ?? "—"}**`,
+        ].join("\n"),
+      })],
+      components: feederCockpitButtons(),
+    };
+  }, "command", dry_run ? "queue_run_dry" : "queue_run_live", {
+    fallback_content: "Queue run unavailable. Check server logs.",
   });
 }
 
@@ -3287,6 +3759,59 @@ export async function routeDiscordInteraction(interaction) {
     if (custom_id === "templates:audit") return handleTemplatesAudit(ctx);
     if (custom_id === "templates:stage1") return handleTemplatesStage1(ctx);
 
+    if (custom_id === "feeder:auto_scan") {
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return deniedResponse("Requires **Tech Ops** or **Owner**.");
+      }
+      return handleFeederAutoScan({ interaction, title: "SMS Feeder Auto Scan" });
+    }
+    if (custom_id === "feeder:scan_next") {
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return deniedResponse("Requires **Tech Ops** or **Owner**.");
+      }
+      return handleFeederAutoScan({
+        interaction,
+        offsets: FEEDER_SCAN_NEXT_OFFSETS,
+        title: "SMS Feeder Scan Next Offsets",
+      });
+    }
+    if (custom_id.startsWith("feeder:dry_launch:")) {
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return deniedResponse("Requires **Tech Ops** or **Owner**.");
+      }
+      return handleFeederLaunchButton({
+        interaction,
+        payload_token: custom_id.slice("feeder:dry_launch:".length),
+        dry_run: true,
+      });
+    }
+    if (custom_id.startsWith("feeder:launch:")) {
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return deniedResponse("Requires **Tech Ops** or **Owner**.");
+      }
+      return handleFeederLaunchButton({
+        interaction,
+        payload_token: custom_id.slice("feeder:launch:".length),
+        dry_run: false,
+      });
+    }
+    if (custom_id === "feeder:queue_status") return handleFeederQueueStatus();
+    if (custom_id === "feeder:queue_run_dry") {
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return deniedResponse("Requires **Tech Ops** or **Owner**.");
+      }
+      return handleFeederQueueRun({ interaction, dry_run: true, limit: 25 });
+    }
+    if (custom_id === "feeder:queue_run_live") {
+      if (!checkPermission(ctx.role_ids, ["owner", "tech_ops"])) {
+        return deniedResponse("Requires **Tech Ops** or **Owner**.");
+      }
+      return handleFeederQueueRun({ interaction, dry_run: false, limit: 25 });
+    }
+    if (custom_id.startsWith("feeder:")) {
+      return ephemeralMessage(`Unsupported feeder action: \`${custom_id}\`.`);
+    }
+
     if (custom_id.startsWith("target:create_campaign:")) {
       const ck = custom_id.slice("target:create_campaign:".length);
       return cinematicMessage({
@@ -4030,6 +4555,37 @@ export async function routeDiscordInteraction(interaction) {
           response = deniedResponse("Requires **Tech Ops** or **Owner**.");
         } else {
           response = await handleFeederLaunch({ options_array: sub_opts, context, interaction });
+        }
+      } else if (sub_name === "scan_offsets") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+          response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+        } else {
+          response = await handleFeederAutoScan({
+            options_array: sub_opts,
+            context,
+            interaction,
+            title: "SMS Feeder Auto Scan",
+          });
+        }
+      } else if (sub_name === "launch_batch") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+          response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+        } else {
+          response = await handleFeederLaunchPreview({ options_array: sub_opts, context, interaction });
+        }
+      } else if (sub_name === "queue_status") {
+        response = await handleFeederQueueStatus();
+      } else if (sub_name === "run_queue_dry") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+          response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+        } else {
+          response = await handleFeederQueueRun({ interaction, dry_run: true, limit: 25 });
+        }
+      } else if (sub_name === "run_queue_live") {
+        if (!checkPermission(role_ids, ["owner", "tech_ops"])) {
+          response = deniedResponse("Requires **Tech Ops** or **Owner**.");
+        } else {
+          response = await handleFeederQueueRun({ interaction, dry_run: false, limit: 25 });
         }
       } else {
         response = errorResponse(`Unknown /feeder subcommand: ${sub_name}`);
