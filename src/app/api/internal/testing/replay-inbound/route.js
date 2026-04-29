@@ -3,7 +3,7 @@ import { NextResponse } from "next/server.js";
 import { requireSharedSecretAuth } from "@/lib/security/shared-secret.js";
 import { classify } from "@/lib/domain/classification/classify.js";
 import { extractUnderwritingSignals } from "@/lib/domain/underwriting/extract-underwriting-signals.js";
-import { routeSellerConversation } from "@/lib/domain/seller-flow/route-seller-conversation.js";
+import { resolveSellerAutoReplyPlan } from "@/lib/domain/seller-flow/resolve-seller-auto-reply-plan.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
 import { loadTemplate } from "@/lib/domain/templates/load-template.js";
 import { personalizeTemplate } from "@/lib/sms/personalize_template.js";
@@ -56,7 +56,7 @@ function isTemplateCsvMissingError(err) {
 const defaultReplayDeps = {
   classify,
   extractUnderwritingSignals,
-  routeSellerConversation,
+  resolveSellerAutoReplyPlan,
   maybeQueueSellerStageReply,
   loadTemplate,
   personalizeTemplate,
@@ -313,14 +313,25 @@ export async function POST(request) {
     pipeline.underwriting = { ok: true, result: underwriting };
 
     // ── 4. Route the conversation ─────────────────────────────────────────
-    const plan = replayDeps.routeSellerConversation({
-      context,
+    const plan = await replayDeps.resolveSellerAutoReplyPlan({
+      inbound_event: { item_id: null, message_id: null, from: normalized_from_number, to: normalized_to_number },
+      message_body: normalized_message_body,
       classification,
-      message: normalized_message_body,
-      previous_outbound_use_case: prior_use_case,
-      maybe_offer,
-      existing_offer,
+      route: {}, 
+      conversation_context: context,
+      current_stage: context?.summary?.conversation_stage || null,
+      prior_use_case: prior_use_case,
+      recent_outbound: null,
+      underwriting_signals: underwriting,
+      auto_reply_enabled: true,
+      force_queue_reply: false,
+      now: new Date().toISOString()
     });
+    // Map back some fields for the replay endpoint's assertions and formatting
+    plan.next_expected_stage = plan.next_stage;
+    plan.detected_intent = plan.inbound_intent;
+    plan.template_lookup_use_case = plan.selected_use_case;
+    plan.handled = true;
     pipeline.route = { ok: true, result: plan };
 
     // ── 5. Dry-run queue capture ──────────────────────────────────────────

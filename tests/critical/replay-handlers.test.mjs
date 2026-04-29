@@ -79,13 +79,13 @@ test("replay-inbound accepts message_body/from_number/to_number and returns dry-
   __setReplayInboundTestDeps({
     classify: async () => ({ language: "English", confidence: 0.99 }),
     extractUnderwritingSignals: () => ({ property_type: "Single Family", creative_strategy: "cash" }),
-    routeSellerConversation: () => ({
+    resolveSellerAutoReplyPlan: () => ({
       handled: true,
       should_queue_reply: true,
-      next_expected_stage: "consider_selling",
+      next_stage: "consider_selling",
       selected_use_case: "consider_selling",
       template_lookup_use_case: "consider_selling",
-      detected_intent: "Ownership Confirmed",
+      inbound_intent: "Ownership Confirmed",
       reasoning_summary: "Seller confirmed ownership",
       detected_language: "English",
     }),
@@ -143,10 +143,10 @@ test("replay-inbound accepts aliases body/message/from/to and normalizes fields"
   __setReplayInboundTestDeps({
     classify: async () => ({ language: "English" }),
     extractUnderwritingSignals: () => ({}),
-    routeSellerConversation: () => ({
+    resolveSellerAutoReplyPlan: () => ({
       handled: true,
       should_queue_reply: false,
-      next_expected_stage: "ownership_check",
+      next_stage: "ownership_check",
       selected_use_case: "ownership_check",
       template_lookup_use_case: "ownership_check",
     }),
@@ -200,10 +200,10 @@ test("replay-inbound does not fail when lifecycle CSV is missing and logs replay
   __setReplayInboundTestDeps({
     classify: async () => ({ language: "English" }),
     extractUnderwritingSignals: () => ({}),
-    routeSellerConversation: () => ({
+    resolveSellerAutoReplyPlan: () => ({
       handled: true,
       should_queue_reply: true,
-      next_expected_stage: "consider_selling",
+      next_stage: "consider_selling",
       selected_use_case: "consider_selling",
       template_lookup_use_case: "consider_selling",
     }),
@@ -332,13 +332,13 @@ test("replay rendered_message_text is sanitized before returning output", async 
   __setReplayInboundTestDeps({
     classify: async () => ({ language: "English" }),
     extractUnderwritingSignals: () => ({}),
-    routeSellerConversation: () => ({
+    resolveSellerAutoReplyPlan: () => ({
       handled: true,
       should_queue_reply: true,
-      next_expected_stage: "consider_selling",
+      next_stage: "consider_selling",
       selected_use_case: "consider_selling",
       template_lookup_use_case: "consider_selling",
-      detected_intent: "Ownership Confirmed",
+      inbound_intent: "Ownership Confirmed",
       reasoning_summary: "Seller confirmed ownership",
       detected_language: "English",
     }),
