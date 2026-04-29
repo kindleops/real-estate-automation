@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 import {
-  SELLER_FLOW_SAFETY_POLICY,
   SELLER_FLOW_SAFETY_TIERS,
 } from "@/lib/domain/seller-flow/seller-flow-safety-policy.js";
 import {
   normalizeSellerInboundIntent,
-  resolveNextSellerStage,
-  resolveAutoReplyUseCase,
-  shouldSuppressSellerAutoReply,
+  resolveSellerAutoReplyPlan,
 } from "@/lib/domain/seller-flow/resolve-seller-auto-reply-plan.js";
+import {
+  buildDeterministicStageMap,
+  resolveDeterministicStageTransition,
+} from "@/lib/domain/seller-flow/deterministic-stage-map.js";
 
 /**
  * GET /api/diagnostics/stage-map
@@ -25,26 +26,11 @@ export async function GET(request) {
   const body = searchParams.get("body");
   const filter_stage = searchParams.get("current_stage");
 
-  // Build the full stage map from the policy
-  const stage_map = [];
-
-  for (const [current_stage, intents] of Object.entries(SELLER_FLOW_SAFETY_POLICY)) {
-    if (filter_stage && current_stage !== filter_stage) continue;
-
-    for (const [intent, transition] of Object.entries(intents)) {
-      stage_map.push({
-        current_stage,
-        inbound_intent: intent,
-        next_stage: transition.next_stage,
-        template_use_case: transition.template,
-        safety_tier: transition.safety,
-        auto_send_eligible: transition.safety === SELLER_FLOW_SAFETY_TIERS.AUTO_SEND,
-      });
-    }
-  }
+  const stage_map = buildDeterministicStageMap({ current_stage: filter_stage || null });
 
   const result = {
     ok: true,
+    map_type: "deterministic_stage_map_v1",
     total_transitions: stage_map.length,
     safety_tiers: { ...SELLER_FLOW_SAFETY_TIERS },
     stage_map,
@@ -52,41 +38,42 @@ export async function GET(request) {
 
   // If body text is provided, also run live classification against the map
   if (body) {
-    const input = {
+    const planning_input = {
       message_body: body,
       current_stage: filter_stage || null,
       auto_reply_enabled: true,
     };
 
-    const detected_intent = normalizeSellerInboundIntent(input);
-    const next_stage = resolveNextSellerStage(input);
-    const selected_use_case = resolveAutoReplyUseCase(input);
-    const suppression = shouldSuppressSellerAutoReply(input);
-
-    // Find the matching policy entry
-    const policy_match =
-      SELLER_FLOW_SAFETY_POLICY[filter_stage]?.[detected_intent] ||
-      SELLER_FLOW_SAFETY_POLICY.global[detected_intent] ||
-      null;
+    const detected_intent = normalizeSellerInboundIntent(planning_input);
+    const transition = resolveDeterministicStageTransition({
+      current_stage: filter_stage || null,
+      inbound_intent: detected_intent,
+      should_queue_reply: true,
+      autopilot_enabled: true,
+    });
+    const plan = await resolveSellerAutoReplyPlan(planning_input);
 
     result.live_classification = {
       input_body: body,
       input_current_stage: filter_stage || "(none)",
       detected_intent,
-      resolved_next_stage: next_stage,
-      resolved_use_case: selected_use_case,
-      suppression,
-      policy_match: policy_match
-        ? {
-            next_stage: policy_match.next_stage,
-            template: policy_match.template,
-            safety_tier: policy_match.safety,
-            auto_send_eligible: policy_match.safety === SELLER_FLOW_SAFETY_TIERS.AUTO_SEND,
-          }
-        : { warning: "No policy entry found for this stage+intent combo — defaults to REVIEW" },
+      resolved_next_stage: plan.next_stage,
+      resolved_use_case: plan.selected_use_case,
+      suppression_reason: plan.suppression_reason,
+      would_queue_reply: Boolean(plan.should_queue_reply),
+      safety_tier: plan.safety_tier,
+      policy_match: {
+        current_stage: transition.current_stage,
+        inbound_intent: transition.inbound_intent,
+        next_stage: transition.next_stage,
+        template_use_case: transition.template_use_case,
+        safety_tier: transition.safety_tier,
+        auto_send_eligible: transition.auto_send_eligible,
+        policy_source: transition.policy_source,
+        deterministic_match: transition.deterministic_match,
+      },
       routing_consistent:
-        policy_match?.next_stage === next_stage ||
-        !policy_match,
+        !transition.next_stage || transition.next_stage === plan.next_stage,
     };
   }
 

@@ -35,6 +35,42 @@ export function normalizeSellerInboundIntent(input) {
   if (!text) return "unclear";
 
   const isMatch = (words) => words.some((w) => text.includes(w));
+  const includesWholeWord = (word) => new RegExp(`(^|\\s)${word}(\\s|$)`, "i").test(text);
+
+  const isOwnershipAffirmation = () => {
+    if (
+      isMatch([
+        "yes it is",
+        "that is mine",
+        "i own it",
+        "correct",
+        "es mía",
+        "es mia",
+      ])
+    ) {
+      return true;
+    }
+
+    return (
+      includesWholeWord("yes") ||
+      text === "i do" ||
+      includesWholeWord("sí") ||
+      includesWholeWord("si")
+    );
+  };
+
+  if (
+    isMatch([
+      "texting someone at",
+      "late night",
+      "bad business practice",
+      "do not work with you",
+      "i will not work with you",
+      "too late to text",
+    ])
+  ) {
+    return "timing_complaint";
+  }
 
   if (isMatch(["stop", "unsubscribe", "remove me", "take me off", "no me contactes", "elimíname", "borrar de lista"]) || classification.compliance_flag === "stop_texting") {
     return "opt_out";
@@ -60,7 +96,7 @@ export function normalizeSellerInboundIntent(input) {
     return "tenant_or_occupancy";
   }
 
-  if (isMatch(["yes", "i do", "yes it is", "that is mine", "i own it", "correct", "sí", "si", "es mía", "es mia"])) {
+  if (isOwnershipAffirmation()) {
     return "ownership_confirmed";
   }
 
@@ -99,6 +135,7 @@ export function resolveNextSellerStage(input) {
     case "opt_out": return "stop_or_opt_out";
     case "wrong_person": return "wrong_person";
     case "hostile_or_legal": return "hostile_or_legal";
+    case "timing_complaint": return "hostile_or_legal";
     case "not_interested": return "not_interested";
     case "listed_or_unavailable": return "listed_or_unavailable";
     case "tenant_or_occupancy": return "tenant_or_occupancy";
@@ -147,6 +184,7 @@ export function shouldSuppressSellerAutoReply(input) {
   if (!input.auto_reply_enabled && !input.force_queue_reply) return { suppress: true, reason: "auto_reply_disabled" };
   
   if (intent === "hostile_or_legal") return { suppress: true, reason: "hostile_or_legal_intent" };
+  if (intent === "timing_complaint") return { suppress: true, reason: "timing_complaint_manual_review" };
   if (intent === "opt_out" && !input.system_only) return { suppress: true, reason: "opt_out_intent_no_marketing" };
   if (intent === "not_interested") return { suppress: true, reason: "not_interested_intent" };
   

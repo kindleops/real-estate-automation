@@ -14,6 +14,9 @@ import {
   SELLER_FLOW_SAFETY_TIERS,
   SELLER_FLOW_SAFETY_POLICY,
 } from "@/lib/domain/seller-flow/seller-flow-safety-policy.js";
+import {
+  resolveDeterministicStageTransition,
+} from "@/lib/domain/seller-flow/deterministic-stage-map.js";
 
 // ─── Intent Detection ────────────────────────────────────────────────────────
 
@@ -35,6 +38,20 @@ test("intent: wrong person detected from 'wrong number'", () => {
 test("intent: hostile detected from 'my attorney will contact you'", () => {
   const intent = normalizeSellerInboundIntent({ message_body: "my attorney will contact you" });
   assert.equal(intent, "hostile_or_legal");
+});
+
+test("intent: late-night complaint does not classify as ownership_confirmed", () => {
+  const intent = normalizeSellerInboundIntent({
+    message_body:
+      "Texting someone at 10:30pm with this kind of question is bad business practice, so I will not work with you.",
+  });
+  assert.notEqual(intent, "ownership_confirmed");
+  assert.equal(intent, "timing_complaint");
+});
+
+test("intent: Spanish remove-me phrase maps to opt_out", () => {
+  const intent = normalizeSellerInboundIntent({ message_body: "No elimíname de tu lista" });
+  assert.equal(intent, "opt_out");
 });
 
 test("intent: not interested detected", () => {
@@ -434,4 +451,70 @@ test("consistency: intent normalizer covers all safety policy intents", () => {
       `Critical intent '${intent}' not found in safety policy`
     );
   }
+});
+
+test("deterministic: ownership_confirmed maps to consider_selling (review tier)", () => {
+  const transition = resolveDeterministicStageTransition({
+    current_stage: "Ownership Confirmation",
+    inbound_intent: "ownership_confirmed",
+    should_queue_reply: true,
+    autopilot_enabled: true,
+  });
+
+  assert.equal(transition.next_stage, "consider_selling");
+  assert.equal(transition.template_use_case, "consider_selling");
+  assert.equal(transition.safety_tier, "review");
+  assert.equal(transition.auto_send_eligible, false);
+});
+
+test("deterministic: info_request maps to info_source_explanation", () => {
+  const transition = resolveDeterministicStageTransition({
+    current_stage: "S1",
+    inbound_intent: "info_request",
+    should_queue_reply: true,
+    autopilot_enabled: true,
+  });
+
+  assert.equal(transition.next_stage, "info_source_explanation");
+  assert.equal(transition.template_use_case, "info_source_explanation");
+  assert.equal(transition.auto_send_eligible, false);
+});
+
+test("deterministic: opt_out suppresses with no template and no queue", () => {
+  const transition = resolveDeterministicStageTransition({
+    current_stage: null,
+    inbound_intent: "opt_out",
+    should_queue_reply: true,
+    autopilot_enabled: true,
+  });
+
+  assert.equal(transition.next_stage, "stop_or_opt_out");
+  assert.equal(transition.template_use_case, null);
+  assert.equal(transition.safety_tier, "suppress");
+  assert.equal(transition.auto_send_eligible, false);
+  assert.equal(transition.should_queue_reply, false);
+});
+
+test("deterministic: wrong_person is never auto-send eligible", () => {
+  const transition = resolveDeterministicStageTransition({
+    current_stage: null,
+    inbound_intent: "wrong_person",
+    should_queue_reply: true,
+    autopilot_enabled: true,
+  });
+
+  assert.equal(transition.auto_send_eligible, false);
+});
+
+test("deterministic: hostile_or_legal suppresses", () => {
+  const transition = resolveDeterministicStageTransition({
+    current_stage: null,
+    inbound_intent: "hostile_or_legal",
+    should_queue_reply: true,
+    autopilot_enabled: true,
+  });
+
+  assert.equal(transition.safety_tier, "suppress");
+  assert.equal(transition.auto_send_eligible, false);
+  assert.equal(transition.should_queue_reply, false);
 });
