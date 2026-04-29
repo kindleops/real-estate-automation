@@ -151,9 +151,8 @@ test("inbound webhook passes create_brain_if_missing: true to loadContext", asyn
   assert.equal(load_context_calls[0]?.create_brain_if_missing, true);
   // The mock loadContext doesn't actually call createBrain, and the mock context
   // has no brain, so shouldCreateBrainForInbound controls the post-queue create.
-  // For "Who is this?" the plan does not have "Ownership Confirmed" intent, so
-  // the narrow shouldCreateBrainForInbound gate still returns false.
-  assert.equal(create_brain_count, 0);
+  // For "Who is this?" the plan now matches the expanded brain creation criteria.
+  assert.equal(create_brain_count, 1);
   assert.equal(sync_pipeline_args?.create_if_missing, false);
 });
 

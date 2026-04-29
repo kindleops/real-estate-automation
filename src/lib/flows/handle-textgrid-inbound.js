@@ -413,6 +413,8 @@ const PRE_PIPELINE_USE_CASES = new Set([
 function shouldCreateBrainForInbound({
   brain_id = null,
   seller_stage_reply = null,
+  context = null,
+  route = null,
 } = {}) {
   if (brain_id) return false;
 
@@ -422,9 +424,43 @@ function shouldCreateBrainForInbound({
     plan?.selected_variant_group
   );
 
+  // 1. Check if we have enough context to warrant a brain
+  const has_sufficient_context = Boolean(
+    context?.ids?.master_owner_id ||
+    context?.ids?.property_id ||
+    context?.recent?.outbound_pair_match
+  );
+
+  if (!has_sufficient_context) return false;
+
+  // 2. Check if the selected use case is one we want to track with a brain
+  const ALLOWED_BRAIN_STAGES = new Set([
+    SELLER_FLOW_STAGES.OWNERSHIP_CHECK,
+    SELLER_FLOW_STAGES.OWNERSHIP_CHECK_FOLLOW_UP,
+    SELLER_FLOW_STAGES.CONSIDER_SELLING,
+    SELLER_FLOW_STAGES.CONSIDER_SELLING_FOLLOW_UP,
+    SELLER_FLOW_STAGES.ASKING_PRICE,
+    SELLER_FLOW_STAGES.ASKING_PRICE_FOLLOW_UP,
+    SELLER_FLOW_STAGES.PRICE_WORKS_CONFIRM_BASICS,
+    SELLER_FLOW_STAGES.PRICE_HIGH_CONDITION_PROBE,
+    SELLER_FLOW_STAGES.CREATIVE_PROBE,
+    SELLER_FLOW_STAGES.WHO_IS_THIS,
+    SELLER_FLOW_STAGES.WRONG_PERSON,
+    SELLER_FLOW_STAGES.NOT_INTERESTED,
+    SELLER_FLOW_STAGES.STOP_OR_OPT_OUT,
+  ]);
+
+  if (ALLOWED_BRAIN_STAGES.has(selected_use_case)) return true;
+
+  // 3. Fallback to route-based check
+  const routed_use_case = normalizeSellerFlowUseCase(route?.use_case, route?.variant_group);
+  if (ALLOWED_BRAIN_STAGES.has(routed_use_case)) return true;
+
+  // 4. Specific intent match
   return (
-    plan?.detected_intent === "Ownership Confirmed" &&
-    selected_use_case === SELLER_FLOW_STAGES.CONSIDER_SELLING
+    plan?.detected_intent === "Ownership Confirmed" ||
+    plan?.detected_intent === "Property Interest" ||
+    plan?.detected_intent === "Ownership Confirmation"
   );
 }
 
@@ -711,19 +747,8 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         fallback_message_event_id = fallback_event?.item_id || null;
       } catch {}
 
-      await postInboundDiscordReviewCard({
-        runtimeDeps,
-        message_event_id: fallback_message_event_id,
-        inbound_from,
-        message_body,
-        context: null,
-        classification: null,
-        route: null,
-        seller_stage_reply: null,
-        inbound_autopilot_enabled: false,
-        context_incomplete: true,
-        existing_metadata: {},
-      }).catch(() => {});
+      // Consolidate Discord review card posting or rely on router alert. 
+      // Removed redundant card call to ensure exactly one notification per event.
 
       await runtimeDeps.completeIdempotentProcessing({
         record_item_id: idempotency.record_item_id,
@@ -743,6 +768,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         },
       });
 
+      unknown_result.matched = true;
       return unknown_result;
     }
 
@@ -1172,7 +1198,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         };
       }
 
-      if (shouldCreateBrainForInbound({ brain_id, seller_stage_reply: seller_stage_preview })) {
+      if (shouldCreateBrainForInbound({ brain_id, seller_stage_reply: seller_stage_preview, context, route })) {
         brain_item = await runtimeDeps.createBrain({
           master_owner_id,
           prospect_id,
@@ -1580,6 +1606,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       contract,
       pipeline,
       idempotency_key,
+      matched: true,
     };
 
     await runtimeDeps.completeIdempotentProcessing({
