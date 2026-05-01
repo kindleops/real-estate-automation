@@ -5,6 +5,7 @@ import {
   getNumberValue,
   getTextValue,
 } from "@/lib/providers/podio.js";
+import { isManualInboxSend } from "@/lib/domain/queue/is-manual-inbox-send.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -33,6 +34,13 @@ export function validateSendQueueItem(queue_item = null) {
   }
 
   const queue_status = getCategoryValue(queue_item, "queue-status", null) || clean(queue_item.queue_status);
+  const use_case_template = getCategoryValue(queue_item, "use-case-template", null);
+  const message_type = clean(queue_item?.message_type || queue_item?.metadata?.message_type || "");
+  const manual_inbox_send = isManualInboxSend({
+    ...queue_item,
+    use_case_template,
+    message_type,
+  });
   const phone_item_id =
     getFirstAppReferenceId(queue_item, "phone-number", null) ||
     queue_item.phone_item_id ||
@@ -46,10 +54,25 @@ export function validateSendQueueItem(queue_item = null) {
   const message_text =
     getTextValue(queue_item, "message-text", "") ||
     clean(queue_item.message_text || queue_item.message_body || queue_item.rendered_message_text || "");
+  const to_phone_number = clean(
+    queue_item?.to_phone_number ||
+      queue_item?.to ||
+      queue_item?.phone ||
+      queue_item?.recipient_phone ||
+      queue_item?.canonical_e164 ||
+      queue_item?.["canonical-e164"] ||
+      queue_item?.phone_hidden ||
+      queue_item?.["phone-hidden"]
+  );
+  const from_phone_number = clean(
+    queue_item?.from_phone_number ||
+      queue_item?.from ||
+      queue_item?.selected_from_number ||
+      queue_item?.outbound_number_phone
+  );
   const retry_count = Number(getNumberValue(queue_item, "retry-count", 0) || 0);
   const max_retries = Number(getNumberValue(queue_item, "max-retries", 3) || 3);
   const touch_number = Number(getNumberValue(queue_item, "touch-number", 0) || 0);
-  const use_case_template = getCategoryValue(queue_item, "use-case-template", null);
 
   if (queue_status && isTerminalStatus(queue_status)) {
     return {
@@ -60,7 +83,7 @@ export function validateSendQueueItem(queue_item = null) {
     };
   }
 
-  if (!phone_item_id) {
+  if (!manual_inbox_send && !phone_item_id) {
     return {
       ok: false,
       reason: "missing_phone_item",
@@ -68,7 +91,7 @@ export function validateSendQueueItem(queue_item = null) {
     };
   }
 
-  if (!textgrid_number_item_id) {
+  if (!manual_inbox_send && !textgrid_number_item_id) {
     return {
       ok: false,
       reason: "missing_textgrid_number",
@@ -84,6 +107,24 @@ export function validateSendQueueItem(queue_item = null) {
     };
   }
 
+  if (manual_inbox_send) {
+    if (!to_phone_number) {
+      return {
+        ok: false,
+        reason: "missing_to_phone_number",
+        queue_status,
+      };
+    }
+
+    if (!from_phone_number) {
+      return {
+        ok: false,
+        reason: "missing_from_phone_number",
+        queue_status,
+      };
+    }
+  }
+
   // Reject one-word / too-short bodies.  These are truncation artifacts caused by
   // multiline template text being stored in a single-line Podio field — Podio keeps
   // only the first line, collapsing "Hi\nDear {owner}…" to "Hi".  A legitimate
@@ -91,7 +132,7 @@ export function validateSendQueueItem(queue_item = null) {
   // shorter is never intentional outreach and would be caught by carrier content
   // filters anyway.
   const normalized_body = clean(message_text);
-  if (hasBlankSellerGreeting(normalized_body)) {
+  if (!manual_inbox_send && hasBlankSellerGreeting(normalized_body)) {
     return {
       ok: false,
       reason: "blank_greeting_message_body",
@@ -101,7 +142,7 @@ export function validateSendQueueItem(queue_item = null) {
   }
 
   const word_count = normalized_body.split(/\s+/).filter(Boolean).length;
-  if (word_count < 3) {
+  if (!manual_inbox_send && word_count < 3) {
     return {
       ok: false,
       reason: "junk_message_body",
@@ -144,7 +185,7 @@ export function validateSendQueueItem(queue_item = null) {
   // This catches rows that slipped through before the require_podio_template
   // gate was added to the feeder.
   const template_relation_id = getFirstAppReferenceId(queue_item, "template-2", null);
-  if (!template_relation_id) {
+  if (!manual_inbox_send && !template_relation_id) {
     return {
       ok: false,
       reason: "unattached_template",

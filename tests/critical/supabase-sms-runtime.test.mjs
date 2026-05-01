@@ -632,6 +632,12 @@ test("processSendQueueItem resolves seller_first_name from candidate_snapshot.ph
   });
 
   const result = await processSendQueueItem(row, {
+    evaluateContactWindow: () => ({
+      allowed: true,
+      reason: "within_contact_window",
+      timezone: "America/Chicago",
+      valid_window: true,
+    }),
     selectAvailableTextgridNumber: async () => ({
       ok: true,
       from_phone_number: "+16128060495",
@@ -658,6 +664,60 @@ test("processSendQueueItem resolves seller_first_name from candidate_snapshot.ph
 
   assert.equal(result.sent, true);
   assert.equal(captured_seller_first_name, "Mia");
+});
+
+test("processSendQueueItem sends manual inbox body as-is without template requirements", async () => {
+  let sent_payload = null;
+
+  const row = buildSupabaseQueueRow({
+    id: "sq-process-manual-1",
+    queue_key: "inbox:send_now:sq-process-manual-1",
+    queue_id: "inbox:send_now:sq-process-manual-1",
+    seller_first_name: null,
+    template_id: null,
+    message_type: "manual_reply",
+    use_case_template: "inbox_manual_send_now",
+    message_body: "Hi {{owner}}, custom manual text exactly as typed.",
+    metadata: {
+      selected_template_id: null,
+      candidate_snapshot: null,
+    },
+  });
+
+  const result = await processSendQueueItem(row, {
+    evaluateContactWindow: () => ({
+      allowed: true,
+      reason: "within_contact_window",
+      timezone: "America/Chicago",
+      valid_window: true,
+    }),
+    selectAvailableTextgridNumber: async () => ({
+      ok: true,
+      from_phone_number: "+16128060495",
+      selected: { id: "tn-1", phone_number: "+16128060495", market: "houston" },
+    }),
+    updateSendQueueRowWithLock: async (row_id, lock_token, payload) => ({
+      ...row,
+      ...payload,
+      id: row_id,
+      queue_row_id: row_id,
+      queue_item_id: row_id,
+      item_id: row_id,
+      lock_token,
+    }),
+    sendTextgridSMS: async (payload) => {
+      sent_payload = payload;
+      return {
+        sid: "SM-sq-process-manual-1",
+        raw: { status: "queued" },
+      };
+    },
+    writeOutboundSuccessMessageEvent: async () => ({ item_id: "evt-manual-1" }),
+  });
+
+  assert.equal(result.sent, true);
+  assert.ok(sent_payload);
+  assert.equal(sent_payload.body, "Hi {{owner}}, custom manual text exactly as typed.");
 });
 
 test("runDevSendTest inserts a canonical queued row and optionally runs the queue immediately", async () => {

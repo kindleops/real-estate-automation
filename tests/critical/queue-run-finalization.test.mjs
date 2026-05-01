@@ -447,6 +447,75 @@ test("malformed row with null selected_template_id and candidate_snapshot become
   assert.equal(result.results[0].final_queue_status, "paused_invalid_queue_row");
 });
 
+test("manual inbox row without selected_template_id is runnable and not paused invalid", async () => {
+  const row = makeRow(9010, {
+    queue_key: "inbox:send_now:9010",
+    template_id: null,
+    seller_first_name: null,
+    message_type: "manual_reply",
+    use_case_template: "inbox_manual_send_now",
+    metadata: {
+      selected_template_id: null,
+      candidate_snapshot: null,
+    },
+  });
+  const harness = makeHarness([row]);
+
+  const result = await runSendQueue({ limit: 1, now: NOW }, harness.deps);
+
+  assert.equal(harness.pause_invalid_calls.length, 0);
+  assert.equal(harness.process_calls.length, 1);
+  assert.equal(result.sent_count, 1);
+});
+
+test("manual inbox row with missing body still pauses invalid", async () => {
+  const row = makeRow(9011, {
+    queue_key: "inbox:send_now:9011",
+    template_id: null,
+    seller_first_name: null,
+    message_body: "",
+    message_text: "",
+    message_type: "manual_reply",
+    use_case_template: "inbox_manual_send_now",
+    metadata: {
+      selected_template_id: null,
+      candidate_snapshot: null,
+    },
+  });
+  const harness = makeHarness([row]);
+
+  const result = await runSendQueue({ limit: 1, now: NOW }, harness.deps);
+
+  assert.equal(harness.rows.get("9011").queue_status, "paused_invalid_queue_row");
+  assert.equal(harness.pause_invalid_calls[0].reason, "missing_message_body");
+  assert.equal(harness.process_calls.length, 0);
+  assert.equal(result.invalid_queue_row_count, 1);
+});
+
+test("manual inbox row with missing to/from still pauses invalid", async () => {
+  const row = makeRow(9012, {
+    queue_key: "inbox:send_now:9012",
+    template_id: null,
+    seller_first_name: null,
+    to_phone_number: "",
+    from_phone_number: "",
+    message_type: "manual_reply",
+    use_case_template: "inbox_manual_send_now",
+    metadata: {
+      selected_template_id: null,
+      candidate_snapshot: null,
+    },
+  });
+  const harness = makeHarness([row]);
+
+  const result = await runSendQueue({ limit: 1, now: NOW }, harness.deps);
+
+  assert.equal(harness.rows.get("9012").queue_status, "paused_invalid_queue_row");
+  assert.equal(harness.pause_invalid_calls[0].reason, "missing_to_phone_number");
+  assert.equal(harness.process_calls.length, 0);
+  assert.equal(result.invalid_queue_row_count, 1);
+});
+
 test("provider exception claimed row does not remain sending", async () => {
   const row = makeRow(9004);
   const harness = makeHarness([row], {

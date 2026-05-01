@@ -7,6 +7,7 @@ import {
 import { withRunLock } from "@/lib/domain/runs/run-locks.js";
 import { isRevisionLimitExceeded } from "@/lib/providers/podio.js";
 import { info, warn } from "@/lib/logging/logger.js";
+import { isManualInboxSend } from "@/lib/domain/queue/is-manual-inbox-send.js";
 import { hasSupabaseConfig } from "@/lib/supabase/client.js";
 import {
   claimSendQueueRow,
@@ -399,17 +400,18 @@ function hasQueueSellerFirstName(row = null) {
 
 function invalidQueueRowReason(row = null) {
   const normalized = normalizeSendQueueRow(row);
+  const manual_inbox_send = isManualInboxSend(normalized);
   const selected_template_id = clean(
     normalized.template_id ||
       metadataValue(normalized, "selected_template_id") ||
       metadataValue(normalized, "template_id")
   );
-  if (!selected_template_id) return "missing_selected_template_id";
-  if (!hasCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
+  if (!manual_inbox_send && !selected_template_id) return "missing_selected_template_id";
+  if (!manual_inbox_send && !hasCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
   if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
   if (!clean(normalized.to_phone_number)) return "missing_to_phone_number";
   if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
-  if (!hasQueueSellerFirstName(normalized)) return "missing_seller_first_name";
+  if (!manual_inbox_send && !hasQueueSellerFirstName(normalized)) return "missing_seller_first_name";
   return null;
 }
 

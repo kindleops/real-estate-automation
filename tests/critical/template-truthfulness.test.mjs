@@ -271,6 +271,24 @@ test("validateSendQueueItem accepts queue row with valid template relation", () 
   assert.strictEqual(result.ok, true, `expected ok=true, got reason: ${result.reason}`);
 });
 
+test("validateSendQueueItem allows manual inbox send with no selected template id", () => {
+  const manual_item = {
+    item_id: 3001,
+    queue_key: "inbox:send_now:abc123",
+    queue_status: "queued",
+    message_type: "manual_reply",
+    use_case_template: "inbox_manual_send_now",
+    to_phone_number: "+17133781814",
+    from_phone_number: "+12818458577",
+    message_body: "Exactly as typed by agent",
+    metadata: {},
+  };
+
+  const result = validateSendQueueItem(manual_item);
+
+  assert.equal(result.ok, true, `expected ok=true, got reason: ${result.reason}`);
+});
+
 // ── 7. Reengagement NOT chosen from touch_number alone ───────────────────────
 
 test("reengagement fallback skipped when no prior outreach evidence (touch_count < 2, no inbound)", async () => {

@@ -38,6 +38,7 @@ import {
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { syncOfferRecord } from "@/lib/domain/offers/sync-offer-record.js";
 import { sanitizeSmsTextValue } from "@/lib/sms/sanitize.js";
+import { isManualInboxSend } from "@/lib/domain/queue/is-manual-inbox-send.js";
 
 const QUEUE_TABLE = "send_queue";
 
@@ -1078,10 +1079,12 @@ async function processLegacyQueueItem(resolved_queue_row, deps = {}) {
 
 async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
   const send_textgrid_sms = deps.sendTextgridSMS || sendTextgridSMS;
+  const evaluate_contact_window = deps.evaluateContactWindow || evaluateContactWindow;
   const started_at = Date.now();
   const now = deps.now || nowIso();
   let queue_row = normalizeSendQueueRow(resolved_queue_row);
   const queue_row_id = getQueueRowId(queue_row);
+  const manual_inbox_send = isManualInboxSend(queue_row);
   let lock_token = clean(deps.claimedLockToken || queue_row?.lock_token) || null;
 
   if (!queue_row_id) {
@@ -1115,7 +1118,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       lock_token = claim.lock_token || lock_token;
     }
 
-    const contact_window = evaluateContactWindow(queue_row, {
+    const contact_window = evaluate_contact_window(queue_row, {
       ...deps,
       now,
     });
@@ -1194,7 +1197,7 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       });
     }
 
-    if (!seller_first_name) {
+    if (!manual_inbox_send && !seller_first_name) {
       // Mark row as blocked — do not send.
       const supabase_client = getSupabase(deps);
       await supabase_client
@@ -1247,7 +1250,11 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
     // This is a belt-and-suspenders guard for rows that bypassed feeder checks.
     const BLANK_GREETING_GUARD_RE = /^(hi|hey|hello|hola|ola|marhaba)\s*,/i;
     const BLANK_GREETING_INLINE_RE = /(Hello\s*,|Hey\s*,|Hi\s*,|Hola\s*,|Ola\s*,|Marhaba\s*,)/;
-    if (BLANK_GREETING_GUARD_RE.test(message_fields.body) || BLANK_GREETING_INLINE_RE.test(message_fields.body)) {
+    if (
+      !manual_inbox_send &&
+      (BLANK_GREETING_GUARD_RE.test(message_fields.body) ||
+        BLANK_GREETING_INLINE_RE.test(message_fields.body))
+    ) {
       const supabase_client = getSupabase(deps);
       await supabase_client
         .from(QUEUE_TABLE)
