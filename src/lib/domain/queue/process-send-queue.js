@@ -1164,15 +1164,18 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       now,
     });
 
+    const manual_inbox_send = isManualInboxSend(queue_row);
+
     console.log("CONTACT WINDOW CHECK", {
       row_id: queue_row_id,
       allowed: contact_window.allowed,
+      manual_inbox_send,
       reason: contact_window.reason,
       timezone: contact_window.timezone,
       valid_window: contact_window.valid_window,
     });
 
-    if (!contact_window.allowed) {
+    if (!contact_window.allowed && !manual_inbox_send) {
       await releaseSkippedQueueRow(queue_row, lock_token, contact_window.reason, {
         ...deps,
         now,

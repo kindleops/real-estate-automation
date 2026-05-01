@@ -9,7 +9,7 @@ import { captureRouteException, addSentryBreadcrumb } from "@/lib/monitoring/sen
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 import { info, warn } from "@/lib/logging/logger.js";
-import { isManualInboxSend } from "@/lib/domain/queue/is-manual-inbox-send.js";
+import { isManualInboxSend, isUnknownAutoReply } from "@/lib/domain/queue/is-manual-inbox-send.js";
 
 const SEND_QUEUE_TABLE = "send_queue";
 const MESSAGE_EVENTS_TABLE = "message_events";
@@ -363,14 +363,15 @@ export function resolveQueueSellerFirstName(row = null) {
 function preclaimInvalidQueueRowReason(row = null) {
   const normalized = normalizeSendQueueRow(row);
   const manual_inbox_send = isManualInboxSend(normalized);
+  const unknown_auto_reply = isUnknownAutoReply(normalized);
 
   if (!normalizeQueueRowId(normalized.id, null)) return "missing_queue_row_id";
   if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
   if (!clean(resolveQueueDestinationPhone(normalized).phone)) return "missing_to_phone_number";
   if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
 
-  // Manual inbox sends are allowed to omit template/candidate snapshot/seller name.
-  if (manual_inbox_send) return null;
+  // Manual inbox sends and unknown auto replies are allowed to omit template/candidate snapshot/seller name.
+  if (manual_inbox_send || unknown_auto_reply) return null;
 
   if (!hasSelectedTemplateReference(normalized)) return "missing_selected_template_id";
   if (!getCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
@@ -572,7 +573,8 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
     }
 
     const contact_window = evaluate_contact_window(decision.row, { ...deps, now });
-    if (contact_window && contact_window.allowed === false) {
+    const manual_inbox_send = isManualInboxSend(decision.row);
+    if (contact_window && contact_window.allowed === false && !manual_inbox_send) {
       preclaim_outside_window_excluded_count += 1;
       skipped.push({
         id: decision.row?.id || null,
