@@ -1118,6 +1118,47 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       lock_token = claim.lock_token || lock_token;
     }
 
+    // ── Debug queue key cancellation: never send to TextGrid ─────────────
+    const queue_key_for_debug = clean(queue_row?.queue_key || queue_row?.queue_id || "");
+    if (clean(queue_key_for_debug).startsWith("debug:")) {
+      const now = deps.now || nowIso();
+
+      const cancelled_payload = {
+        queue_status: "cancelled",
+        is_locked: false,
+        locked_at: null,
+        lock_token: null,
+        updated_at: now,
+        metadata: {
+          ...(queue_row.metadata ?? {}),
+          skip_reason: "debug_queue_key_ignored",
+          final_queue_status: "cancelled",
+          cancelled_by: "queue_runner_debug_key",
+          cancelled_at: now,
+        },
+      };
+
+      // Use the existing updateQueueRow helper so test harnesses can DI updateQueueRow.
+      await updateQueueRow(queue_row_id, cancelled_payload, deps);
+
+      info("queue.run_debug_queue_ignored", {
+        queue_row_id,
+        queue_key: queue_key_for_debug,
+        message_type: queue_row.message_type || null,
+        use_case_template: queue_row.use_case_template || null,
+      });
+
+      return {
+        ok: true,
+        skipped: true,
+        reason: "debug_queue_key_ignored",
+        queue_status: "cancelled",
+        final_queue_status: "cancelled",
+        queue_row_id,
+        queue_item_id: queue_row_id,
+      };
+    }
+
     const contact_window = evaluate_contact_window(queue_row, {
       ...deps,
       now,
@@ -1239,6 +1280,16 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
       };
     }
 
+    info("queue.textgrid_send_attempt", {
+      queue_row_id,
+      queue_key: queue_row.queue_key || null,
+      message_type: queue_row.message_type || null,
+      use_case_template: queue_row.use_case_template || null,
+      to: message_fields.to,
+      from: message_fields.from,
+      manual_inbox_send: Boolean(manual_inbox_send),
+    });
+
     console.log("ABOUT TO SEND MESSAGE");
     console.log("SENDING SMS", {
       to: message_fields.to,
@@ -1323,6 +1374,14 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
     if (!provider_message_sid) {
       throw new Error("SEND FAILED - NO SID");
     }
+
+    info("queue.textgrid_send_success", {
+      queue_row_id,
+      queue_key: queue_row.queue_key || null,
+      provider_message_id: provider_message_sid,
+      to: message_fields.to,
+      from: message_fields.from,
+    });
 
     queue_row = normalizeSendQueueRow({
       ...queue_row,
@@ -1438,6 +1497,13 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
   } catch (error) {
     console.log("TEXTGRID RAW RESPONSE", error?.data || error?.raw_text || null);
     console.log("SEND ERROR:", error?.message || "Unknown error");
+
+    warn("queue.textgrid_send_failure", {
+      queue_row_id,
+      queue_key: clean(queue_row?.queue_key || queue_row?.queue_id || ""),
+      message: error?.message || "Unknown error",
+      manual_inbox_send: Boolean(manual_inbox_send),
+    });
 
     // Blank greeting errors from TextGrid guard should pause as name_missing not failed.
     const is_blank_greeting_error = /blank.*(greeting|name)|missing.*seller_first_name/i.test(error?.message || "");

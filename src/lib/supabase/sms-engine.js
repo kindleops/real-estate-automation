@@ -8,6 +8,8 @@ import { hasSupabaseConfig, supabase as defaultSupabase } from "@/lib/supabase/c
 import { captureRouteException, addSentryBreadcrumb } from "@/lib/monitoring/sentry.js";
 import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
+import { info, warn } from "@/lib/logging/logger.js";
+import { isManualInboxSend } from "@/lib/domain/queue/is-manual-inbox-send.js";
 
 const SEND_QUEUE_TABLE = "send_queue";
 const MESSAGE_EVENTS_TABLE = "message_events";
@@ -360,10 +362,16 @@ export function resolveQueueSellerFirstName(row = null) {
 
 function preclaimInvalidQueueRowReason(row = null) {
   const normalized = normalizeSendQueueRow(row);
+  const manual_inbox_send = isManualInboxSend(normalized);
+
   if (!normalizeQueueRowId(normalized.id, null)) return "missing_queue_row_id";
   if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
   if (!clean(resolveQueueDestinationPhone(normalized).phone)) return "missing_to_phone_number";
   if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
+
+  // Manual inbox sends are allowed to omit template/candidate snapshot/seller name.
+  if (manual_inbox_send) return null;
+
   if (!hasSelectedTemplateReference(normalized)) return "missing_selected_template_id";
   if (!getCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
   if (!resolveQueueSellerFirstName(normalized)) return "missing_seller_first_name";
@@ -417,6 +425,51 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   const preclaim_scan_limit = resolvePreclaimScanLimit(requested_limit, deps);
   const evaluate_contact_window = deps.evaluateContactWindow || evaluateContactWindow;
   const dry_run = Boolean(deps.dry_run || deps.dryRun);
+
+  const stale_lock_recovery_enabled =
+    deps.stale_lock_recovery_enabled ??
+    deps.enableStaleLockRecovery ??
+    deps.staleLockRecoveryEnabled ??
+    true;
+
+  const stale_lock_minutes = Number(deps.stale_lock_minutes ?? deps.staleLockMinutes ?? 15);
+
+  // ── Stale queued+locked lock recovery ────────────────────────────────
+  // If a prior queue run crashed after claiming a row but before finalizing,
+  // rows can remain `queue_status='queued'` with `is_locked=true`.
+  // We unlock them before selecting due rows.
+  if (!dry_run && stale_lock_recovery_enabled && Number.isFinite(stale_lock_minutes) && stale_lock_minutes > 0) {
+    const cutoff_iso = new Date(Date.now() - stale_lock_minutes * 60_000).toISOString();
+
+    try {
+      const { data: unlocked_rows, error: unlock_error } = await supabase
+        .from(SEND_QUEUE_TABLE)
+        .update({
+          is_locked: false,
+          locked_at: null,
+          lock_token: null,
+          updated_at: now,
+        })
+        .eq("queue_status", "queued")
+        .eq("is_locked", true)
+        .lt("locked_at", cutoff_iso)
+        .select("id");
+
+      if (unlock_error) throw unlock_error;
+
+      info("queue.unlock_stale_locked_rows", {
+        cutoff_iso,
+        stale_lock_minutes,
+        unlocked_count: Array.isArray(unlocked_rows) ? unlocked_rows.length : 0,
+      });
+    } catch (unlock_error) {
+      warn("queue.unlock_stale_locked_rows_failed", {
+        cutoff_iso,
+        stale_lock_minutes,
+        message: unlock_error?.message || "unknown_error",
+      });
+    }
+  }
 
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
