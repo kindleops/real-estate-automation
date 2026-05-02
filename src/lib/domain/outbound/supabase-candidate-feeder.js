@@ -429,6 +429,14 @@ export function normalizeCandidateRow(row = {}, defaults = {}) {
     phone_type: clean(pick(row.phone_type)),
     activity_status: clean(pick(row.activity_status)),
     sms_eligible: asBoolean(pick(row.sms_eligible), true),
+    // Progression & Audit fields
+    last_touch_number: asPositiveInteger(pick(row.last_touch_number, row.last_sent_touch_number), 0),
+    last_outbound_at: clean(pick(row.last_outbound_at)),
+    last_inbound_at: clean(pick(row.last_inbound_at)),
+    latest_contact_at: clean(pick(row.latest_contact_at)),
+    conversation_stage: clean(pick(row.conversation_stage)),
+    use_case_template: clean(pick(row.use_case_template)),
+    next_eligible_at: clean(pick(row.next_eligible_at)),
   };
 
   const seller_identity = resolveSellerIdentity(candidate);
@@ -1587,6 +1595,185 @@ export async function getSupabaseFeederCandidates(
   };
 }
 
+function getOrdinal(n) {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return s[(v - 20) % 10] || s[v] || s[0];
+}
+
+/**
+ * getQueueRowUseCase
+ * Extracts the normalized use case from various possible fields in a send_queue row.
+ */
+export function getQueueRowUseCase(row = {}) {
+  const metadata = row.metadata || {};
+  return clean(
+    row.use_case_template ||
+    row.template_use_case ||
+    metadata.template_use_case ||
+    metadata.selected_use_case ||
+    metadata.selected_template_use_case ||
+    metadata.use_case ||
+    ""
+  );
+}
+
+/**
+ * loadOutboundTouchHistory
+ * Queries send_queue for authoritative history for a candidate.
+ */
+export async function loadOutboundTouchHistory(candidate = {}, options = {}, deps = {}) {
+  const supabase = getSupabase(deps);
+  const phone = normalizePhone(candidate.canonical_e164);
+  
+  if (!candidate.master_owner_id || !candidate.property_id || !phone) {
+    return {
+      rows: [],
+      latest_sent_touch_number: 0,
+      latest_sent_use_case: "",
+      latest_outbound_at: "",
+      has_touch_1_ownership_check: false,
+      has_touch_2_consider_selling: false,
+      has_touch_3_seller_asking_price: false
+    };
+  }
+
+  const { data, error } = await supabase
+    .from(SEND_QUEUE_TABLE)
+    .select("id,queue_key,queue_status,touch_number,use_case_template,template_use_case,metadata,to_phone_number,scheduled_for,sent_at,created_at,updated_at")
+    .eq("master_owner_id", candidate.master_owner_id)
+    .eq("property_id", candidate.property_id)
+    .in("queue_status", ["queued", "sending", "sent"])
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    logger.error("Failed to load outbound touch history", { error, candidate_id: candidate.master_owner_id });
+    throw error;
+  }
+
+  const rows = (data || []).filter(row => normalizePhone(row.to_phone_number) === phone);
+  
+  const history = {
+    rows,
+    latest_sent_touch_number: 0,
+    latest_sent_use_case: "",
+    latest_outbound_at: "",
+    has_touch_1_ownership_check: false,
+    has_touch_2_consider_selling: false,
+    has_touch_3_seller_asking_price: false
+  };
+
+  for (const row of rows) {
+    const use_case = getQueueRowUseCase(row);
+    const touch_number = asPositiveInteger(row.touch_number, 0);
+    const outbound_at = row.sent_at || row.scheduled_for || row.created_at;
+
+    if (touch_number > history.latest_sent_touch_number && row.queue_status === "sent") {
+      history.latest_sent_touch_number = touch_number;
+      history.latest_sent_use_case = use_case;
+      history.latest_outbound_at = outbound_at;
+    }
+
+    if (touch_number === 1 && use_case === "ownership_check") history.has_touch_1_ownership_check = true;
+    if (touch_number === 2 && use_case === "consider_selling") history.has_touch_2_consider_selling = true;
+    if (touch_number === 3 && use_case === "seller_asking_price") history.has_touch_3_seller_asking_price = true;
+  }
+
+  return history;
+}
+
+export async function resolveNextOutboundTouch(candidate = {}, options = {}, deps = {}) {
+  const raw = candidate.raw || {};
+  
+  // 1. Extract candidate state from view fields
+  let last_sent_touch_number = asPositiveInteger(candidate.last_touch_number, 0);
+  let last_sent_use_case = clean(pick(candidate.use_case_template, raw.use_case_template, raw.last_sent_use_case));
+  let source = "progression_from_candidate_fields";
+  let history_context = null;
+
+  // 2. If candidate fields say no history, consult the authoritative send_queue
+  if (last_sent_touch_number === 0) {
+    const history = await loadOutboundTouchHistory(candidate, options, deps);
+    history_context = {
+      history_latest_sent_touch_number: history.latest_sent_touch_number,
+      history_latest_sent_use_case: history.latest_sent_use_case,
+      history_row_count: history.rows.length,
+      has_touch_1_ownership_check: history.has_touch_1_ownership_check,
+      has_touch_2_consider_selling: history.has_touch_2_consider_selling,
+      has_touch_3_seller_asking_price: history.has_touch_3_seller_asking_price
+    };
+
+    if (history.latest_sent_touch_number > 0 || history.has_touch_1_ownership_check) {
+      last_sent_touch_number = history.latest_sent_touch_number || (history.has_touch_1_ownership_check ? 1 : 0);
+      last_sent_use_case = history.latest_sent_use_case || (history.has_touch_1_ownership_check ? "ownership_check" : "");
+      source = "progression_from_send_queue_history";
+    }
+  }
+
+  // 3. Progression Logic
+  
+  // Case A: No history found anywhere
+  if (last_sent_touch_number === 0) {
+    return {
+      ok: true,
+      reason_code: "OK",
+      touch_number: 1,
+      template_use_case: "ownership_check",
+      stage_code: "S1",
+      sequence_position: "1st Touch",
+      is_first_touch: true,
+      source: "progression_initial",
+      history_context
+    };
+  }
+
+  // Case B: Last sent was Touch 1 ownership_check
+  if (last_sent_touch_number === 1 && (last_sent_use_case === "ownership_check" || last_sent_use_case === "")) {
+     return {
+      ok: true,
+      reason_code: "OK",
+      touch_number: 2,
+      template_use_case: "consider_selling",
+      stage_code: "S2",
+      sequence_position: "2nd Touch",
+      is_first_touch: false,
+      source,
+      history_context
+    };
+  }
+
+  // Case C: Last sent was Touch 2 consider_selling
+  if (last_sent_touch_number === 2 && last_sent_use_case === "consider_selling") {
+    return {
+      ok: true,
+      reason_code: "OK",
+      touch_number: 3,
+      template_use_case: "seller_asking_price",
+      stage_code: "S3",
+      sequence_position: "3rd Touch",
+      is_first_touch: false,
+      source,
+      history_context
+    };
+  }
+
+  // Fallback to view defaults if we can't figure it out
+  const current_touch_number = asPositiveInteger(candidate.touch_number, 1);
+  const current_use_case = clean(candidate.template_lookup_use_case || candidate.template_use_case || "ownership_check");
+
+  return {
+    ok: true,
+    reason_code: "OK",
+    touch_number: current_touch_number,
+    template_use_case: current_use_case,
+    stage_code: candidate.stage_code || "S1",
+    sequence_position: `${current_touch_number}${getOrdinal(current_touch_number)} Touch`,
+    is_first_touch: current_touch_number === 1,
+    source: "view_default",
+    history_context
+  };
+}
+
 async function hasDuplicateQueueItem(candidate = {}, options = {}, deps = {}) {
   if (typeof deps.hasDuplicateQueueItem === "function") {
     return deps.hasDuplicateQueueItem(candidate, options);
@@ -1595,9 +1782,9 @@ async function hasDuplicateQueueItem(candidate = {}, options = {}, deps = {}) {
   const supabase = getSupabase(deps);
   const statuses = ["queued", "sending", "sent"];
 
-  const { data, error } = await supabase
+  const { data, error, count } = await supabase
     .from(SEND_QUEUE_TABLE)
-    .select("id,queue_status,touch_number,to_phone_number,metadata")
+    .select("id,queue_status,queue_key,touch_number,to_phone_number,metadata,scheduled_for,sent_at,created_at,updated_at", { count: "exact" })
     .eq("master_owner_id", candidate.master_owner_id)
     .eq("property_id", candidate.property_id)
     .in("queue_status", statuses)
@@ -1611,13 +1798,38 @@ async function hasDuplicateQueueItem(candidate = {}, options = {}, deps = {}) {
 
   const matched = rows.find((row) => {
     const row_phone = normalizePhone(row?.to_phone_number);
-    const template_use_case = clean(
-      row?.metadata?.template_use_case || row?.metadata?.selected_use_case || row?.use_case_template
-    );
-    return row_phone === phone && template_use_case === clean(options.template_use_case);
+    const template_use_case = getQueueRowUseCase(row);
+    return row_phone === phone && template_use_case === clean(candidate.template_use_case);
   });
 
-  return Boolean(matched);
+  return {
+    duplicate: Boolean(matched),
+    policy: {
+      match_basis: [
+        "master_owner_id",
+        "property_id",
+        "touch_number",
+        "to_phone_number",
+        "template_use_case"
+      ],
+      blocking_statuses: statuses
+    },
+    matched_row: matched ? {
+      id: matched.id,
+      queue_status: matched.queue_status,
+      queue_key: matched.queue_key,
+      touch_number: matched.touch_number,
+      to_phone_number_masked: maskPhone(matched.to_phone_number),
+      template_use_case: clean(
+        matched?.metadata?.template_use_case || matched?.metadata?.selected_use_case || matched?.use_case_template
+      ),
+      scheduled_for: matched.scheduled_for,
+      sent_at: matched.sent_at,
+      created_at: matched.created_at,
+      updated_at: matched.updated_at
+    } : null,
+    scanned_duplicate_rows_count: count ?? rows.length
+  };
 }
 
 export async function evaluateCandidateEligibility(candidate = {}, options = {}, deps = {}) {
@@ -1646,9 +1858,18 @@ export async function evaluateCandidateEligibility(candidate = {}, options = {},
     return { ok: false, reason_code: REASON_CODES.PENDING_PRIOR_TOUCH, reason: "pending_prior_touch" };
   }
 
-  const duplicate = await hasDuplicateQueueItem(candidate, options, deps);
-  if (duplicate) {
-    return { ok: false, reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM, reason: "duplicate_queue_item" };
+  const duplicate_check = await hasDuplicateQueueItem(candidate, options, deps);
+  if (duplicate_check.duplicate) {
+    return { 
+      ok: false, 
+      reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM, 
+      reason: "duplicate_queue_item",
+      duplicate_check 
+    };
+  }
+
+  if (candidate.next_eligible_at && new Date(candidate.next_eligible_at).getTime() > new Date(options.now || Date.now()).getTime()) {
+    return { ok: false, reason_code: REASON_CODES.PENDING_PRIOR_TOUCH, reason: "next_eligible_at_future", next_eligible_at: candidate.next_eligible_at };
   }
 
   const window_check = evaluateContactWindow(

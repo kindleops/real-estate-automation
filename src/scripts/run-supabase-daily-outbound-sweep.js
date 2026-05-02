@@ -8,13 +8,14 @@ import { info, error } from "../lib/logging/logger.js";
  * and views for candidate discovery. Completely bypasses Podio views.
  */
 
-async function runDailySweep({ dry_run = true, limit = 100, scan_limit = 500 } = {}) {
+async function runDailySweep({ dry_run = true, limit = 100, scan_limit = 500, debug = false } = {}) {
   const now = new Date().toISOString();
-  info("supabase_daily_sweep.started", { now, dry_run, outbound_source: "supabase" });
+  info("supabase_daily_sweep.started", { now, dry_run, debug, outbound_source: "supabase" });
 
   const summary = {
     started_at: now,
     dry_run,
+    debug_enabled: debug,
     outbound_source: "supabase",
     total_queued: 0,
     total_scanned: 0,
@@ -27,6 +28,7 @@ async function runDailySweep({ dry_run = true, limit = 100, scan_limit = 500 } =
       dry_run,
       limit,
       scan_limit,
+      debug,
       now,
     });
 
@@ -56,6 +58,7 @@ if (isMain) {
   // Default to dry_run=true unless --live is explicitly passed
   const isLive = process.argv.includes("--live");
   const dry_run = !isLive;
+  const debug = process.argv.includes("--debug");
   
   const limitArg = process.argv.find(arg => arg.startsWith("--limit="));
   const limit = limitArg ? parseInt(limitArg.split("=")[1]) : 100;
@@ -63,7 +66,7 @@ if (isMain) {
   const scanLimitArg = process.argv.find(arg => arg.startsWith("--scan-limit="));
   const scan_limit = scanLimitArg ? parseInt(scanLimitArg.split("=")[1]) : 500;
 
-  runDailySweep({ dry_run, limit, scan_limit })
+  runDailySweep({ dry_run, limit, scan_limit, debug })
     .then((summary) => {
       console.log("Supabase Daily Sweep Summary:", JSON.stringify(summary, null, 2));
       process.exit(summary.errors.length > 0 ? 1 : 0);
