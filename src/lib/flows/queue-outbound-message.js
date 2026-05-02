@@ -467,6 +467,7 @@ export async function queueOutboundMessage({
   const property_context = {
     property_type: context?.summary?.property_type || null,
     owner_type: context?.summary?.owner_type || null,
+    unit_count: context?.summary?.unit_count || null,
     is_first_touch,
     touch_number: resolved_touch_number,
     is_multifamily: route?.is_multifamily_like || false,

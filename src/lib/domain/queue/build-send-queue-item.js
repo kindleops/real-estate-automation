@@ -1142,6 +1142,12 @@ export async function buildSendQueueItem({
         selected_template_source: selected_template_source ?? null,
         selected_template_item_id: template_reference.selected_template_item_id ?? null,
         selected_template_id: template_reference.selected_template_id ?? null,
+        selected_template_use_case: template_reference.selected_template_use_case ?? null,
+        selected_template_variant_group: template_reference.selected_template_variant_group ?? null,
+        selected_template_language: template_reference.selected_template_language ?? null,
+        selected_template_property_type_scope: template_reference.selected_template_property_type_scope ?? null,
+        selected_template_tone: template_reference.selected_template_tone ?? null,
+        selected_template_selection_diagnostics: template_reference.selected_template_selection_diagnostics ?? null,
         warnings: missing_relation_warnings,
       },
     });

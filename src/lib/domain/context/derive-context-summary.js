@@ -202,6 +202,8 @@ export function deriveContextSummary({
       property_city: sanitizeSmsTextValue(titleCaseIfShouting(raw_property_city)),
       property_state: sanitizeSmsTextValue(getTextValue(property_item, "state", "") || ""),
       property_zip: sanitizeSmsTextValue(extractPostalCode(property_item)),
+      property_type: getCategoryValue(property_item, "property-type", null),
+      unit_count: getNumberValue(property_item, "number-of-units", null),
 
       agent_name:
         firstNonNull(

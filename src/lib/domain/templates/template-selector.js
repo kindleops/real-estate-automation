@@ -138,6 +138,16 @@ const MULTIFAMILY_SCOPE_MARKERS = Object.freeze([
   "landlord / multifamily",
 ]);
 
+const UNIT_SPECIFIC_SCOPE_MARKERS = Object.freeze([
+  "duplex",
+  "triplex",
+  "fourplex",
+  "quadplex",
+  "5 units",
+  "5+ units",
+  "five plus units",
+]);
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -542,6 +552,10 @@ function isMultifamilyScope(value = null) {
   return containsMarker(value, MULTIFAMILY_SCOPE_MARKERS);
 }
 
+function isUnitSpecificScope(value = null) {
+  return containsMarker(value, UNIT_SPECIFIC_SCOPE_MARKERS);
+}
+
 function normalizeRequestedPropertyTypeScope({
   property_type_scope = null,
   template_selector = null,
@@ -590,6 +604,27 @@ export function scorePropertyTypeScopeMatch({
   if (!requested) return 40;
   if (safeCategoryEquals(requested, template_scope)) return 100;
 
+  // ── HARD GUARD: Unit-Specific Templates ──────────────────────────────────
+  // If the template is tagged for a specific unit count (Duplex, 5+ Units, etc),
+  // it MUST NOT be used for any other property type.
+  if (isUnitSpecificScope(template_scope)) {
+    return 0;
+  }
+
+  // ── HARD GUARD: Unit-Specific Properties ─────────────────────────────────
+  // If the property has a known unit count (requested is unit-specific),
+  // it MUST NOT receive a generic template if a unit-specific one was expected
+  // but doesn't match the template's tag.
+  // Note: Fallback to generic "Multifamily" or "Landlord / Multifamily" is
+  // handled below if the template is NOT unit-specific.
+  if (isUnitSpecificScope(requested)) {
+    if (isMultifamilyScope(template_scope) && !isUnitSpecificScope(template_scope)) {
+      return 85; // Allow generic Multifamily fallback for specific unit properties
+    }
+    if (isResidentialAnyScope(template_scope)) return 60;
+    return 0;
+  }
+
   if (isResidentialScope(requested)) {
     if (isResidentialAnyScope(template_scope)) return 150;
     if (isResidentialScope(template_scope)) return 85;
@@ -598,6 +633,8 @@ export function scorePropertyTypeScopeMatch({
 
   if (isMultifamilyScope(requested)) {
     if (safeCategoryEquals(requested, template_scope)) return 100;
+    // Known "Multifamily" (unknown units) property:
+    // MUST NOT receive a unit-specific template (hard-blocked above).
     if (isMultifamilyScope(template_scope)) return 85;
     return 0;
   }
@@ -678,6 +715,17 @@ export function describePropertyTypeScopeCompatibility({
   }
 
   if (isMultifamilyScope(requested)) {
+    // If the template is unit-specific but doesn't match the requested scope,
+    // it is strictly incompatible.
+    if (isUnitSpecificScope(template_scope) && !safeCategoryEquals(requested, template_scope)) {
+      return {
+        compatible: false,
+        reason: "unit_specific_template_mismatch",
+        requested_scope: requested,
+        template_scope,
+      };
+    }
+
     if (isMultifamilyScope(template_scope)) {
       return {
         compatible: true,
