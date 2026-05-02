@@ -102,7 +102,7 @@ test("Supabase outbound feeder authoritative progression from send_queue", async
       property_id: "prop_history",
       to_phone_number: "+15550001234",
       touch_number: 1,
-      template_use_case: "ownership_check",
+      use_case_template: "ownership_check",
       queue_status: "sent"
     }
   ];
@@ -125,6 +125,41 @@ test("Supabase outbound feeder authoritative progression from send_queue", async
   
   const touch_context = result.first_10_candidate_touch_context[0];
   assert.equal(touch_context.history_latest_sent_touch_number, 1);
+  assert.equal(touch_context.has_touch_1_ownership_check, true);
+  assert.equal(touch_context.proposed_next_use_case, "consider_selling");
+});
+
+test("Supabase outbound feeder progression metadata fallback", async () => {
+  const candidateRows = [
+    { ...baseCandidate, master_owner_id: "mo_meta", property_id: "prop_meta", last_touch_number: 0 }
+  ];
+
+  const sendQueueRows = [
+    {
+      master_owner_id: "mo_meta",
+      property_id: "prop_meta",
+      to_phone_number: "+15550001234",
+      touch_number: 1,
+      metadata: { selected_template_use_case: "ownership_check" },
+      queue_status: "sent"
+    }
+  ];
+
+  const mockDeps = {
+    supabase: createMockSupabase({ candidateRows, sendQueueRows }),
+    chooseTextgridNumber: async () => ({ ok: true, selected: { id: "tn_1" } })
+  };
+
+  const result = await runSupabaseOutboundFeeder({
+    dry_run: true,
+    debug: true,
+    limit: 10,
+    scan_limit: 10,
+    within_contact_window_now: false
+  }, mockDeps);
+
+  assert.equal(result.ok, true);
+  const touch_context = result.first_10_candidate_touch_context[0];
   assert.equal(touch_context.has_touch_1_ownership_check, true);
   assert.equal(touch_context.proposed_next_use_case, "consider_selling");
 });

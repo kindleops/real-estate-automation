@@ -1609,11 +1609,11 @@ export function getQueueRowUseCase(row = {}) {
   const metadata = row.metadata || {};
   return clean(
     row.use_case_template ||
-    row.template_use_case ||
+    metadata.selected_template_use_case ||
     metadata.template_use_case ||
     metadata.selected_use_case ||
-    metadata.selected_template_use_case ||
     metadata.use_case ||
+    metadata.template?.use_case ||
     ""
   );
 }
@@ -1640,7 +1640,7 @@ export async function loadOutboundTouchHistory(candidate = {}, options = {}, dep
 
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
-    .select("id,queue_key,queue_status,touch_number,use_case_template,template_use_case,metadata,to_phone_number,scheduled_for,sent_at,created_at,updated_at")
+    .select("id,queue_key,queue_status,touch_number,to_phone_number,use_case_template,metadata,scheduled_for,sent_at,created_at,updated_at")
     .eq("master_owner_id", candidate.master_owner_id)
     .eq("property_id", candidate.property_id)
     .in("queue_status", ["queued", "sending", "sent"])
@@ -1665,6 +1665,7 @@ export async function loadOutboundTouchHistory(candidate = {}, options = {}, dep
 
   for (const row of rows) {
     const use_case = getQueueRowUseCase(row);
+    row.template_use_case = use_case; // Compute property in JS
     const touch_number = asPositiveInteger(row.touch_number, 0);
     const outbound_at = row.sent_at || row.scheduled_for || row.created_at;
 
@@ -1784,7 +1785,7 @@ async function hasDuplicateQueueItem(candidate = {}, options = {}, deps = {}) {
 
   const { data, error, count } = await supabase
     .from(SEND_QUEUE_TABLE)
-    .select("id,queue_status,queue_key,touch_number,to_phone_number,metadata,scheduled_for,sent_at,created_at,updated_at", { count: "exact" })
+    .select("id,queue_status,queue_key,touch_number,to_phone_number,use_case_template,metadata,scheduled_for,sent_at,created_at,updated_at", { count: "exact" })
     .eq("master_owner_id", candidate.master_owner_id)
     .eq("property_id", candidate.property_id)
     .in("queue_status", statuses)
