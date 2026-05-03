@@ -16,6 +16,7 @@ import { maybeUpsertUnderwritingFromInbound } from "@/lib/domain/underwriting/ma
 import { maybeQueueUnderwritingFollowUp } from "@/lib/domain/underwriting/maybe-queue-underwriting-follow-up.js";
 import { transferDealToUnderwriting } from "@/lib/domain/underwriting/transfer-to-underwriting.js";
 import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/maybe-create-contract-from-accepted-offer.js";
+import { isOfferStageTrigger, runOfferStageAI, buildOfferStageMetadata } from "@/lib/domain/offers/offer-stage-ai-integration.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
 import { resolveSellerAutoReplyPlan } from "@/lib/domain/seller-flow/resolve-seller-auto-reply-plan.js";
@@ -85,6 +86,10 @@ const defaultDeps = {
   getSupabaseClient: getDefaultSupabaseClient,
   info,
   warn,
+  isOfferStageTrigger,
+  runOfferStageAI,
+  buildOfferStageMetadata,
+  shouldSkipOfferStageAI,
 };
 
 let runtimeDeps = { ...defaultDeps };
@@ -812,6 +817,10 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     // the rest of the inbound pipeline.
     let inbound_message_event_id = null;
     try {
+      const offer_ai_metadata = runtimeDeps.buildOfferStageMetadata
+        ? runtimeDeps.buildOfferStageMetadata(offer_stage_ai_result)
+        : {};
+
       const inbound_event = await runtimeDeps.logInboundMessageEvent({
         brain_item,
         conversation_item_id: brain_id,
@@ -835,7 +844,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         prior_message_id,
         response_to_message_id,
         stage_before,
-        metadata: inbound_context_match_metadata,
+        metadata: { ...inbound_context_match_metadata, ...offer_ai_metadata },
       });
       inbound_message_event_id = inbound_event?.item_id || null;
       message_event_enriched = true;
@@ -946,6 +955,57 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
 
     if (inbound_debug_stage === "after_conversation_resolution") {
       return { ok: true, stage: "after_conversation_resolution", route_stage: route?.stage || null, classification_source: classification?.source || null };
+    }
+
+    // ── SEGMENT: offer_stage_ai ──────────────────────────────────────
+    // Wire in Offer Stage AI in dry-run mode for price/offer intent.
+    let offer_stage_ai_result = null;
+    try {
+      const offerTrigger = runtimeDeps.isOfferStageTrigger
+        ? runtimeDeps.isOfferStageTrigger({ message: message_body, classification, sellerStage: route?.stage || context?.summary?.conversation_stage || null, route })
+        : { triggered: false, reason: "function_not_available" };
+
+      if (offerTrigger.triggered) {
+        const skipCheck = runtimeDeps.shouldSkipOfferStageAI
+          ? runtimeDeps.shouldSkipOfferStageAI({ suppressionStatus: inbound_is_negative ? "opt_out" : "allowed", contactWindowStatus: "allowed" })
+          : { skip: false, reason: null };
+
+        if (!skipCheck.skip) {
+          offer_stage_ai_result = await runtimeDeps.runOfferStageAI({
+            message: message_body,
+            property: context?.items?.property_item || null,
+            conversationHistory: (context?.recent?.recent_events || []).slice(0, 10),
+            sellerName: context?.summary?.owner_name || null,
+            phone: inbound_from,
+            sellerStage: route?.stage || context?.summary?.conversation_stage || null,
+            suppressionStatus: inbound_is_negative ? "opt_out" : "allowed",
+            contactWindowStatus: "allowed",
+          });
+
+          safeInfo("textgrid.inbound_offer_stage_ai", {
+            message_id: extracted.message_id,
+            inbound_from,
+            triggered: offerTrigger.triggered,
+            trigger_reason: offerTrigger.reason,
+            dry_run: offer_stage_ai_result?.dry_run,
+            blocked: offer_stage_ai_result?.blocked,
+            blocked_reasons: offer_stage_ai_result?.blocked_reasons?.join(",") || null,
+          });
+        } else {
+          offer_stage_ai_result = { ok: true, dry_run: true, skipped: true, skip_reason: skipCheck.reason };
+        }
+      }
+    } catch (err) {
+      safeWarn("textgrid.inbound_offer_stage_ai_failed", {
+        message_id: extracted.message_id,
+        inbound_from,
+        error: err?.message || "unknown",
+      });
+      offer_stage_ai_result = { ok: false, dry_run: true, error: err?.message || "unknown" };
+    }
+
+    if (inbound_debug_stage === "after_offer_stage_ai") {
+      return { ok: true, stage: "after_offer_stage_ai", offer_stage_ai_result };
     }
 
     // ── SEGMENT: prospect_resolution ──────────────────────────────────────

@@ -36,6 +36,7 @@ export const ENV = {
   })(),
 
   OPENAI_KEY: getEnv("OPENAI_KEY"),
+  OPENCODE_ZEN_API_KEY: getEnv("OPENCODE_ZEN_API_KEY"),
 
   APP_BASE_URL: getEnv("APP_BASE_URL"),
 
