@@ -836,7 +836,180 @@
     min-height: auto;
   }
 
-  .mapFrame {
-    min-height: 360px;
-  }
+   .mapFrame {
+     min-height: 360px;
+   }
+
+   .offerStageAI {
+     display: grid;
+     gap: 14px;
+     margin-top: 14px;
+   }
+
+   .offerStageAI .sectionHeader {
+     display: flex;
+     align-items: center;
+     justify-content: space-between;
+     gap: 12px;
+   }
+
+   .offerStageAI .sectionTitle {
+     font-size: 0.88rem;
+     font-weight: 600;
+     color: rgba(226, 232, 240, 0.9);
+     text-transform: uppercase;
+     letter-spacing: 0.08em;
+   }
+
+   .offerStageAI .sectionMetric {
+     font-size: 0.82rem;
+     color: rgba(148, 163, 184, 0.9);
+     padding: 6px 12px;
+     border-radius: 999px;
+     background: rgba(8, 19, 28, 0.82);
+     border: 1px solid rgba(148, 163, 184, 0.18);
+   }
+
+   .offerStageAI .alertBox {
+     padding: 12px 14px;
+     border-radius: 12px;
+     background: rgba(71, 10, 24, 0.38);
+     border: 1px solid rgba(251, 113, 133, 0.24);
+     color: #fecdd3;
+     font-size: 0.84rem;
+     line-height: 1.5;
+   }
+
+   .offerStageAI .infoBox {
+     padding: 12px 14px;
+     border-radius: 12px;
+     background: rgba(8, 19, 28, 0.82);
+     border: 1px solid rgba(148, 163, 184, 0.18);
+     color: rgba(226, 232, 240, 0.82);
+     font-size: 0.84rem;
+     line-height: 1.6;
+   }
+
+   .offerStageAI .compactList {
+     display: grid;
+     gap: 10px;
+   }
+
+   .offerStageAI .compactItem {
+     display: flex;
+     justify-content: space-between;
+     align-items: flex-start;
+     gap: 12px;
+     padding: 10px 12px;
+     border-radius: 10px;
+     background: rgba(8, 19, 28, 0.6);
+     border: 1px solid rgba(148, 163, 184, 0.12);
+   }
+
+   .offerStageAI .compactItem strong {
+     display: block;
+     color: rgba(226, 232, 240, 0.92);
+     font-size: 0.88rem;
+     margin-bottom: 4px;
+   }
+
+   .offerStageAI .compactMeta {
+     font-size: 0.8rem;
+     color: rgba(148, 163, 184, 0.82);
+     line-height: 1.5;
+   }
+
+   .offerStageAI .compactTime {
+     font-size: 0.78rem;
+     color: rgba(148, 163, 184, 0.7);
+     white-space: nowrap;
+   }
+
+   .offerStageAI .draftBox {
+     padding: 14px;
+     border-radius: 12px;
+     background: rgba(2, 6, 12, 0.78);
+     border: 1px solid rgba(34, 211, 238, 0.18);
+     font-family: monospace;
+     font-size: 0.84rem;
+     line-height: 1.6;
+     color: rgba(226, 232, 240, 0.88);
+     white-space: pre-wrap;
+     word-break: break-word;
+   }
+
+   .offerStageAI .actionButton {
+     padding: 8px 16px;
+     border-radius: 999px;
+     background: rgba(15, 23, 42, 0.7);
+     border: 1px solid rgba(34, 211, 238, 0.2);
+     color: #e2f8fb;
+     font-size: 0.84rem;
+     cursor: pointer;
+     transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+   }
+
+   .offerStageAI .actionButton:hover {
+     transform: translateY(-1px);
+     border-color: rgba(34, 211, 238, 0.42);
+     background: rgba(12, 30, 43, 0.92);
+   }
+
+   .offerStageAI .reasonList {
+     display: grid;
+     gap: 8px;
+   }
+
+   .offerStageAI .reasonItem {
+     display: flex;
+     justify-content: space-between;
+     align-items: center;
+     gap: 10px;
+     padding: 8px 10px;
+     border-radius: 8px;
+     background: rgba(8, 19, 28, 0.5);
+   }
+
+   .offerStageAI .reasonItem span {
+     font-size: 0.82rem;
+     color: rgba(226, 232, 240, 0.84);
+   }
+
+   .offerStageAI .reasonItem strong {
+     font-size: 0.82rem;
+     color: rgba(148, 163, 184, 0.9);
+   }
+
+   .offerStageAI .alertItem {
+     padding: 12px;
+     border-radius: 10px;
+     background: rgba(71, 10, 24, 0.3);
+     border: 1px solid rgba(251, 113, 133, 0.2);
+   }
+
+   .offerStageAI .alertItem strong {
+     display: block;
+     color: #fecdd3;
+     font-size: 0.86rem;
+     margin-bottom: 6px;
+   }
+
+   .offerStageAI .emptyState {
+     text-align: center;
+     padding: 32px 20px;
+   }
+
+   .offerStageAI .emptyTitle {
+     font-size: 1rem;
+     font-weight: 600;
+     color: rgba(226, 232, 240, 0.9);
+     margin-bottom: 8px;
+   }
+
+   .offerStageAI .emptyDetail {
+     font-size: 0.84rem;
+     color: rgba(148, 163, 184, 0.82);
+     line-height: 1.6;
+   }
+
 }

@@ -16,7 +16,7 @@ import { maybeUpsertUnderwritingFromInbound } from "@/lib/domain/underwriting/ma
 import { maybeQueueUnderwritingFollowUp } from "@/lib/domain/underwriting/maybe-queue-underwriting-follow-up.js";
 import { transferDealToUnderwriting } from "@/lib/domain/underwriting/transfer-to-underwriting.js";
 import { maybeCreateContractFromAcceptedOffer } from "@/lib/domain/contracts/maybe-create-contract-from-accepted-offer.js";
-import { isOfferStageTrigger, runOfferStageAI, buildOfferStageMetadata } from "@/lib/domain/offers/offer-stage-ai-integration.js";
+import { isOfferStageTrigger, runOfferStageAI, buildOfferStageMetadata, shouldSkipOfferStageAI } from "@/lib/domain/offers/offer-stage-ai-integration.js";
 import { syncPipelineState } from "@/lib/domain/pipelines/sync-pipeline-state.js";
 import { maybeQueueSellerStageReply } from "@/lib/domain/seller-flow/maybe-queue-seller-stage-reply.js";
 import { resolveSellerAutoReplyPlan } from "@/lib/domain/seller-flow/resolve-seller-auto-reply-plan.js";

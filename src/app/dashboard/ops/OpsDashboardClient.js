@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import styles from "@/app/dashboard/ops/ops-dashboard.module.css";
+import OfferStageAICard from "@/app/dashboard/ops/OfferStageAICard";
 
 const DEFAULT_FILTERS = {
   source_view_id: "",
@@ -179,6 +180,9 @@ export default function OpsDashboardClient() {
   const [pollingPaused, setPollingPaused] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const [alertControlState, setAlertControlState] = useState({});
+  const [selectedThreadKey, setSelectedThreadKey] = useState("");
+  const [offerStageAI, setOfferStageAI] = useState(null);
+  const [offerStageAIError, setOfferStageAIError] = useState("");
   const [state, setState] = useState({
     loading: true,
     errors: createPanelErrors(),
@@ -370,6 +374,40 @@ export default function OpsDashboardClient() {
       if (feeder_timer) window.clearInterval(feeder_timer);
     };
   }, [filters.source_view_id, pollingPaused]);
+
+  useEffect(() => {
+    if (!selectedThreadKey) {
+      setOfferStageAI(null);
+      setOfferStageAIError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadOfferStageAI() {
+      try {
+        const data = await fetchJson("/api/internal/dashboard/inbox/offer-stage-ai", {
+          thread_key: selectedThreadKey,
+        });
+        if (cancelled) return;
+
+        if (data?.ok) {
+          setOfferStageAI(data.data);
+          setOfferStageAIError("");
+        } else {
+          setOfferStageAI(null);
+          setOfferStageAIError(data?.error || "Failed to load offer stage AI");
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setOfferStageAI(null);
+        setOfferStageAIError(error?.message || "Offer Stage AI fetch failed");
+      }
+    }
+
+    loadOfferStageAI();
+    return () => { cancelled = true; };
+  }, [selectedThreadKey]);
 
   const kpis = state.kpis?.kpis || [];
   const flow = state.kpis?.flow || {};
@@ -933,6 +971,8 @@ export default function OpsDashboardClient() {
       </section>
 
       <section className={styles.tertiaryGrid}>
+        <OfferStageAICard data={offerStageAI} error={offerStageAIError} />
+
         <article className={styles.panel}>
           <div className={styles.panelHeader}>
             <div>
