@@ -515,15 +515,28 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     inbound_debug_stage = null,
     dry_run = false,
     auto_reply_enabled = null,
+    auto_reply_live_enabled = null,
+    auto_reply_dry_run = null,
     auto_post_discord_card = null,
     auto_reply_delay_seconds = null,
     inbound_user_initiated = true,
   } = opts;
 
-  const inbound_autopilot_enabled = asBoolean(
+  // Feature flags: env -> system_control -> default
+  const auto_reply_enabled_final = asBoolean(
     auto_reply_enabled,
-    asBoolean(process.env.INBOUND_AUTOPILOT_ENABLED, true)
+    asBoolean(process.env.AUTO_REPLY_ENABLED, null)
   );
+  const auto_reply_live_enabled_final = asBoolean(
+    auto_reply_live_enabled,
+    asBoolean(process.env.AUTO_REPLY_LIVE_ENABLED, null)
+  );
+  const auto_reply_dry_run_final = asBoolean(
+    auto_reply_dry_run,
+    asBoolean(process.env.AUTO_REPLY_DRY_RUN, null)
+  );
+
+  const inbound_autopilot_enabled = auto_reply_enabled_final && auto_reply_live_enabled_final;
   const inbound_autopilot_post_discord_card = asBoolean(
     auto_post_discord_card,
     asBoolean(process.env.INBOUND_AUTOPILOT_POST_DISCORD_CARD, true)
@@ -1223,7 +1236,10 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           cash_offer_snapshot_id,
         });
 
-        if (!is_preview && seller_stage_preview?.ok) {
+        // Feature flag: if auto_reply_dry_run, only preview (no live queue)
+        const should_queue_live = !auto_reply_dry_run_final && inbound_autopilot_enabled;
+
+        if (!is_preview && seller_stage_preview?.ok && should_queue_live) {
           seller_stage_reply = await runtimeDeps.maybeQueueSellerStageReply({
             inbound_from,
             context,
@@ -1240,6 +1256,8 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             cash_offer_snapshot_id,
             scheduled_for_local: autopilot_schedule.scheduled_for_local,
             scheduled_for_utc: autopilot_schedule.scheduled_for_utc,
+            timezone_override: schedule.timezone_label || timezone_label,
+            contact_window_override: schedule.contact_window || contact_window,
             send_priority_override: "_ Urgent",
           });
         } else {

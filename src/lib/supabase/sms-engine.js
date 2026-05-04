@@ -451,7 +451,7 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
           lock_token: null,
           updated_at: now,
         })
-        .eq("queue_status", "queued")
+        .or("queue_status.eq.queued,queue_status.eq.ready,queue_status.eq.scheduled")
         .eq("is_locked", true)
         .lt("locked_at", cutoff_iso)
         .select("id");
@@ -475,7 +475,7 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   const { data, error } = await supabase
     .from(SEND_QUEUE_TABLE)
     .select("*")
-    .eq("queue_status", "queued")
+    .or(`queue_status.eq.queued,queue_status.eq.ready,queue_status.eq.scheduled`)
     .or(`scheduled_for.is.null,scheduled_for.lte.${now}`)
     .not("is_locked", "is", "true")
     .order("send_priority", { ascending: false, nullsFirst: false })
@@ -1951,21 +1951,27 @@ export async function syncDeliveryEvent(payload, options = {}) {
 
   const queue_payload = {
     updated_at: now,
+    textgrid_message_id: provider_message_sid || null,
   };
 
   if (provider_status === "delivered") {
     queue_payload.delivered_at = pickFirst(payload?.delivered_at, now);
     queue_payload.delivery_confirmed = "confirmed";
+    queue_payload.queue_status = "delivered";
   } else if (["failed", "undelivered", "error"].includes(provider_status)) {
     queue_payload.delivery_confirmed = "failed";
     queue_payload.failed_reason =
       clean(payload?.error_message) || "delivery_failed";
+    queue_payload.queue_status = "failed";
+  } else if (provider_status === "sent") {
+    queue_payload.queue_status = "sent";
+    queue_payload.sent_at = pickFirst(payload?.sent_at, now);
   }
 
   const { data: send_queue_data, error: send_queue_error } = await supabase
     .from(SEND_QUEUE_TABLE)
     .update(queue_payload)
-    .eq("provider_message_id", provider_message_sid)
+    .or(`provider_message_id.eq.${provider_message_sid},textgrid_message_id.eq.${provider_message_sid}`)
     .select();
 
   if (send_queue_error) throw send_queue_error;
@@ -2066,12 +2072,33 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     message_type: row.message_type || null,
     use_case_template: row.use_case_template || null,
     personalization_tags_used: row.personalization_tags_used || null,
-    character_count: row.character_count || row.message_body.length,
+    character_count: row.character_count || (row.message_body ? row.message_body.length : 0),
     provider_message_id: row.provider_message_id || null,
     // Hardening columns (added 2026-04-28)
     dedupe_key: clean(payload.dedupe_key || row.metadata?.idempotency_key || row.queue_key) || null,
     seller_first_name: clean(payload.seller_first_name || row.metadata?.seller_first_name || row.metadata?.queue_context?.seller_first_name) || null,
     seller_display_name: clean(payload.seller_display_name || row.metadata?.seller_display_name) || null,
+    // Auto-queue and auto-reply fields (added 2026-05-04)
+    thread_key: clean(payload.thread_key || row.thread_key) || null,
+    owner_id: asNumber(payload.owner_id || row.owner_id, null),
+    agent_id: asNumber(payload.agent_id || row.agent_id, null),
+    template_source: clean(payload.template_source || row.template_source || "catalog") || null,
+    rendered_message: clean(payload.rendered_message || row.rendered_message || row.message_body) || null,
+    priority: clean(payload.priority || row.priority || "normal") || "normal",
+    risk: clean(payload.risk || row.risk || "low") || "low",
+    sms_eligible: typeof payload.sms_eligible === 'boolean' ? payload.sms_eligible : (typeof row.sms_eligible === 'boolean' ? row.sms_eligible : true),
+    routing_allowed: typeof payload.routing_allowed === 'boolean' ? payload.routing_allowed : (typeof row.routing_allowed === 'boolean' ? row.routing_allowed : true),
+    safety_status: clean(payload.safety_status || row.safety_status || "pending") || "pending",
+    type: clean(payload.type || row.type || "outbound") || "outbound",
+    source_event_id: payload.source_event_id || row.source_event_id || null,
+    inbound_message_id: clean(payload.inbound_message_id || row.inbound_message_id) || null,
+    detected_intent: clean(payload.detected_intent || row.detected_intent) || null,
+    stage_before: clean(payload.stage_before || row.stage_before) || null,
+    stage_after: clean(payload.stage_after || row.stage_after) || null,
+    template_selected: clean(payload.template_selected || row.template_selected) || null,
+    textgrid_message_id: clean(payload.textgrid_message_id || row.textgrid_message_id || row.provider_message_id) || null,
+    textgrid_number: clean(payload.textgrid_number || row.textgrid_number) || null,
+    market: clean(payload.market || row.market) || null,
   };
 
   if (typeof deps.insertSupabaseSendQueueRow === "function") {

@@ -429,6 +429,26 @@ export async function queueMessage(params = {}) {
         resolved_to_phone_number: resolved_to_phone_number || null,
       },
       cash_offer_snapshot_id: safe_params?.cash_offer_snapshot_id || null,
+      // Auto-reply fields (added 2026-05-04)
+      thread_key: safe_params?.context?.thread_key || null,
+      owner_id: safe_params?.links?.owner_id || safe_params?.links?.master_owner_id || null,
+      agent_id: safe_params?.links?.agent_id || null,
+      template_source: safe_params?.resolution?.source || "catalog",
+      rendered_message: safe_params?.rendered_text || null,
+      priority: safe_params?.context?.send_priority || "normal",
+      risk: safe_params?.context?.risk || "low",
+      sms_eligible: safe_params?.context?.sms_eligible !== false,
+      routing_allowed: safe_params?.context?.routing_allowed !== false,
+      safety_status: safe_params?.context?.safety_status || "pending",
+      type: safe_params?.context?.type || "outbound",
+      source_event_id: safe_params?.context?.source_event_id || null,
+      inbound_message_id: safe_params?.context?.inbound_message_id || null,
+      detected_intent: safe_params?.context?.detected_intent || null,
+      stage_before: safe_params?.context?.stage_before || null,
+      stage_after: safe_params?.context?.stage_after || null,
+      template_selected: safe_params?.resolution?.template_id || null,
+      textgrid_number: safe_params?.context?.textgrid_number || null,
+      market: safe_params?.context?.market || null,
     });
 
     info("queue_message.created", {

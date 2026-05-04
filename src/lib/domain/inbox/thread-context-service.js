@@ -19,6 +19,13 @@ function firstNumber(...values) {
   return null;
 }
 
+function asIso(value) {
+  const text = clean(value);
+  if (!text) return null;
+  const ts = new Date(text).toISOString();
+  return ts && ts !== "Invalid Date" ? ts : null;
+}
+
 function parseIds(rows = [], ...keys) {
   const ids = new Set();
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -221,11 +228,109 @@ export async function loadThreadContext({ thread_key, supabase }) {
     },
   };
 
+  const latestInbound = messageEventsRes.rows.find((row) => clean(row.direction).toLowerCase() === "inbound") || {};
+  const latestQueue = sendQueueRes.rows[0] || {};
+  const latestBrain = brainRes.rows[0] || {};
+  const selectedTemplate = templatesRes.rows.find((row) =>
+    clean(row.id) && clean(latestQueue.selected_template_id) && clean(row.id) === clean(latestQueue.selected_template_id)
+  ) || templatesRes.rows[0] || {};
+  const selectedAgent = agentsRes.rows.find((row) =>
+    clean(row.id) && clean(latestQueue.sms_agent_id) && clean(row.id) === clean(latestQueue.sms_agent_id)
+  ) || agentsRes.rows[0] || {};
+
+  const automationDecision = {
+    inbound_detection: {
+      reply_detected: Boolean(clean(latestInbound.id)),
+      latest_inbound_text: firstNonEmpty(latestInbound.message_body, latestInbound.redacted_body) || null,
+      latest_inbound_at: asIso(firstNonEmpty(latestInbound.received_at, latestInbound.event_timestamp, latestInbound.created_at)),
+      from_phone: firstNonEmpty(latestInbound.from_phone_number) || null,
+      to_textgrid_number: firstNonEmpty(latestInbound.to_phone_number) || null,
+    },
+    classification: {
+      detected_intent: firstNonEmpty(latestBrain.intent, latestBrain.route, primaryState.ui_intent) || null,
+      confidence: firstNumber(latestBrain.confidence, latestBrain.intent_confidence),
+      language: firstNonEmpty(latestBrain.language, primaryProspect.language, primaryOwner.language) || null,
+      sentiment: firstNonEmpty(latestBrain.sentiment, latestBrain.emotion) || null,
+      objection_type: firstNonEmpty(latestBrain.objection, latestBrain.primary_objection_type) || null,
+      seller_stage_before: firstNonEmpty(latestInbound.stage_before, latestBrain.stage_before) || null,
+      seller_stage_after: firstNonEmpty(latestInbound.stage_after, latestBrain.stage_after, primaryState.stage) || null,
+      source: firstNonEmpty(latestBrain.source, "ai_conversation_brain") || null,
+      classified_at: asIso(firstNonEmpty(latestBrain.updated_at, latestInbound.created_at)),
+    },
+    template_selection: {
+      template_name: firstNonEmpty(selectedTemplate.name, selectedTemplate.template_name, latestQueue.use_case_template) || null,
+      template_id: firstNonEmpty(selectedTemplate.id, latestQueue.selected_template_id) || null,
+      use_case: firstNonEmpty(latestQueue.use_case_template, selectedTemplate.use_case) || null,
+      stage: firstNonEmpty(latestQueue.current_stage, selectedTemplate.stage) || null,
+      agent_name: firstNonEmpty(selectedAgent.name, selectedAgent.agent_name) || null,
+      agent_persona: firstNonEmpty(selectedAgent.persona, selectedTemplate.agent_style) || null,
+      template_source: firstNonEmpty(selectedTemplate.source, latestQueue.template_source, "Podio") || null,
+      rendered_reply_preview: firstNonEmpty(latestQueue.message_body, latestQueue.message_text) || null,
+    },
+    decision: {
+      automation_status: firstNonEmpty(latestQueue.queue_status, primaryState.status, "WAITING") || null,
+      action_taken: firstNonEmpty(latestQueue.message_type, latestQueue.action_taken, "queued_for_review") || null,
+      safety_gate_result: firstNonEmpty(latestQueue.safety_gate_result, latestQueue.compliance_status, "unknown") || null,
+      blocked_reason: firstNonEmpty(latestQueue.blocked_reason, latestQueue.failure_reason, latestQueue.error_message) || null,
+      queue_id: firstNonEmpty(latestQueue.id, latestQueue.queue_id) || null,
+      scheduled_for: asIso(firstNonEmpty(latestQueue.scheduled_for, latestQueue.scheduled_for_utc, latestQueue.scheduled_for_local)),
+      sent_at: asIso(firstNonEmpty(latestQueue.sent_at, latestQueue.completed_at)),
+      delivery_status: firstNonEmpty(latestQueue.delivery_status, latestInbound.delivery_status) || null,
+      next_follow_up_at: asIso(firstNonEmpty(latestBrain.next_follow_up_due_at, latestQueue.next_follow_up_at)),
+      active_stage: firstNonEmpty(primaryState.stage, latestQueue.current_stage) || null,
+      next_stage: firstNonEmpty(latestBrain.next_stage, latestQueue.next_stage) || null,
+    },
+    raw_debug: {
+      latest_inbound_id: firstNonEmpty(latestInbound.id) || null,
+      latest_queue_id: firstNonEmpty(latestQueue.id) || null,
+      latest_brain_id: firstNonEmpty(latestBrain.id) || null,
+      template_row_id: firstNonEmpty(selectedTemplate.id) || null,
+      agent_row_id: firstNonEmpty(selectedAgent.id) || null,
+    },
+  };
+
+  const automationTimeline = [
+    ...messageEventsRes.rows.map((row) => ({
+      timestamp: asIso(firstNonEmpty(row.event_timestamp, row.created_at)),
+      event_type: clean(row.direction).toLowerCase() === "inbound" ? "inbound_received" : "outbound_sent",
+      status: firstNonEmpty(row.delivery_status, row.event_type, "ok"),
+      actor: clean(row.direction).toLowerCase() === "inbound" ? "TextGrid" : "system",
+      detail: firstNonEmpty(row.message_body, row.event_type, "message_event"),
+      queue_id: firstNonEmpty(row.queue_id) || null,
+      message_id: firstNonEmpty(row.id, row.message_id) || null,
+      template_id: firstNonEmpty(row.template_id) || null,
+    })),
+    ...sendQueueRes.rows.map((row) => ({
+      timestamp: asIso(firstNonEmpty(row.scheduled_for, row.created_at)),
+      event_type: firstNonEmpty(row.queue_status) === "queued" ? "outbound_queued" : "auto_reply_queued",
+      status: firstNonEmpty(row.queue_status, "queued"),
+      actor: "system",
+      detail: firstNonEmpty(row.message_type, row.use_case_template, "queue_event"),
+      queue_id: firstNonEmpty(row.id, row.queue_id) || null,
+      message_id: null,
+      template_id: firstNonEmpty(row.selected_template_id) || null,
+    })),
+    ...brainRes.rows.map((row) => ({
+      timestamp: asIso(firstNonEmpty(row.updated_at, row.created_at)),
+      event_type: "reply_classified",
+      status: "classified",
+      actor: "AI",
+      detail: firstNonEmpty(row.intent, row.route, "classification"),
+      queue_id: null,
+      message_id: null,
+      template_id: null,
+    })),
+  ]
+    .filter((event) => Boolean(event.timestamp))
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
   const normalizedDossier = {
     ownerFullName: ownerFullName || null,
     ownerType: ownerType || null,
     sellerOwnerIntelligence,
     seller_owner_intelligence: sellerOwnerIntelligence,
+    automationDecision,
+    automationTimeline,
     properties: unified.selected_thread.properties,
     seller_profile: unified.selected_thread.master_owners,
     offer_summary: unified.selected_thread.offers,
@@ -237,6 +342,8 @@ export async function loadThreadContext({ thread_key, supabase }) {
   const unifiedWithIntel = {
     ...unified,
     seller_owner_intelligence: sellerOwnerIntelligence,
+    automation_decision: automationDecision,
+    automation_timeline: automationTimeline,
     dossier: normalizedDossier,
   };
 
@@ -307,6 +414,8 @@ export async function loadThreadContext({ thread_key, supabase }) {
     },
     seller_facing_context,
     seller_owner_intelligence: sellerOwnerIntelligence,
+    automation_decision: automationDecision,
+    automation_timeline: automationTimeline,
     dossier: normalizedDossier,
     source_health,
     missingData,

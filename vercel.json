@@ -6,23 +6,19 @@
       "schedule": "* * * * *"
     },
     {
-      "path": "/api/internal/outbound/feed-master-owners",
-      "schedule": "2-59/8 3-12 * * *"
-    },
-    {
       "path": "/api/internal/queue/retry",
-      "schedule": "11-59/30 * * * *"
+      "schedule": "*/10 * * * *"
     },
     {
       "path": "/api/internal/queue/reconcile",
-      "schedule": "21 * * * *"
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/internal/outbound/feed-master-owners",
+      "schedule": "*/10 * * * *"
     },
     {
       "path": "/api/internal/autopilot/run",
-      "schedule": "51 * * * *"
-    },
-    {
-      "path": "/api/internal/events/sync-podio",
       "schedule": "*/5 * * * *"
     }
   ]
