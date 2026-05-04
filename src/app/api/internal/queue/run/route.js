@@ -13,7 +13,6 @@ const logger = child({
 });
 
 export async function GET(request) {
-  console.log("QUEUE ROUTE HIT");
   try {
     return await handleQueueRunRequest(request, "GET", {
       logger,
