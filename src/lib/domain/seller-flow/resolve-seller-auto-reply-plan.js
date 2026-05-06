@@ -259,6 +259,7 @@ export async function resolveSellerAutoReplyPlan(input = {}) {
   let should_queue_reply = !suppression.suppress;
   let suppression_reason = suppression.reason;
   let reply_mode = suppression.suppress ? "suppress" : "auto_queue";
+  let fallback_reply = null;
   
   let is_duplicate = false;
   if (should_queue_reply) {
@@ -292,20 +293,17 @@ export async function resolveSellerAutoReplyPlan(input = {}) {
             });
 
         if (!fallbackTemplate) {
-          should_queue_reply = false;
-          suppression_reason = "template_not_found_for_auto_reply_plan";
-          reply_mode = "suppress";
+          fallback_reply = "Got it — are you open to selling it if the numbers made sense?";
+          reply_mode = "auto_queue_fallback";
         }
       } else if (!template) {
-        should_queue_reply = false;
-        suppression_reason = "template_not_found_for_auto_reply_plan";
-        reply_mode = "suppress";
+        fallback_reply = "Got it — are you open to selling it if the numbers made sense?";
+        reply_mode = "auto_queue_fallback";
       }
     } catch (e) {
       warn("auto_reply_plan.template_check_failed", { error: e.message });
-      should_queue_reply = false;
-      suppression_reason = "template_not_found_for_auto_reply_plan";
-      reply_mode = "suppress";
+      fallback_reply = "Got it — are you open to selling it if the numbers made sense?";
+      reply_mode = "auto_queue_fallback";
     }
   }
   
@@ -327,6 +325,7 @@ export async function resolveSellerAutoReplyPlan(input = {}) {
     selected_use_case,
     selected_stage_code,
     selected_language,
+    fallback_reply,
     priority,
     reply_mode,
     reason: suppression_reason || "plan_resolved",

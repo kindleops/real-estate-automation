@@ -54,7 +54,10 @@ export function isUnknownAutoReply(queue_item = null) {
   const source = lower(metadataValue(queue_item, "source"));
   const unknown_inbound = metadataValue(queue_item, "unknown_inbound") === true;
 
+  const type = lower(queue_item?.type || metadataValue(queue_item, "type"));
+
   return (
+    type === "auto_reply" ||
     use_case_template === "unknown_inbound_auto_reply" ||
     message_type === "unknown inbound auto reply" ||
     source === "textgrid_inbound_unknown_router" ||

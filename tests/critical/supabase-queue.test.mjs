@@ -364,3 +364,8 @@ describe("Delivery webhook updates status", () => {
     assert.strictEqual(result.delivery_status, "failed");
   });
 });
+
+it('auto_reply queue rows are classified as unknown auto replies for cold-outbound pause exemption', async () => {
+  const { isUnknownAutoReply } = await import('@/lib/domain/queue/is-manual-inbox-send.js');
+  assert.strictEqual(isUnknownAutoReply({ type: 'auto_reply', message_body: 'Got it' }), true);
+});

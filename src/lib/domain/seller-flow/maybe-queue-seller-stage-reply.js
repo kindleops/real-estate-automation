@@ -340,6 +340,8 @@ export async function maybeQueueSellerStageReply({
         smart_cash_offer_display: plan.offer_price_display,
         ...(extra_template_render_overrides || {}),
       },
+      rendered_message_text: plan.fallback_reply || null,
+      message_text: plan.fallback_reply || null,
       extra_queue_context: {
         ...(extra_queue_context || {}),
         // Auto-reply fields
@@ -351,6 +353,10 @@ export async function maybeQueueSellerStageReply({
         source_event_id: extra_queue_context?.source_event_id || null,
         inbound_message_id: inbound_from || null,
         thread_key: context?.ids?.thread_key || null,
+        from_phone_number: context?.summary?.inbound_to || context?.summary?.textgrid_number || null,
+        sms_eligible: true,
+        routing_allowed: true,
+        safety_status: "allowed",
         owner_id: context?.ids?.master_owner_id || null,
         market: context?.summary?.market || context?.summary?.market_name || null,
       },
