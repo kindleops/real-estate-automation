@@ -448,9 +448,13 @@ export async function runSendQueue(
       return { ok: false, status: 423, ...buildDisabledResponse("queue_runner_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
     }
     const outbound_sms_enabled = await get_system_flag("outbound_sms_enabled");
-    if (!outbound_sms_enabled) {
-      info("queue_runner.blocked", { flag: "outbound_sms_enabled" });
+    const auto_reply_live_enabled = await get_system_flag("auto_reply_live_enabled");
+    if (!outbound_sms_enabled && !auto_reply_live_enabled) {
+      info("queue_runner.blocked", { flag: "outbound_sms_enabled", auto_reply_live_enabled });
       return { ok: false, status: 423, ...buildDisabledResponse("outbound_sms_enabled", "runSendQueue"), skipped: true, reason: "system_control_disabled", sent_count: 0, results: [] };
+    }
+    if (!outbound_sms_enabled && auto_reply_live_enabled) {
+      deps = { ...deps, queue_types: ["auto_reply"], outbound_sms_enabled: false, auto_reply_live_enabled: true };
     }
   }
 
@@ -591,6 +595,9 @@ export async function runSendQueue(
         ...deps,
         dry_run,
       });
+      if (deps.outbound_sms_enabled === false && deps.auto_reply_live_enabled === true) {
+        candidate_summary.rows = normalizeRows(candidate_summary.rows).filter((row) => lower(row?.type || row?.metadata?.type) === "auto_reply");
+      }
       const dedupe_result = dedupeRowsByOwnerPhoneTouch(
         candidate_summary.rows
       );

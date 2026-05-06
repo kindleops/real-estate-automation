@@ -105,3 +105,59 @@ test("getOpsFeederSnapshot rejects legacy feeder requests unless env flag is tru
     }
   }
 });
+test('live inbox exposes cursor pagination, filters, keyword matches, and map pins', async () => {
+  const { getLiveInbox } = await import('@/lib/domain/inbox/live-inbox-service.js');
+  const rows = Array.from({ length: 260 }, (_, idx) => ({
+    id: idx + 1,
+    created_at: new Date(Date.UTC(2026, 4, 6, 12, 0, 0) - idx * 1000).toISOString(),
+    direction: idx % 3 === 0 ? 'inbound' : 'outbound',
+    message_body: idx === 0 ? 'yes I am interested, make offer' : idx === 3 ? 'how much is your offer' : `message ${idx}`,
+    from_phone_number: '+15550000001',
+    to_phone_number: '+15550000002',
+    property_id: idx < 10 ? 101 : null,
+    master_owner_id: 201,
+    seller_display_name: 'Test Seller',
+    property_address: '123 Main St',
+    market: 'Test Market',
+    metadata: {},
+  }));
+  const supabase = {
+    from(table) {
+      const state = { table, limit: 1000, direction: null, q: null };
+      const api = {
+        select() { return api; },
+        order() { return api; },
+        limit(n) { state.limit = n; return api; },
+        eq(col, val) { if (col === 'direction') state.direction = val; return api; },
+        lt() { return api; },
+        ilike(_col, val) { state.q = String(val).replaceAll('%', '').toLowerCase(); return api; },
+        not() { return api; },
+        then(resolve) {
+          if (state.table === 'properties') return resolve({ data: [{ id: 101, latitude: 34.1, longitude: -118.2, address: '123 Main St', market: 'Test Market', seller_name: 'Test Seller', stage: 'new' }], error: null });
+          let data = rows;
+          if (state.direction) data = data.filter((r) => r.direction === state.direction);
+          if (state.q) data = data.filter((r) => r.message_body.toLowerCase().includes(state.q));
+          return resolve({ data: data.slice(0, state.limit), error: null });
+        },
+      };
+      return api;
+    },
+  };
+  const page = await getLiveInbox({ limit: '100', direction: 'all', map: 'true' }, { supabase });
+  assert.strictEqual(page.messages.length, 100);
+  assert.ok(page.pagination.has_more);
+  assert.ok(page.pagination.next_cursor);
+  assert.ok(page.mapPins.length >= 1);
+
+  const inbound = await getLiveInbox({ limit: '100', direction: 'inbound' }, { supabase });
+  assert.ok(inbound.messages.every((m) => m.direction === 'inbound'));
+
+  const keyword = await getLiveInbox({ limit: '10', q: 'interested' }, { supabase });
+  assert.ok(keyword.messages[0].matched_keywords.includes('interested'));
+
+  const hot = await getLiveInbox({ limit: '10', filter: 'positive_hot' }, { supabase });
+  assert.ok(hot.messages.some((m) => m.flags.positive_hot));
+
+  const needsReply = await getLiveInbox({ limit: '10', filter: 'needs_reply' }, { supabase });
+  assert.ok(needsReply.messages.every((m) => m.direction === 'inbound'));
+});

@@ -110,3 +110,22 @@ describe("Seller Auto Reply Plan", () => {
     assert.ok(res.next_stage === "unclear_clarifier" || res.next_stage === "manual_review");
   });
 });
+
+test('auto reply plan uses safe fallback reply when template lookup is missing', async () => {
+  const { resolveSellerAutoReplyPlan } = await import('@/lib/domain/seller-flow/resolve-seller-auto-reply-plan.js');
+  const priorNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    const plan = await resolveSellerAutoReplyPlan({
+      message_body: 'yes',
+      auto_reply_enabled: true,
+      force_queue_reply: true,
+      conversation_context: { found: true, summary: { conversation_stage: 'ownership_check' } },
+      classification: {},
+    });
+    assert.strictEqual(plan.should_queue_reply, true);
+    assert.strictEqual(plan.fallback_reply, 'Got it — are you open to selling it if the numbers made sense?');
+  } finally {
+    process.env.NODE_ENV = priorNodeEnv;
+  }
+});

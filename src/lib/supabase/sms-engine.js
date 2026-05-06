@@ -10,6 +10,7 @@ import { captureSystemEvent } from "@/lib/analytics/posthog-server.js";
 import { sendCriticalAlert } from "@/lib/alerts/discord.js";
 import { info, warn } from "@/lib/logging/logger.js";
 import { isManualInboxSend, isUnknownAutoReply } from "@/lib/domain/queue/is-manual-inbox-send.js";
+import { enrichMessageEventContext, buildMessageEventEnrichmentUpdate } from "@/lib/domain/inbox/enrich-message-event-context.js";
 
 const SEND_QUEUE_TABLE = "send_queue";
 const MESSAGE_EVENTS_TABLE = "message_events";
@@ -240,6 +241,22 @@ export function normalizeSendQueueRow(row) {
     delivery_confirmed: safe_row.delivery_confirmed || null,
     // Offer record sync tracking (added 2026-04-22)
     cash_offer_snapshot_id:    safe_row.cash_offer_snapshot_id    || null,
+    type: safe_row.type || null,
+    thread_key: safe_row.thread_key || safe_row.metadata?.thread_key || null,
+    owner_id: safe_row.owner_id || null,
+    agent_id: safe_row.agent_id || null,
+    template_source: safe_row.template_source || null,
+    rendered_message: safe_row.rendered_message || null,
+    sms_eligible: safe_row.sms_eligible,
+    routing_allowed: safe_row.routing_allowed,
+    safety_status: safe_row.safety_status || null,
+    source_event_id: safe_row.source_event_id || null,
+    inbound_message_id: safe_row.inbound_message_id || null,
+    detected_intent: safe_row.detected_intent || null,
+    stage_before: safe_row.stage_before || null,
+    stage_after: safe_row.stage_after || null,
+    textgrid_message_id: safe_row.textgrid_message_id || null,
+    market: safe_row.market || null,
     offer_podio_item_id:       safe_row.offer_podio_item_id       || null,
     offer_record_sync_status:  safe_row.offer_record_sync_status  || null,
     offer_record_sync_error:   safe_row.offer_record_sync_error   || null,
@@ -472,12 +489,18 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
     }
   }
 
-  const { data, error } = await supabase
+  let query = supabase
     .from(SEND_QUEUE_TABLE)
     .select("*")
     .or(`queue_status.eq.queued,queue_status.eq.ready,queue_status.eq.scheduled`)
     .or(`scheduled_for.is.null,scheduled_for.lte.${now}`)
-    .not("is_locked", "is", "true")
+    .not("is_locked", "is", "true");
+
+  if (Array.isArray(deps.queue_types) && deps.queue_types.length) {
+    query = query.in("type", deps.queue_types);
+  }
+
+  const { data, error } = await query
     .order("send_priority", { ascending: false, nullsFirst: false })
     .order("scheduled_for", { ascending: true, nullsFirst: true })
     .limit(preclaim_scan_limit);
@@ -1055,12 +1078,26 @@ function buildSuccessMessageEvent(row, send_result, options = {}) {
     textgrid_number_id: normalized.textgrid_number_id,
     template_id: normalized.template_id,
     property_address: normalized.property_address,
-    stage_before: normalized.current_stage || null,
-    stage_after: normalized.current_stage || null,
+    market: normalized.market || null,
+    thread_key: normalized.thread_key || null,
+    auto_reply_status: normalized.type === "auto_reply" ? "sent" : null,
+    auto_reply_queue_id: normalized.type === "auto_reply" ? String(normalized.id || "") : null,
+    detected_intent: normalized.detected_intent || null,
+    stage_before: normalized.stage_before || normalized.current_stage || null,
+    stage_after: normalized.stage_after || normalized.current_stage || null,
     metadata: {
       source: "supabase_send_queue",
       queue_key,
       send_result,
+      enrichment: {
+        thread_key: normalized.thread_key || null,
+        property_id: normalized.property_id || null,
+        master_owner_id: normalized.master_owner_id || null,
+        seller_name: normalized.seller_display_name || normalized.seller_first_name || null,
+        property_address: normalized.property_address || null,
+        market: normalized.market || null,
+        timezone: normalized.timezone || null,
+      },
       queue_row: {
         id: normalized.id,
         queue_key: normalized.queue_key,
@@ -1842,7 +1879,7 @@ export async function logInboundMessageEvent(payload, options = {}) {
     }));
   }
 
-  const event = {
+  let event = {
     message_event_key: `inbound_${message_sid || crypto.randomUUID()}`,
     provider_message_sid: message_sid || null,
     direction: "inbound",
@@ -1865,6 +1902,13 @@ export async function logInboundMessageEvent(payload, options = {}) {
       payload,
     },
   };
+
+  try {
+    const enrichment = await enrichMessageEventContext(event, getSupabase(options));
+    event = { ...event, ...buildMessageEventEnrichmentUpdate(enrichment) };
+  } catch (_) {
+    event.metadata = { ...event.metadata, enrichment: { source: "inbound_enrichment_failed", enriched_at: now } };
+  }
 
   // Analytics fires regardless of DI injection path — the inbound message
   // payload is already validated at this point.
@@ -1909,6 +1953,7 @@ export async function syncDeliveryEvent(payload, options = {}) {
     provider_delivery_status: provider_status || null,
     raw_carrier_status: raw_carrier_status || null,
     delivery_status,
+    updated_at: now,
   };
 
   if (provider_status === "delivered") {
