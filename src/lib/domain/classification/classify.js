@@ -3220,6 +3220,124 @@ function detectPositiveSignals(message) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// DETERMINISTIC INBOUND INTENT
+// ══════════════════════════════════════════════════════════════════════════
+
+const ASKING_PRICE_PATTERNS = [
+  /\b(?:i\s+want|want|asking|ask(?:ing)?\s+for)\s+\$?\s*\d[\d,]*(?:\.\d+)?\s*k?\b/i,
+  /^\s*\$?\s*\d[\d,]*(?:\.\d+)?\s*k?\s*$/i,
+];
+
+function matchesAnyPattern(text, patterns = []) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function detectInboundIntent(
+  message,
+  {
+    compliance_flag = null,
+    objection = null,
+    positive_signals = [],
+  } = {}
+) {
+  const text = lower(message);
+  const normalized_objection = cleanMessage(objection);
+
+  if (compliance_flag === "stop_texting" || includesAny(text, [
+    "stop", "remove", "unsubscribe", "opt out", "opt-out", "optout",
+  ])) {
+    return "opt_out";
+  }
+
+  if (
+    normalized_objection === "wrong_number" ||
+    includesAny(text, ["wrong number", "wrong #", "wrong person", "incorrect number"])
+  ) {
+    return "wrong_number";
+  }
+
+  if (
+    normalized_objection === "not_interested" ||
+    includesAny(text, ["not interested", "no interest", "no thanks", "no thank you"])
+  ) {
+    return "not_interested";
+  }
+
+  if (
+    normalized_objection === "who_is_this" ||
+    includesAny(text, ["who is this", "who's this", "whos this", "who are you"])
+  ) {
+    return "who_is_this";
+  }
+
+  if (
+    normalized_objection === "needs_email" ||
+    includesAny(text, ["email me", "send me an email", "send to my email", "prefer email"])
+  ) {
+    return "needs_email";
+  }
+
+  if (
+    normalized_objection === "needs_call" ||
+    includesAny(text, ["call me", "give me a call", "can you call me", "prefer to talk"])
+  ) {
+    return "needs_call";
+  }
+
+  if (matchesAnyPattern(text, ASKING_PRICE_PATTERNS)) {
+    return "asking_price_provided";
+  }
+
+  if (
+    normalized_objection === "send_offer_first" ||
+    includesAny(text, [
+      "how much",
+      "what are you offering",
+      "what's your offer",
+      "what is your offer",
+      "send me an offer",
+      "send me offer",
+    ])
+  ) {
+    return "asks_offer";
+  }
+
+  if (
+    normalized_objection === "tenant_issue" ||
+    includesAny(text, ["tenant", "tenants", "rented", "occupied", "renting", "lease"])
+  ) {
+    return "tenant_occupied";
+  }
+
+  if (
+    normalized_objection === "condition_bad" ||
+    includesAny(text, ["needs work", "bad condition", "bad shape", "rough shape", "as is", "as-is"])
+  ) {
+    return "condition_disclosed";
+  }
+
+  if (includesAny(text, [
+    "yes i own it",
+    "yes i do",
+    "i own it",
+    "still own it",
+    "that's mine",
+    "thats mine",
+  ])) {
+    return "ownership_confirmed";
+  }
+
+  if (
+    positive_signals.includes("affirmative") &&
+    wordCount(text) <= 5
+  ) {
+    return "seller_interested";
+  }
+
+  return "unclear";
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // STAGE HINT DETECTION
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -3460,6 +3578,11 @@ function classifyHeuristic(message, brain_item = null) {
   const emotion          = detectEmotion(message);
   const positive_signals = detectPositiveSignals(message);
   const stage_hint       = detectStageHint(message, brain_item, objection);
+  const detected_intent  = detectInboundIntent(message, {
+    compliance_flag,
+    objection,
+    positive_signals,
+  });
 
   const confidence = computeHeuristicConfidence({
     objection,
@@ -3481,6 +3604,7 @@ function classifyHeuristic(message, brain_item = null) {
     emotion,
     stage_hint,
     compliance_flag,
+    detected_intent,
     positive_signals,
     confidence,
     motivation_score,
@@ -3606,6 +3730,7 @@ export async function classify(message, brain_item = null) {
       emotion:         "guarded",
       stage_hint:      "Ownership",
       compliance_flag: null,
+      detected_intent: "unclear",
       positive_signals: [],
       confidence:      0.50,
       motivation_score: 50,
@@ -3673,6 +3798,11 @@ export async function classify(message, brain_item = null) {
     emotion:          ai_result.emotion,
     stage_hint:       ai_result.stage_hint,
     compliance_flag:  final_compliance,
+    detected_intent:  detectInboundIntent(text, {
+      compliance_flag: final_compliance,
+      objection: ai_result.objection,
+      positive_signals: ai_result.positive_signals,
+    }),
     positive_signals: ai_result.positive_signals,
     confidence:       ai_result.confidence,
   };

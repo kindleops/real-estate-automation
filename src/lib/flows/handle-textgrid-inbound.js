@@ -339,11 +339,21 @@ function normalizeDetectedIntentValue(value = null) {
     "Ownership Confirmed": "ownership_confirmed",
     "Ownership Confirmation": "ownership_confirmed",
     ownership_confirmed: "ownership_confirmed",
+    seller_interested: "seller_interested",
+    asks_offer: "asks_offer",
+    asking_price_provided: "asking_price_provided",
+    opt_out: "opt_out",
+    wrong_number: "wrong_number",
     "Property Interest": "property_interest",
     interested: "interested",
     "not_interested": "not_interested",
     "wrong_person": "wrong_person",
-    "opt_out": "opt_out",
+    tenant_occupied: "tenant_occupied",
+    condition_disclosed: "condition_disclosed",
+    needs_call: "needs_call",
+    needs_email: "needs_email",
+    who_is_this: "who_is_this",
+    unclear: "unclear",
   };
 
   return aliases[raw] || raw.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -393,8 +403,10 @@ function buildSecondPassSupabasePayload({
   const detected_intent = normalizeDetectedIntentValue(
     auto_reply_plan?.inbound_intent ||
       auto_reply_plan?.detected_intent ||
+      classification?.detected_intent ||
+      classification?.inbound_intent ||
       classification?.objection ||
-      classification?.source
+      "unclear"
   );
   const language =
     clean(auto_reply_plan?.selected_language) ||
@@ -1715,10 +1727,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             seller_stage_reply?.plan?.selected_use_case === SELLER_FLOW_STAGES.STOP_OR_OPT_OUT ||
             inbound_is_negative,
           detected_intent:
+            seller_stage_reply?.plan?.inbound_intent ||
             seller_stage_reply?.plan?.detected_intent ||
+            classification?.detected_intent ||
+            classification?.inbound_intent ||
             classification?.objection ||
-            classification?.source ||
-            null,
+            "unclear",
           priority: classification?.priority || "normal",
           risk: classification?.risk || "low",
           safety_status: classification?.safety_status || "pending",
@@ -1730,9 +1744,11 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
              // Classification fields for inbox thread categorization
              detected_intent:
                second_pass_supabase_payload.detected_intent ||
+               classification?.detected_intent ||
+               classification?.inbound_intent ||
                classification?.objection ||
                seller_stage_reply?.plan?.detected_intent ||
-               null,
+               "unclear",
              sentiment: classification?.emotion || null,
              seller_stage: route?.stage || deterministic_state?.conversation_stage || null,
              conversation_stage: deterministic_state?.conversation_stage || route?.stage || null,
@@ -1753,10 +1769,11 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
              // Legacy fields
              classification_source: classification?.source || null,
              classification_result:
+               classification?.detected_intent ||
+               classification?.inbound_intent ||
                classification?.objection ||
-               classification?.source ||
                seller_stage_reply?.plan?.detected_intent ||
-               null,
+               "unclear",
              route_stage: route?.stage || null,
              route_use_case: route?.use_case || null,
              seller_stage_use_case:
