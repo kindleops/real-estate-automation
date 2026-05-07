@@ -125,6 +125,14 @@ function previewText(value = "", max = 180) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function emitInboundTrace(event, meta = {}) {
+  try {
+    console.log(event, JSON.stringify(meta));
+  } catch {
+    console.log(event);
+  }
+}
+
 function buildInboundContextMatchMetadata(context = {}) {
   const match =
     context?.fallback_match_data ||
@@ -322,6 +330,119 @@ function buildInboundStepFailure(error, err) {
             err?.response?.data?.cooldown_until
         ) || null
       : null,
+  };
+}
+
+function normalizeDetectedIntentValue(value = null) {
+  const raw = clean(value);
+  if (!raw) return null;
+
+  const aliases = {
+    "Ownership Confirmed": "ownership_confirmed",
+    "Ownership Confirmation": "ownership_confirmed",
+    ownership_confirmed: "ownership_confirmed",
+    "Property Interest": "property_interest",
+    interested: "interested",
+    "not_interested": "not_interested",
+    "wrong_person": "wrong_person",
+    "opt_out": "opt_out",
+  };
+
+  return aliases[raw] || raw.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function deriveSecondPassPriority(plan = null) {
+  const priority = Number(plan?.priority);
+  if (!Number.isFinite(priority)) return "normal";
+  if (priority <= 4) return "high";
+  if (priority >= 10) return "low";
+  return "normal";
+}
+
+function deriveSecondPassRisk(plan = null) {
+  switch (clean(plan?.safety_tier)) {
+    case "suppress":
+      return "high";
+    case "review":
+      return "medium";
+    default:
+      return "low";
+  }
+}
+
+function deriveSecondPassSafetyStatus(plan = null) {
+  switch (clean(plan?.safety_tier)) {
+    case "auto_send":
+      return "allowed";
+    case "suppress":
+      return "suppressed";
+    default:
+      return "review";
+  }
+}
+
+function buildSecondPassSupabasePayload({
+  extracted = {},
+  inbound_from = null,
+  inbound_to = null,
+  message_body = "",
+  payload = {},
+  classification = null,
+  route = null,
+  context = null,
+  auto_reply_plan = null,
+} = {}) {
+  const detected_intent = normalizeDetectedIntentValue(
+    auto_reply_plan?.inbound_intent ||
+      auto_reply_plan?.detected_intent ||
+      classification?.objection ||
+      classification?.source
+  );
+  const language =
+    clean(auto_reply_plan?.selected_language) ||
+    clean(classification?.language) ||
+    clean(context?.summary?.language_preference) ||
+    "English";
+  const classification_confidence =
+    typeof classification?.confidence === "number" ? classification.confidence : null;
+  const safety_status = deriveSecondPassSafetyStatus(auto_reply_plan);
+  const priority = deriveSecondPassPriority(auto_reply_plan);
+  const risk = deriveSecondPassRisk(auto_reply_plan);
+  const routing_allowed = clean(auto_reply_plan?.safety_tier) !== "suppress";
+
+  return {
+    message_id: extracted.message_id || null,
+    provider_message_sid: extracted.message_id || null,
+    from: inbound_from,
+    to: inbound_to,
+    message: message_body,
+    message_body,
+    received_at:
+      extracted.received_at ||
+      payload?.http_received_at ||
+      new Date().toISOString(),
+    detected_intent,
+    language,
+    classification_confidence,
+    safety_status,
+    priority,
+    risk,
+    routing_allowed,
+    metadata: {
+      detected_intent,
+      language,
+      classification_confidence,
+      safety_status,
+      priority,
+      risk,
+      routing_allowed,
+      sentiment: classification?.emotion || null,
+      seller_stage: route?.stage || null,
+      conversation_stage: route?.stage || context?.summary?.conversation_stage || null,
+      needs_human_review:
+        classification_confidence !== null ? classification_confidence < 0.5 : true,
+      next_action: route?.use_case || auto_reply_plan?.selected_use_case || null,
+    },
   };
 }
 
@@ -877,12 +998,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     let classification, inbound_is_negative, queue_cancellation, route, signals,
       deterministic_state, offer_routing;
     try {
-      console.log("STEP 3: classify start", { message_body: (message_body || "").slice(0, 50) });
+      emitInboundTrace("TEXTGRID_INBOUND_CLASSIFY_START", {
+        message_id: extracted.message_id,
+        inbound_from,
+        inbound_to,
+      });
       classification = await runtimeDeps.classify(message_body, brain_item);
-      console.log("STEP 4: classify success", { 
-        intent: classification?.intent || classification?.detected_intent || null,
-        language: classification?.language,
-        confidence: classification?.confidence
+      emitInboundTrace("TEXTGRID_INBOUND_CLASSIFY_SUCCESS", {
+        message_id: extracted.message_id,
+        detected_intent:
+          classification?.objection || classification?.source || null,
+        language: classification?.language || null,
+        classification_confidence: classification?.confidence ?? null,
       });
       signals = runtimeDeps.extractUnderwritingSignals({
         message: message_body,
@@ -1460,6 +1587,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
       });
 
+      const second_pass_supabase_payload = buildSecondPassSupabasePayload({
+        extracted,
+        inbound_from,
+        inbound_to,
+        message_body,
+        payload,
+        classification,
+        route,
+        context,
+        auto_reply_plan,
+      });
+
       if (inbound_message_event_id) {
         const suggested_reply_preview =
           seller_stage_reply?.preview_result?.rendered_message_text ||
@@ -1519,6 +1658,57 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           }));
         }
 
+        const discord_card_error = !discord_card?.ok
+          ? clean(discord_card?.error || discord_card?.reason || "discord_card_post_failed")
+          : null;
+
+        if (discord_card_error) {
+          safeWarn("textgrid.inbound_discord_card_failed", {
+            message_id: extracted.message_id,
+            inbound_from,
+            message_event_id: inbound_message_event_id,
+            discord_card_error,
+          });
+        }
+
+        emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_START", {
+          message_id: extracted.message_id,
+          provider_message_sid: second_pass_supabase_payload.provider_message_sid,
+          detected_intent: second_pass_supabase_payload.detected_intent,
+          language: second_pass_supabase_payload.language,
+          classification_confidence:
+            second_pass_supabase_payload.classification_confidence,
+          safety_status: second_pass_supabase_payload.safety_status,
+        });
+
+        try {
+          await runtimeDeps.logInboundMessageEventSupabase(
+            second_pass_supabase_payload,
+            {
+              now: new Date().toISOString(),
+              supabaseClient: runtimeDeps.getSupabaseClient?.(),
+            }
+          );
+          emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_SUCCESS", {
+            message_id: extracted.message_id,
+            provider_message_sid: second_pass_supabase_payload.provider_message_sid,
+            detected_intent: second_pass_supabase_payload.detected_intent,
+            language: second_pass_supabase_payload.language,
+            classification_confidence:
+              second_pass_supabase_payload.classification_confidence,
+            safety_status: second_pass_supabase_payload.safety_status,
+            priority: second_pass_supabase_payload.priority,
+            risk: second_pass_supabase_payload.risk,
+            routing_allowed: second_pass_supabase_payload.routing_allowed,
+          });
+        } catch (error) {
+          emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_ERROR", {
+            message_id: extracted.message_id,
+            provider_message_sid: second_pass_supabase_payload.provider_message_sid,
+            error_message: error?.message || "unknown_second_pass_supabase_error",
+          });
+          throw error;
+        }
         await runtimeDeps.logInboundMessageEvent({
           record_item_id: inbound_message_event_id,
           brain_item,
@@ -1566,17 +1756,41 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           language: classification?.language || null,
           classification_confidence: classification?.confidence || 0,
           metadata: {
-            ...inbound_context_match_metadata,
-            classification_source: classification?.source || null,
-            classification_result:
-              seller_stage_reply?.plan?.detected_intent ||
-              classification?.objection ||
-              classification?.source ||
-              null,
-            route_stage: route?.stage || null,
-            route_use_case: route?.use_case || null,
-            seller_stage_use_case:
-              seller_stage_reply?.plan?.selected_use_case || null,
+             ...inbound_context_match_metadata,
+             // Classification fields for inbox thread categorization
+             detected_intent:
+               second_pass_supabase_payload.detected_intent ||
+               classification?.objection ||
+               seller_stage_reply?.plan?.detected_intent ||
+               null,
+             sentiment: classification?.emotion || null,
+             seller_stage: route?.stage || deterministic_state?.conversation_stage || null,
+             conversation_stage: deterministic_state?.conversation_stage || route?.stage || null,
+             classification_confidence: second_pass_supabase_payload.classification_confidence,
+             needs_human_review:
+               second_pass_supabase_payload.classification_confidence !== null &&
+               second_pass_supabase_payload.classification_confidence < 0.5,
+             is_hot_lead: ['interested', 'offer_request', 'price_inquiry', 'maybe_interested'].includes(classification?.objection),
+             is_dnc: ['stop_texting', 'opt_out', 'wrong_person'].includes(classification?.compliance_flag) || classification?.objection === 'not_interested',
+             is_wrong_number: classification?.objection === 'wrong_person' || classification?.compliance_flag === 'wrong_person',
+             is_not_interested: classification?.objection === 'not_interested',
+             language: second_pass_supabase_payload.language,
+             next_action: route?.use_case || seller_stage_reply?.plan?.selected_use_case || null,
+             priority: second_pass_supabase_payload.priority,
+             risk: second_pass_supabase_payload.risk,
+             routing_allowed: second_pass_supabase_payload.routing_allowed,
+             safety_status: second_pass_supabase_payload.safety_status,
+             // Legacy fields
+             classification_source: classification?.source || null,
+             classification_result:
+               classification?.objection ||
+               classification?.source ||
+               seller_stage_reply?.plan?.detected_intent ||
+               null,
+             route_stage: route?.stage || null,
+             route_use_case: route?.use_case || null,
+             seller_stage_use_case:
+               seller_stage_reply?.plan?.selected_use_case || null,
             ...buildDiscordReviewMetadata({
               autopilot_enabled: Boolean(inbound_autopilot_enabled && outbound_queue_id),
               autopilot_delay_seconds: inbound_autopilot_delay_seconds,

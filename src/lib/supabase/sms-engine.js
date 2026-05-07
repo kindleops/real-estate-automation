@@ -45,6 +45,15 @@ function asNullableNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asNullableBoolean(value, fallback = null) {
+  if (typeof value === "boolean") return value;
+  if (value === null || value === undefined) return fallback;
+  const normalized = lower(value);
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 export function normalizeQueueRowId(value, fallback = null) {
   if (value === null || value === undefined) return fallback;
 
@@ -1910,9 +1919,82 @@ export async function logInboundMessageEvent(payload, options = {}) {
     }));
   }
 
+  // Extract classification fields from payload to store in metadata and
+  // authoritative message_events columns.
+  const classificationFields = ensureObject(payload?.metadata);
+  const detected_intent = clean(
+    payload?.detected_intent || classificationFields?.detected_intent
+  ) || null;
+  const sentiment = clean(payload?.sentiment || classificationFields?.sentiment) || null;
+  const seller_stage = clean(payload?.seller_stage || classificationFields?.seller_stage) || null;
+  const conversation_stage = clean(
+    payload?.conversation_stage || classificationFields?.conversation_stage
+  ) || null;
+  const classification_confidence = asNullableNumber(
+    payload?.classification_confidence ?? classificationFields?.classification_confidence,
+    null
+  );
+  const needs_human_review = asNullableBoolean(
+    payload?.needs_human_review ?? classificationFields?.needs_human_review,
+    null
+  );
+  const is_hot_lead = asNullableBoolean(
+    payload?.is_hot_lead ?? classificationFields?.is_hot_lead,
+    null
+  );
+  const is_dnc = asNullableBoolean(payload?.is_dnc ?? classificationFields?.is_dnc, null);
+  const is_wrong_number = asNullableBoolean(
+    payload?.is_wrong_number ?? classificationFields?.is_wrong_number,
+    null
+  );
+  const is_not_interested = asNullableBoolean(
+    payload?.is_not_interested ?? classificationFields?.is_not_interested,
+    null
+  );
+  const language = clean(payload?.language || classificationFields?.language) || null;
+  const next_action = clean(payload?.next_action || classificationFields?.next_action) || null;
+  const priority = clean(payload?.priority || classificationFields?.priority) || null;
+  const risk = clean(payload?.risk || classificationFields?.risk) || null;
+  const safety_status = clean(payload?.safety_status || classificationFields?.safety_status) || null;
+  const routing_allowed = asNullableBoolean(
+    payload?.routing_allowed ?? classificationFields?.routing_allowed,
+    null
+  );
+
+  let existing_row = null;
+  const supabase = getSupabase(options);
+
+  if (message_sid) {
+    let existing_query = await supabase
+      .from(MESSAGE_EVENTS_TABLE)
+      .select("id, message_event_key, metadata, created_at")
+      .eq("provider_message_sid", message_sid)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existing_query.error) throw existing_query.error;
+    existing_row = existing_query.data || null;
+
+    if (!existing_row) {
+      existing_query = await supabase
+        .from(MESSAGE_EVENTS_TABLE)
+        .select("id, message_event_key, metadata, created_at")
+        .eq("message_id", message_sid)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existing_query.error) throw existing_query.error;
+      existing_row = existing_query.data || null;
+    }
+  }
   let event = {
-    message_event_key: `inbound_${message_sid || crypto.randomUUID()}`,
+    message_event_key:
+      clean(existing_row?.message_event_key) ||
+      `inbound_${message_sid || crypto.randomUUID()}`,
     provider_message_sid: message_sid || null,
+    message_id: message_sid || null,
     direction: "inbound",
     event_type: "inbound_sms",
     message_body: message_body || null,
@@ -1920,23 +2002,44 @@ export async function logInboundMessageEvent(payload, options = {}) {
     from_phone_number,
     received_at: pickFirst(payload?.received_at, now),
     event_timestamp: pickFirst(payload?.received_at, now),
-    created_at: now,
+    created_at: existing_row?.created_at || now,
+    updated_at: now,
     character_count: message_body ? message_body.length : 0,
-    // Hydration fields
-    detected_intent: clean(payload?.detected_intent || payload?.metadata?.classification_result || payload?.metadata?.detected_intent) || null,
+    detected_intent:
+      detected_intent ||
+      clean(payload?.metadata?.classification_result) ||
+      null,
     type: clean(payload?.type || payload?.metadata?.type) || "inbound",
-    safety_status: clean(payload?.safety_status || payload?.metadata?.safety_status) || "pending",
-    priority: clean(payload?.priority || payload?.metadata?.priority) || "normal",
-    risk: clean(payload?.risk || payload?.metadata?.risk) || "low",
-    routing_allowed: typeof payload?.routing_allowed === 'boolean' ? payload.routing_allowed : (typeof payload?.metadata?.routing_allowed === 'boolean' ? payload.metadata.routing_allowed : true),
-    language: clean(payload?.language || payload?.metadata?.language) || null,
-    classification_confidence: Number(payload?.classification_confidence || payload?.metadata?.classification_confidence || 0),
+    safety_status: safety_status || "pending",
+    priority: priority || "normal",
+    risk: risk || "low",
+    routing_allowed: routing_allowed ?? true,
+    language,
+    classification_confidence: classification_confidence ?? 0,
     stage_before: clean(payload?.stage_before || payload?.metadata?.stage_before) || null,
     stage_after: clean(payload?.stage_after || payload?.metadata?.stage_after) || null,
     metadata: {
+      ...ensureObject(existing_row?.metadata),
       source: "textgrid_inbound_webhook",
       raw_body_keys,
       body_source,
+      // Classification fields from handle-textgrid-inbound
+      ...(detected_intent ? { detected_intent } : {}),
+      ...(sentiment ? { sentiment } : {}),
+      ...(seller_stage ? { seller_stage } : {}),
+      ...(conversation_stage ? { conversation_stage } : {}),
+      ...(classification_confidence !== null ? { classification_confidence } : {}),
+      ...(needs_human_review !== null ? { needs_human_review } : {}),
+      ...(is_hot_lead !== null ? { is_hot_lead } : {}),
+      ...(is_dnc !== null ? { is_dnc } : {}),
+      ...(is_wrong_number !== null ? { is_wrong_number } : {}),
+      ...(is_not_interested !== null ? { is_not_interested } : {}),
+      ...(language ? { language } : {}),
+      ...(next_action ? { next_action } : {}),
+      ...(priority ? { priority } : {}),
+      ...(risk ? { risk } : {}),
+      ...(safety_status ? { safety_status } : {}),
+      ...(routing_allowed !== null ? { routing_allowed } : {}),
       ...(body_missing ? {
         body_missing: true,
         available_payload_keys: raw_body_keys,
@@ -1985,9 +2088,6 @@ export async function logInboundMessageEvent(payload, options = {}) {
   } catch (syncErr) {
     console.error("FAILED TO SYNC THREAD STATE ON INBOUND", syncErr);
   }
-
-  const supabase = getSupabase(options);
-
   const { data, error } = await supabase
     .from(MESSAGE_EVENTS_TABLE)
     .upsert(event, {
