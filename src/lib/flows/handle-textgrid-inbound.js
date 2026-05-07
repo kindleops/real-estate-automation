@@ -983,7 +983,19 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       inbound_message_event_id = inbound_event?.item_id || null;
       message_event_enriched = true;
     } catch (err) {
-      return failStepAndReturn("textgrid_inbound_failed_message_event_create", err);
+      emitInboundTrace("TEXTGRID_INBOUND_MESSAGE_EVENT_CREATE_ERROR", {
+        message_id: extracted.message_id,
+        inbound_from,
+        inbound_to,
+        error_message: err?.message || "unknown_message_event_create_error",
+        error_stack: err?.stack || null,
+      });
+      safeWarn("textgrid.inbound_message_event_create_failed", {
+        message_id: extracted.message_id,
+        inbound_from,
+        inbound_to,
+        error_message: err?.message || "unknown_message_event_create_error",
+      });
     }
 
     if (inbound_debug_stage === "after_message_event_create") {
@@ -1160,6 +1172,61 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       return { ok: true, stage: "after_offer_stage_ai", offer_stage_ai_result };
     }
 
+    const second_pass_supabase_payload = buildSecondPassSupabasePayload({
+      extracted,
+      inbound_from,
+      inbound_to,
+      message_body,
+      payload,
+      classification,
+      route,
+      context,
+      auto_reply_plan: null,
+    });
+
+    emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_START", {
+      message_id: extracted.message_id,
+      provider_message_sid: second_pass_supabase_payload.provider_message_sid,
+      detected_intent: second_pass_supabase_payload.detected_intent,
+      language: second_pass_supabase_payload.language,
+      classification_confidence:
+        second_pass_supabase_payload.classification_confidence,
+      safety_status: second_pass_supabase_payload.safety_status,
+    });
+
+    try {
+      const log_inbound_message_event_supabase =
+        runtimeDeps.logInboundMessageEventSupabase ||
+        (await import("@/lib/supabase/sms-engine.js")).logInboundMessageEvent;
+
+      await log_inbound_message_event_supabase(
+        second_pass_supabase_payload,
+        {
+          now: new Date().toISOString(),
+          supabaseClient: runtimeDeps.getSupabaseClient?.(),
+        }
+      );
+      emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_SUCCESS", {
+        message_id: extracted.message_id,
+        provider_message_sid: second_pass_supabase_payload.provider_message_sid,
+        detected_intent: second_pass_supabase_payload.detected_intent,
+        language: second_pass_supabase_payload.language,
+        classification_confidence:
+          second_pass_supabase_payload.classification_confidence,
+        safety_status: second_pass_supabase_payload.safety_status,
+        priority: second_pass_supabase_payload.priority,
+        risk: second_pass_supabase_payload.risk,
+        routing_allowed: second_pass_supabase_payload.routing_allowed,
+      });
+    } catch (error) {
+      emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_ERROR", {
+        message_id: extracted.message_id,
+        provider_message_sid: second_pass_supabase_payload.provider_message_sid,
+        error_message: error?.message || "unknown_second_pass_supabase_error",
+      });
+      throw error;
+    }
+
     // ── SEGMENT: prospect_resolution ──────────────────────────────────────
     // Write brain activity, master-owner timestamps, and stage/language/profile
     // updates in parallel.
@@ -1183,50 +1250,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             ...(sms_agent_id ? { "sms-agent": sms_agent_id } : {}),
           },
         });
-
-        // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
-        try {
-          const supabase_payload = {
-            message_id: extracted.message_id,
-            from: inbound_from,
-            to: inbound_to,
-            message_body,
-            detected_intent:
-              seller_stage_reply?.plan?.inbound_intent ||
-              seller_stage_reply?.plan?.detected_intent ||
-              classification?.objection ||
-              classification?.source ||
-              null,
-            language:
-              classification?.language ||
-              context?.summary?.language_preference ||
-              "English",
-            classification_confidence: classification?.confidence || 0,
-            safety_status:
-              seller_stage_reply?.plan?.safety_tier === "auto_send"
-                ? "safe"
-                : "review_required",
-            routing_allowed: Boolean(seller_stage_reply?.should_queue_reply),
-            metadata: {
-              ...(classification || {}),
-              route_stage: route?.stage || null,
-              use_case: route?.use_case || null,
-              seller_stage_reply_reason: seller_stage_reply?.reason || null,
-              second_pass_authoritative: true,
-            },
-          };
-
-          console.log("STEP 7: supabase authoritative update start", {
-            intent: supabase_payload.detected_intent,
-            safety: supabase_payload.safety_status
-          });
-
-          await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
-          
-          console.log("STEP 7: supabase authoritative update success");
-        } catch (supaErr) {
-          console.error("STEP 7 (FAILED): supabase update error", supaErr);
-        }
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_prospect_resolution", err);
@@ -1585,18 +1608,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         notes: `Inbound SMS processed${route?.stage ? ` at stage ${route.stage}` : ""}.`,
       });
 
-      const second_pass_supabase_payload = buildSecondPassSupabasePayload({
-        extracted,
-        inbound_from,
-        inbound_to,
-        message_body,
-        payload,
-        classification,
-        route,
-        context,
-        auto_reply_plan,
-      });
-
       if (inbound_message_event_id) {
         const suggested_reply_preview =
           seller_stage_reply?.preview_result?.rendered_message_text ||
@@ -1667,49 +1678,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             message_event_id: inbound_message_event_id,
             discord_card_error,
           });
-        }
-
-        emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_START", {
-          message_id: extracted.message_id,
-          provider_message_sid: second_pass_supabase_payload.provider_message_sid,
-          detected_intent: second_pass_supabase_payload.detected_intent,
-          language: second_pass_supabase_payload.language,
-          classification_confidence:
-            second_pass_supabase_payload.classification_confidence,
-          safety_status: second_pass_supabase_payload.safety_status,
-        });
-
-        try {
-          const log_inbound_message_event_supabase =
-            runtimeDeps.logInboundMessageEventSupabase ||
-            (await import("@/lib/supabase/sms-engine.js")).logInboundMessageEvent;
-
-          await log_inbound_message_event_supabase(
-            second_pass_supabase_payload,
-            {
-              now: new Date().toISOString(),
-              supabaseClient: runtimeDeps.getSupabaseClient?.(),
-            }
-          );
-          emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_SUCCESS", {
-            message_id: extracted.message_id,
-            provider_message_sid: second_pass_supabase_payload.provider_message_sid,
-            detected_intent: second_pass_supabase_payload.detected_intent,
-            language: second_pass_supabase_payload.language,
-            classification_confidence:
-              second_pass_supabase_payload.classification_confidence,
-            safety_status: second_pass_supabase_payload.safety_status,
-            priority: second_pass_supabase_payload.priority,
-            risk: second_pass_supabase_payload.risk,
-            routing_allowed: second_pass_supabase_payload.routing_allowed,
-          });
-        } catch (error) {
-          emitInboundTrace("TEXTGRID_INBOUND_SECOND_PASS_SUPABASE_ERROR", {
-            message_id: extracted.message_id,
-            provider_message_sid: second_pass_supabase_payload.provider_message_sid,
-            error_message: error?.message || "unknown_second_pass_supabase_error",
-          });
-          throw error;
         }
         await runtimeDeps.logInboundMessageEvent({
           record_item_id: inbound_message_event_id,
@@ -1814,56 +1782,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
                 : null,
           },
         });
-
-        // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
-        try {
-          const supabase_payload = {
-            message_id: extracted.message_id,
-            from: inbound_from,
-            to: inbound_to,
-            message_body,
-            detected_intent:
-              seller_stage_reply?.plan?.inbound_intent ||
-              seller_stage_reply?.plan?.detected_intent ||
-              classification?.objection ||
-              classification?.source ||
-              null,
-            priority: classification?.priority || "normal",
-            risk: classification?.risk || "low",
-            safety_status: classification?.safety_status || "pending",
-            routing_allowed: seller_stage_reply?.plan?.routing_allowed ?? true,
-            language: classification?.language || null,
-            classification_confidence: classification?.confidence || 0,
-            stage_before,
-            stage_after:
-              seller_stage_reply?.brain_stage ||
-              deterministic_state?.conversation_stage ||
-              route?.stage ||
-              null,
-            master_owner_id,
-            prospect_id,
-            property_id,
-            market: payload?.market || null,
-            metadata: {
-              ...(classification || {}),
-              route_stage: route?.stage || null,
-              use_case: route?.use_case || null,
-              seller_stage_reply_reason: seller_stage_reply?.reason || null,
-              second_pass_authoritative: true,
-            },
-          };
-
-          console.log("STEP 7: supabase authoritative update start", {
-            intent: supabase_payload.detected_intent,
-            safety: supabase_payload.safety_status
-          });
-
-          await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
-          
-          console.log("STEP 7: supabase authoritative update success");
-        } catch (supaErr) {
-          console.error("STEP 7 (FAILED): supabase update error", supaErr);
-        }
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_podio_write", err);
