@@ -877,7 +877,13 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     let classification, inbound_is_negative, queue_cancellation, route, signals,
       deterministic_state, offer_routing;
     try {
+      console.log("STEP 3: classify start", { message_body: (message_body || "").slice(0, 50) });
       classification = await runtimeDeps.classify(message_body, brain_item);
+      console.log("STEP 4: classify success", { 
+        intent: classification?.intent || classification?.detected_intent || null,
+        language: classification?.language,
+        confidence: classification?.confidence
+      });
       signals = runtimeDeps.extractUnderwritingSignals({
         message: message_body,
         classification,
@@ -905,12 +911,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         });
       }
 
-      route = runtimeDeps.resolveRoute({
-        classification,
-        brain_item,
-        phone_item: context.items?.phone_item || null,
-        message: message_body,
-      });
+      try {
+        console.log("STEP 5: route start");
+        route = await runtimeDeps.resolveRoute({
+          message_body,
+          brain_item,
+          classification,
+        });
+        console.log("STEP 5: route success", { stage: route?.stage });
+      } catch (routeErr) {
+        console.error("STEP 5 (FAILED): routing error", routeErr);
+        throw routeErr;
+      }
 
       signals = runtimeDeps.extractUnderwritingSignals({
         message: message_body,
@@ -1046,6 +1058,50 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             ...(sms_agent_id ? { "sms-agent": sms_agent_id } : {}),
           },
         });
+
+        // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
+        try {
+          const supabase_payload = {
+            message_id: extracted.message_id,
+            from: inbound_from,
+            to: inbound_to,
+            message_body,
+            detected_intent:
+              seller_stage_reply?.plan?.inbound_intent ||
+              seller_stage_reply?.plan?.detected_intent ||
+              classification?.objection ||
+              classification?.source ||
+              null,
+            language:
+              classification?.language ||
+              context?.summary?.language_preference ||
+              "English",
+            classification_confidence: classification?.confidence || 0,
+            safety_status:
+              seller_stage_reply?.plan?.safety_tier === "auto_send"
+                ? "safe"
+                : "review_required",
+            routing_allowed: Boolean(seller_stage_reply?.should_queue_reply),
+            metadata: {
+              ...(classification || {}),
+              route_stage: route?.stage || null,
+              use_case: route?.use_case || null,
+              seller_stage_reply_reason: seller_stage_reply?.reason || null,
+              second_pass_authoritative: true,
+            },
+          };
+
+          console.log("STEP 7: supabase authoritative update start", {
+            intent: supabase_payload.detected_intent,
+            safety: supabase_payload.safety_status
+          });
+
+          await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
+          
+          console.log("STEP 7: supabase authoritative update success");
+        } catch (supaErr) {
+          console.error("STEP 7 (FAILED): supabase update error", supaErr);
+        }
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_prospect_resolution", err);
@@ -1236,6 +1292,11 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           extra_template_render_overrides,
           preview_only: true,
           cash_offer_snapshot_id,
+        });
+
+        console.log("STEP 6: preview success", { 
+          should_queue: seller_stage_preview?.should_queue_reply,
+          intent: seller_stage_preview?.plan?.inbound_intent || seller_stage_preview?.plan?.detected_intent
         });
 
         // Feature flag: if auto_reply_dry_run, only preview (no live queue)
@@ -1546,6 +1607,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             to: inbound_to,
             message_body,
             detected_intent:
+              seller_stage_reply?.plan?.inbound_intent ||
               seller_stage_reply?.plan?.detected_intent ||
               classification?.objection ||
               classification?.source ||
@@ -1566,11 +1628,25 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             prospect_id,
             property_id,
             market: payload?.market || null,
+            metadata: {
+              ...(classification || {}),
+              route_stage: route?.stage || null,
+              use_case: route?.use_case || null,
+              seller_stage_reply_reason: seller_stage_reply?.reason || null,
+              second_pass_authoritative: true,
+            },
           };
 
+          console.log("STEP 7: supabase authoritative update start", {
+            intent: supabase_payload.detected_intent,
+            safety: supabase_payload.safety_status
+          });
+
           await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
-        } catch (supabase_err) {
-          console.error("FAILED TO PERSIST CLASSIFIED INBOUND TO SUPABASE", supabase_err);
+          
+          console.log("STEP 7: supabase authoritative update success");
+        } catch (supaErr) {
+          console.error("STEP 7 (FAILED): supabase update error", supaErr);
         }
       }
     } catch (err) {

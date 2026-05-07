@@ -261,6 +261,12 @@ export async function POST(request) {
 
     const payload = runtimeDeps.normalizeTextgridInboundPayloadImpl(body, request.headers);
     normalized_payload = payload;
+    
+    console.log("STEP 1: entered webhook", {
+      message_id: payload?.message_id,
+      from: payload?.from
+    });
+
     const request_url = new URL(request.url);
     const dry_run = asBool(
       body?.dry_run ??
@@ -311,6 +317,12 @@ export async function POST(request) {
     );
     safe_signature_header_name =
       webhook_verification?.signature_header_name || payload?.header_signature_name || null;
+
+    console.log("STEP 2: normalized inbound", {
+      message_id: payload.message_id,
+      from: payload.from,
+      to: payload.to
+    });
 
     try {
       safe_message_id = payload?.message_id || null;
