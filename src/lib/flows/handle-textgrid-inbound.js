@@ -7,7 +7,6 @@ import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { normalizeInboundTextgridPhone } from "@/lib/providers/textgrid.js";
 import { getPodioRetryAfterSeconds, isPodioRateLimitError } from "@/lib/providers/podio.js";
 import { logInboundMessageEvent } from "@/lib/domain/events/log-inbound-message-event.js";
-import { logInboundMessageEvent as logInboundMessageEventSupabase } from "@/lib/supabase/sms-engine.js";
 import { updateBrainAfterInbound } from "@/lib/domain/brain/update-brain-after-inbound.js";
 import { updateBrainStage } from "@/lib/domain/brain/update-brain-stage.js";
 import { maybeCreateOfferFromContext } from "@/lib/domain/offers/maybe-create-offer-from-context.js";
@@ -56,7 +55,6 @@ const defaultDeps = {
   resolveRoute,
   normalizeInboundTextgridPhone,
   logInboundMessageEvent,
-  logInboundMessageEventSupabase,
   updateBrainAfterInbound,
   updateBrainStage,
   maybeCreateOfferFromContext,
@@ -1682,7 +1680,11 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         });
 
         try {
-          await runtimeDeps.logInboundMessageEventSupabase(
+          const log_inbound_message_event_supabase =
+            runtimeDeps.logInboundMessageEventSupabase ||
+            (await import("@/lib/supabase/sms-engine.js")).logInboundMessageEvent;
+
+          await log_inbound_message_event_supabase(
             second_pass_supabase_payload,
             {
               now: new Date().toISOString(),
