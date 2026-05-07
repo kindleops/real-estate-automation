@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert";
 import { resolveSellerAutoReplyPlan } from "../../src/lib/domain/seller-flow/resolve-seller-auto-reply-plan.js";
+import { classify } from "../../src/lib/domain/classification/classify.js";
 
 describe("Seller Auto Reply Plan", () => {
   test('"Yes" after ownership_check -> consider_selling / S2 / should_queue_reply true', async () => {
@@ -128,4 +129,31 @@ test('auto reply plan uses safe fallback reply when template lookup is missing',
   } finally {
     process.env.NODE_ENV = priorNodeEnv;
   }
+});
+
+describe("Classification detected_intent", () => {
+  test('classify("Yes I own it") -> ownership_confirmed', async () => {
+    const result = await classify("Yes I own it");
+    assert.strictEqual(result.detected_intent, "ownership_confirmed");
+  });
+
+  test('classify("How much?") -> asks_offer', async () => {
+    const result = await classify("How much?");
+    assert.strictEqual(result.detected_intent, "asks_offer");
+  });
+
+  test('classify("I want 150k") -> asking_price_provided', async () => {
+    const result = await classify("I want 150k");
+    assert.strictEqual(result.detected_intent, "asking_price_provided");
+  });
+
+  test('classify("Stop") -> opt_out', async () => {
+    const result = await classify("Stop");
+    assert.strictEqual(result.detected_intent, "opt_out");
+  });
+
+  test('classify("Wrong number") -> wrong_number', async () => {
+    const result = await classify("Wrong number");
+    assert.strictEqual(result.detected_intent, "wrong_number");
+  });
 });
