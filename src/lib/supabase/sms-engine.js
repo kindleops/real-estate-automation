@@ -1046,7 +1046,13 @@ export async function incrementTextgridNumberUsage(selection, deps = {}) {
     .update(payload)
     .eq("id", selected.id)
     .select()
- function buildSuccessMessageEvent(row, send_result, options = {}) {
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+function buildSuccessMessageEvent(row, send_result, options = {}) {
   const normalized = normalizeSendQueueRow(row);
   const event_timestamp = options.now || nowIso();
   const queue_key = clean(normalized.queue_key) || clean(normalized.queue_id) || String(normalized.id);
