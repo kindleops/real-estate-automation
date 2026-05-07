@@ -1504,13 +1504,18 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           is_opt_out:
             seller_stage_reply?.plan?.selected_use_case === SELLER_FLOW_STAGES.STOP_OR_OPT_OUT ||
             inbound_is_negative,
+          detected_intent:
+            seller_stage_reply?.plan?.detected_intent ||
+            classification?.objection ||
+            classification?.source ||
+            null,
           metadata: {
             ...inbound_context_match_metadata,
             classification_source: classification?.source || null,
             classification_result:
+              seller_stage_reply?.plan?.detected_intent ||
               classification?.objection ||
               classification?.source ||
-              seller_stage_reply?.plan?.detected_intent ||
               null,
             route_stage: route?.stage || null,
             route_use_case: route?.use_case || null,
