@@ -1037,16 +1037,11 @@ export async function incrementTextgridNumberUsage(selection, deps = {}) {
     .update(payload)
     .eq("id", selected.id)
     .select()
-    .maybeSingle();
-
-  if (error) throw error;
-  return data || null;
-}
-
-function buildSuccessMessageEvent(row, send_result, options = {}) {
+ function buildSuccessMessageEvent(row, send_result, options = {}) {
   const normalized = normalizeSendQueueRow(row);
   const event_timestamp = options.now || nowIso();
   const queue_key = clean(normalized.queue_key) || clean(normalized.queue_id) || String(normalized.id);
+
   const sid = clean(
     options.provider_message_sid ||
       send_result?.sid ||
@@ -1088,6 +1083,8 @@ function buildSuccessMessageEvent(row, send_result, options = {}) {
     safety_status: normalized.safety_status || "pending",
     risk: normalized.risk || "low",
     priority: normalized.priority || "normal",
+    language: normalized.language || null,
+    classification_confidence: normalized.classification_confidence || null,
     metadata: {
       source: "supabase_send_queue",
       queue_key,
@@ -1154,6 +1151,8 @@ function buildFailureMessageEvent(row, error, options = {}) {
     safety_status: normalized.safety_status || "pending",
     risk: normalized.risk || "low",
     priority: normalized.priority || "normal",
+    language: normalized.language || null,
+    classification_confidence: normalized.classification_confidence || null,
     metadata: {
       source: "supabase_send_queue",
       queue_key,
@@ -1196,6 +1195,28 @@ export async function writeOutboundSuccessMessageEvent(row, send_result, options
 
   if (typeof options.writeOutboundSuccessMessageEvent === "function") {
     return options.writeOutboundSuccessMessageEvent(payload);
+  }
+
+  // ── Sync to inbox_thread_state ───────────────────────────────────────────
+  try {
+    await upsertInboxThreadState({
+      thread_key: payload.thread_key,
+      seller_phone: payload.to_phone_number,
+      canonical_e164: payload.to_phone_number,
+      our_number: payload.from_phone_number,
+      master_owner_id: payload.master_owner_id,
+      prospect_id: payload.prospect_id,
+      property_id: payload.property_id,
+      market: normalized.market || null,
+      stage: payload.stage_after || payload.stage_before,
+      status: "active",
+      priority: payload.priority,
+      last_intent: payload.detected_intent,
+      latest_reply_template_id: payload.template_id,
+      is_read: true,
+    }, options);
+  } catch (syncErr) {
+    console.error("FAILED TO SYNC THREAD STATE ON OUTBOUND SUCCESS", syncErr);
   }
 
   const supabase = getSupabase(options);
@@ -1908,6 +1929,8 @@ export async function logInboundMessageEvent(payload, options = {}) {
     priority: clean(payload?.priority || payload?.metadata?.priority) || "normal",
     risk: clean(payload?.risk || payload?.metadata?.risk) || "low",
     routing_allowed: typeof payload?.routing_allowed === 'boolean' ? payload.routing_allowed : (typeof payload?.metadata?.routing_allowed === 'boolean' ? payload.metadata.routing_allowed : true),
+    language: clean(payload?.language || payload?.metadata?.language) || null,
+    classification_confidence: Number(payload?.classification_confidence || payload?.metadata?.classification_confidence || 0),
     stage_before: clean(payload?.stage_before || payload?.metadata?.stage_before) || null,
     stage_after: clean(payload?.stage_after || payload?.metadata?.stage_after) || null,
     metadata: {
@@ -1938,6 +1961,29 @@ export async function logInboundMessageEvent(payload, options = {}) {
 
   if (typeof options.logInboundMessageEvent === "function") {
     return options.logInboundMessageEvent(event);
+  }
+
+  // ── Sync to inbox_thread_state ───────────────────────────────────────────
+  // Added 2026-05-07 to ensure the dashboard has a single row per thread
+  try {
+    await upsertInboxThreadState({
+      thread_key: event.thread_key,
+      seller_phone: event.from_phone_number,
+      canonical_e164: event.from_phone_number,
+      our_number: event.to_phone_number,
+      master_owner_id: event.master_owner_id,
+      prospect_id: event.prospect_id,
+      property_id: event.property_id,
+      market: payload.market || null,
+      stage: event.stage_after || event.stage_before,
+      status: "active",
+      priority: event.priority,
+      last_intent: event.detected_intent,
+      automation_state: event.routing_allowed ? "running" : "paused",
+      is_read: false,
+    }, options);
+  } catch (syncErr) {
+    console.error("FAILED TO SYNC THREAD STATE ON INBOUND", syncErr);
   }
 
   const supabase = getSupabase(options);
@@ -2211,4 +2257,53 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
   }
 
   throw error;
+}
+
+/**
+ * Upserts a row into the inbox_thread_state table.
+ * This table is used to drive the Nexus Inbox dashboard.
+ */
+export async function upsertInboxThreadState(payload, deps = {}) {
+  const supabase = getSupabase(deps);
+  const now = new Date().toISOString();
+
+  const insert_payload = {
+    thread_key: payload.thread_key,
+    seller_phone: clean(payload.seller_phone),
+    canonical_e164: clean(payload.canonical_e164),
+    our_number: clean(payload.our_number),
+    master_owner_id: clean(payload.master_owner_id),
+    prospect_id: clean(payload.prospect_id),
+    property_id: clean(payload.property_id),
+    market: clean(payload.market),
+    stage: clean(payload.stage),
+    status: clean(payload.status || "active"),
+    priority: clean(payload.priority || "normal"),
+    last_intent: clean(payload.last_intent),
+    next_action: clean(payload.next_action),
+    automation_state: clean(payload.automation_state),
+    latest_reply_template_id: clean(payload.latest_reply_template_id),
+    is_read: typeof payload.is_read === 'boolean' ? payload.is_read : false,
+    updated_at: now,
+    metadata: {
+      ...(payload.metadata || {}),
+      last_sync_at: now,
+    }
+  };
+
+  // Remove empty strings/nulls for key fields if they might break constraints
+  if (!insert_payload.thread_key) return { ok: false, reason: "missing_thread_key" };
+
+  const { data, error } = await supabase
+    .from('inbox_thread_state')
+    .upsert(insert_payload, { onConflict: 'thread_key' })
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("UPSERT THREAD STATE FAILED", error);
+    return { ok: false, error: error.message };
+  }
+
+  return { ok: true, data };
 }

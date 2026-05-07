@@ -7,6 +7,7 @@ import { resolveRoute } from "@/lib/domain/routing/resolve-route.js";
 import { normalizeInboundTextgridPhone } from "@/lib/providers/textgrid.js";
 import { getPodioRetryAfterSeconds, isPodioRateLimitError } from "@/lib/providers/podio.js";
 import { logInboundMessageEvent } from "@/lib/domain/events/log-inbound-message-event.js";
+import { logInboundMessageEvent as logInboundMessageEventSupabase } from "@/lib/supabase/sms-engine.js";
 import { updateBrainAfterInbound } from "@/lib/domain/brain/update-brain-after-inbound.js";
 import { updateBrainStage } from "@/lib/domain/brain/update-brain-stage.js";
 import { maybeCreateOfferFromContext } from "@/lib/domain/offers/maybe-create-offer-from-context.js";
@@ -55,6 +56,7 @@ const defaultDeps = {
   resolveRoute,
   normalizeInboundTextgridPhone,
   logInboundMessageEvent,
+  logInboundMessageEventSupabase,
   updateBrainAfterInbound,
   updateBrainStage,
   maybeCreateOfferFromContext,
@@ -1456,19 +1458,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           }));
         }
 
-        const discord_card_error = !discord_card?.ok
-          ? clean(discord_card?.error || discord_card?.reason || "discord_card_post_failed")
-          : null;
-
-        if (discord_card_error) {
-          safeWarn("textgrid.inbound_discord_card_failed", {
-            message_id: extracted.message_id,
-            inbound_from,
-            message_event_id: inbound_message_event_id,
-            discord_card_error,
-          });
-        }
-
         await runtimeDeps.logInboundMessageEvent({
           record_item_id: inbound_message_event_id,
           brain_item,
@@ -1509,6 +1498,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             classification?.objection ||
             classification?.source ||
             null,
+          priority: classification?.priority || "normal",
+          risk: classification?.risk || "low",
+          safety_status: classification?.safety_status || "pending",
+          routing_allowed: seller_stage_reply?.plan?.routing_allowed ?? true,
+          language: classification?.language || null,
+          classification_confidence: classification?.confidence || 0,
           metadata: {
             ...inbound_context_match_metadata,
             classification_source: classification?.source || null,
@@ -1542,6 +1537,41 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
                 : null,
           },
         });
+
+        // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
+        try {
+          const supabase_payload = {
+            message_id: extracted.message_id,
+            from: inbound_from,
+            to: inbound_to,
+            message_body,
+            detected_intent:
+              seller_stage_reply?.plan?.detected_intent ||
+              classification?.objection ||
+              classification?.source ||
+              null,
+            priority: classification?.priority || "normal",
+            risk: classification?.risk || "low",
+            safety_status: classification?.safety_status || "pending",
+            routing_allowed: seller_stage_reply?.plan?.routing_allowed ?? true,
+            language: classification?.language || null,
+            classification_confidence: classification?.confidence || 0,
+            stage_before,
+            stage_after:
+              seller_stage_reply?.brain_stage ||
+              deterministic_state?.conversation_stage ||
+              route?.stage ||
+              null,
+            master_owner_id,
+            prospect_id,
+            property_id,
+            market: payload?.market || null,
+          };
+
+          await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
+        } catch (supabase_err) {
+          console.error("FAILED TO PERSIST CLASSIFIED INBOUND TO SUPABASE", supabase_err);
+        }
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_podio_write", err);
