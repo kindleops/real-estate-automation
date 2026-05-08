@@ -110,6 +110,7 @@ async function backfillOutbound() {
         property_id: item.property_id,
         phone_number_id: item.phone_number_id,
         market_id: item.market_id,
+        message_event_key: `backfill:queue:${item.id}`,
         metadata: {
           ...item.metadata,
           queue_snapshot: item
@@ -208,11 +209,35 @@ async function backfillInbound() {
       // 2. Backfill classification (intent, language, safety)
       if (!item.detected_intent || !item.language) {
         try {
-          const classification = await classify(item.message_body);
+          const body = clean(item.message_body);
+          const classification = await classify(body);
+          
           if (classification) {
-            if (!item.detected_intent) updatePayload.detected_intent = classification.detected_intent;
+            let intent = classification.detected_intent;
+
+            // OVERRIDE: Safe intent backfill rules
+            const lowerBody = body.toLowerCase();
+            
+            // Seller Interest
+            if (lowerBody.includes("yes and i want to sell") || lowerBody.includes("i'm interested in selling")) {
+                intent = "seller_interested";
+            }
+
+            // Price Detection (asking_price_provided)
+            // Matches: 110$, $110, 110k, $110k, 150000, $150,000 etc.
+            const priceRegex = /(?:\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?\s?[kK]?|\d+\$)/;
+            // Ensure the message is mostly just the price or the price is a significant part
+            if (priceRegex.test(lowerBody) && body.length < 20) {
+                intent = "asking_price_provided";
+            }
+
+            if (!item.detected_intent || item.detected_intent === 'unclear') {
+              updatePayload.detected_intent = intent;
+            }
+            
             if (!item.language) updatePayload.language = classification.language;
             if (!item.classification_confidence) updatePayload.classification_confidence = classification.confidence;
+            
             if (item.safety_status === "pending" || !item.safety_status) {
               updatePayload.safety_status = classification.compliance_flag === "stop_texting" ? "suppressed" : "safe";
             }

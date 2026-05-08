@@ -70,9 +70,17 @@ async function safeSelect(supabase, table, queryBuilder) {
 
 export async function loadThreadContext({ thread_key, supabase }) {
   const [messageEventsRes, sendQueueRes, brainRes] = await Promise.all([
-    safeSelect(supabase, "message_events", (q) =>
-      q.select("*").eq("thread_key", thread_key).order("created_at", { ascending: false }).limit(200)
-    ),
+    safeSelect(supabase, "inbox_chat_timeline_hydrated", (q) =>
+      q.select("*").eq("thread_key", thread_key).order("event_timestamp", { ascending: false }).limit(200)
+    ).then(async (res) => {
+      // Fallback if the view is missing or empty
+      if (!res.ok || res.rows.length === 0) {
+        return safeSelect(supabase, "inbox_messages_hydrated", (q) =>
+          q.select("*").eq("thread_key", thread_key).order("created_at", { ascending: false }).limit(200)
+        );
+      }
+      return res;
+    }),
     safeSelect(supabase, "send_queue", (q) =>
       q.select("*").eq("thread_key", thread_key).order("created_at", { ascending: false }).limit(200)
     ),

@@ -124,9 +124,9 @@ export async function getLiveInbox(params = {}, deps = {}) {
   let scanLimit = Math.max(limit * 4, 500);
   if (params.filter && params.filter !== "all") scanLimit = Math.max(scanLimit, 2000);
 
-  let q = supabase.from("message_events").select("*").order("created_at", { ascending: false }).limit(scanLimit);
+  let q = supabase.from("inbox_chat_timeline_hydrated").select("*").order("event_timestamp", { ascending: false }).limit(scanLimit);
   if (direction === "inbound" || direction === "outbound") q = q.eq("direction", direction);
-  if (cursor?.t) q = q.lt("created_at", cursor.t);
+  if (cursor?.t) q = q.lt("event_timestamp", cursor.t);
   if (clean(params.q)) q = q.ilike("message_body", `%${clean(params.q)}%`);
   const { data, error } = await q;
   if (error) throw error;

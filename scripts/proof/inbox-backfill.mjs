@@ -51,15 +51,15 @@ async function runProof() {
   console.log("[2] Checking hydrated identity fields...");
   const { data: identityData, error: identityError } = await supabase
     .from("inbox_threads_hydrated")
-    .select("owner_name, prospect_name, property_address_full, market")
+    .select("owner_display_name, prospect_full_name, property_address_full, market")
     .eq("thread_key", TARGET_THREAD)
     .single();
 
   if (identityError) {
     console.error("  Error fetching identity:", identityError.message);
   } else {
-    console.log(`  Owner:    ${identityData.owner_name}`);
-    console.log(`  Prospect: ${identityData.prospect_name}`);
+    console.log(`  Owner:    ${identityData.owner_display_name}`);
+    console.log(`  Prospect: ${identityData.prospect_full_name}`);
     console.log(`  Address:  ${identityData.property_address_full}`);
     console.log(`  Market:   ${identityData.market}\n`);
   }
