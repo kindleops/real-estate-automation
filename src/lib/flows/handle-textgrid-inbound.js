@@ -1020,6 +1020,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     let classification, inbound_is_negative, queue_cancellation, route, signals,
       deterministic_state, offer_routing;
     try {
+<<<<<<< HEAD
       emitInboundTrace("TEXTGRID_INBOUND_CLASSIFY_START", {
         message_id: extracted.message_id,
         inbound_from,
@@ -1033,6 +1034,9 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
         language: classification?.language || null,
         classification_confidence: classification?.confidence ?? null,
       });
+=======
+      classification = await runtimeDeps.classify(message_body, brain_item);
+>>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
       signals = runtimeDeps.extractUnderwritingSignals({
         message: message_body,
         classification,
@@ -1061,15 +1065,12 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
       }
 
       try {
-        console.log("STEP 5: route start");
         route = await runtimeDeps.resolveRoute({
           message_body,
           brain_item,
           classification,
         });
-        console.log("STEP 5: route success", { stage: route?.stage });
       } catch (routeErr) {
-        console.error("STEP 5 (FAILED): routing error", routeErr);
         throw routeErr;
       }
 
@@ -1262,6 +1263,49 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             ...(sms_agent_id ? { "sms-agent": sms_agent_id } : {}),
           },
         });
+<<<<<<< HEAD
+=======
+
+        // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
+        try {
+          const supabase_payload = {
+            message_id: extracted.message_id,
+            from: inbound_from,
+            to: inbound_to,
+            message_body,
+            detected_intent:
+              seller_stage_reply?.plan?.inbound_intent ||
+              seller_stage_reply?.plan?.detected_intent ||
+              classification?.objection ||
+              classification?.source ||
+              null,
+            language:
+              classification?.language ||
+              context?.summary?.language_preference ||
+              "English",
+            classification_confidence: classification?.confidence || 0,
+            safety_status:
+              seller_stage_reply?.plan?.safety_tier === "auto_send"
+                ? "safe"
+                : "review_required",
+            routing_allowed: Boolean(seller_stage_reply?.should_queue_reply),
+            metadata: {
+              ...(classification || {}),
+              route_stage: route?.stage || null,
+              use_case: route?.use_case || null,
+              seller_stage_reply_reason: seller_stage_reply?.reason || null,
+              second_pass_authoritative: true,
+            },
+          };
+
+          await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
+        } catch (supaErr) {
+          safeWarn("textgrid.inbound_supabase_update_failed", {
+            message_id: extracted.message_id,
+            error: supaErr?.message || "unknown",
+          });
+        }
+>>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_prospect_resolution", err);
@@ -1454,10 +1498,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
           cash_offer_snapshot_id,
         });
 
-        console.log("STEP 6: preview success", { 
-          should_queue: seller_stage_preview?.should_queue_reply,
-          intent: seller_stage_preview?.plan?.inbound_intent || seller_stage_preview?.plan?.detected_intent
-        });
 
         // Feature flag: if auto_reply_dry_run, only preview (no live queue)
         const should_queue_live = !auto_reply_dry_run_final && inbound_autopilot_enabled;
@@ -1799,6 +1839,55 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
                 : null,
           },
         });
+<<<<<<< HEAD
+=======
+
+        // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
+        try {
+          const supabase_payload = {
+            message_id: extracted.message_id,
+            from: inbound_from,
+            to: inbound_to,
+            message_body,
+            detected_intent:
+              seller_stage_reply?.plan?.inbound_intent ||
+              seller_stage_reply?.plan?.detected_intent ||
+              classification?.objection ||
+              classification?.source ||
+              null,
+            priority: classification?.priority || "normal",
+            risk: classification?.risk || "low",
+            safety_status: classification?.safety_status || "pending",
+            routing_allowed: seller_stage_reply?.plan?.routing_allowed ?? true,
+            language: classification?.language || null,
+            classification_confidence: classification?.confidence || 0,
+            stage_before,
+            stage_after:
+              seller_stage_reply?.brain_stage ||
+              deterministic_state?.conversation_stage ||
+              route?.stage ||
+              null,
+            master_owner_id,
+            prospect_id,
+            property_id,
+            market: payload?.market || null,
+            metadata: {
+              ...(classification || {}),
+              route_stage: route?.stage || null,
+              use_case: route?.use_case || null,
+              seller_stage_reply_reason: seller_stage_reply?.reason || null,
+              second_pass_authoritative: true,
+            },
+          };
+
+          await runtimeDeps.logInboundMessageEventSupabase(supabase_payload);
+        } catch (supaErr) {
+          safeWarn("textgrid.inbound_supabase_update_failed", {
+            message_id: extracted.message_id,
+            error: supaErr?.message || "unknown",
+          });
+        }
+>>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_podio_write", err);

@@ -1045,11 +1045,17 @@ export async function incrementTextgridNumberUsage(selection, deps = {}) {
     .from(TEXTGRID_NUMBERS_TABLE)
     .update(payload)
     .eq("id", selected.id)
+<<<<<<< HEAD
     .select()
     .maybeSingle();
 
   if (error) throw error;
   return data || null;
+=======
+    .select();
+
+  return data?.[0] || null;
+>>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
 }
 
 function buildSuccessMessageEvent(row, send_result, options = {}) {

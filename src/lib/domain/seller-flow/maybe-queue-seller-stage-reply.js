@@ -346,32 +346,35 @@ export async function maybeQueueSellerStageReply({
         ...(extra_queue_context || {}),
         // Auto-reply fields
         type: "auto_reply",
-        detected_intent: plan.detected_intent || null,
+        detected_intent: plan.detected_intent || plan.inbound_intent || null,
         stage_before: stage || null,
         stage_after: brainStageForUseCase(plan.selected_use_case) || null,
         template_selected: plan.selected_use_case || null,
-        source_event_id: extra_queue_context?.source_event_id || null,
+        source_event_id: extra_queue_context?.inbound_message_event_id || extra_queue_context?.source_event_id || null,
         inbound_message_id: inbound_from || null,
         thread_key: context?.ids?.thread_key || null,
         from_phone_number: context?.summary?.inbound_to || context?.summary?.textgrid_number || null,
         sms_eligible: true,
-        routing_allowed: true,
-        safety_status: "allowed",
+        routing_allowed: extra_queue_context?.auto_reply_plan?.should_queue_reply ?? plan.should_queue_reply ?? true,
+        safety_status: extra_queue_context?.auto_reply_plan?.safety_tier || plan.safety_tier || "allowed",
         owner_id: context?.ids?.master_owner_id || null,
         market: context?.summary?.market || context?.summary?.market_name || null,
       },
       cash_offer_snapshot_id: cash_offer_snapshot_id || undefined,
     };
 
-    queued = preview_only
-      ? await queueOutboundMessage(queue_args, {
-          smsQueueMessageImpl: async () => ({
-            ok: true,
-            item_id: null,
-            preview_only: true,
-          }),
-        })
-      : await queue_message(queue_args);
+    queued = await queue_message(
+      queue_args,
+      preview_only
+        ? {
+            smsQueueMessageImpl: async () => ({
+              ok: true,
+              item_id: null,
+              preview_only: true,
+            }),
+          }
+        : undefined
+    );
   } catch (err) {
     logDeps.warn("seller_queue.create_failed", {
       inbound_from,

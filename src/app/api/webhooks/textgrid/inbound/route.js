@@ -257,15 +257,10 @@ export async function POST(request) {
     const is_form_encoded = content_type.toLowerCase().includes("application/x-www-form-urlencoded");
     const form_params = is_form_encoded && body && !body.raw_text ? body : null;
     parsed_body_keys = Object.keys(body || {});
-    console.log("INBOUND PAYLOAD KEYS", serializeForConsole({ parsed_body_keys }));
 
     const payload = runtimeDeps.normalizeTextgridInboundPayloadImpl(body, request.headers);
     normalized_payload = payload;
     
-    console.log("STEP 1: entered webhook", {
-      message_id: payload?.message_id,
-      from: payload?.from
-    });
 
     const request_url = new URL(request.url);
     const dry_run = asBool(
@@ -276,8 +271,6 @@ export async function POST(request) {
       request_url.searchParams.get("dryRun"),
       false
     );
-    console.log("INBOUND BODY SOURCE", serializeForConsole({ body_source: payload?.body_source || null }));
-    console.log("INBOUND MESSAGE BODY NORMALIZED", serializeForConsole({ message_body: payload?.message_body ?? null }));
     const signature_verification_mode = getTextgridWebhookSignatureMode();
     const verification =
       signature_verification_mode === "off"
@@ -318,11 +311,6 @@ export async function POST(request) {
     safe_signature_header_name =
       webhook_verification?.signature_header_name || payload?.header_signature_name || null;
 
-    console.log("STEP 2: normalized inbound", {
-      message_id: payload.message_id,
-      from: payload.from,
-      to: payload.to
-    });
 
     try {
       safe_message_id = payload?.message_id || null;
