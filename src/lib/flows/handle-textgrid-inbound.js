@@ -1020,23 +1020,7 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     let classification, inbound_is_negative, queue_cancellation, route, signals,
       deterministic_state, offer_routing;
     try {
-<<<<<<< HEAD
-      emitInboundTrace("TEXTGRID_INBOUND_CLASSIFY_START", {
-        message_id: extracted.message_id,
-        inbound_from,
-        inbound_to,
-      });
       classification = await runtimeDeps.classify(message_body, brain_item);
-      emitInboundTrace("TEXTGRID_INBOUND_CLASSIFY_SUCCESS", {
-        message_id: extracted.message_id,
-        detected_intent:
-          classification?.objection || classification?.source || null,
-        language: classification?.language || null,
-        classification_confidence: classification?.confidence ?? null,
-      });
-=======
-      classification = await runtimeDeps.classify(message_body, brain_item);
->>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
       signals = runtimeDeps.extractUnderwritingSignals({
         message: message_body,
         classification,
@@ -1263,9 +1247,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             ...(sms_agent_id ? { "sms-agent": sms_agent_id } : {}),
           },
         });
-<<<<<<< HEAD
-=======
-
         // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
         try {
           const supabase_payload = {
@@ -1305,7 +1286,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             error: supaErr?.message || "unknown",
           });
         }
->>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_prospect_resolution", err);
@@ -1839,9 +1819,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
                 : null,
           },
         });
-<<<<<<< HEAD
-=======
-
         // ─── SUPABASE PERSISTENCE (Second Pass with Classification) ──────
         try {
           const supabase_payload = {
@@ -1887,7 +1864,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             error: supaErr?.message || "unknown",
           });
         }
->>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
       }
     } catch (err) {
       return failStepAndReturn("textgrid_inbound_failed_podio_write", err);

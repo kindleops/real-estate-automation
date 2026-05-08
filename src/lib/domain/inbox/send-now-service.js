@@ -153,23 +153,23 @@ export function validateInboxSendNowPayload(input = {}, resolvedFrom = null) {
   const queue_key = clean(input.queue_key) || `inbox:send_now:${crypto.randomUUID()}`;
 
   if (!thread_key) {
-    return { ok: false, status: 400, error: "Missing sending number" };
+    return { ok: false, status: 400, error: "missing_thread_key" };
   }
   if (!to_phone_number) {
-    return { ok: false, status: 400, error: "Missing sending number" };
+    return { ok: false, status: 400, error: "missing_to_phone_number" };
   }
   if (!from_phone_number) {
-    return { ok: false, status: 400, error: "Missing sending number" };
+    return { ok: false, status: 400, error: "missing_from_phone_number" };
   }
   if (!message_body) {
-    return { ok: false, status: 400, error: "Message too short" };
+    return { ok: false, status: 400, error: "missing_message_body" };
   }
 
   const is_manual = message_type === "manual_reply" || use_case_template === "manual_reply";
   const min_length = is_manual ? 2 : 10;
 
   if (message_body.length < min_length) {
-    return { ok: false, status: 400, error: "Message too short" };
+    return { ok: false, status: 400, error: "message_too_short" };
   }
 
   return {
