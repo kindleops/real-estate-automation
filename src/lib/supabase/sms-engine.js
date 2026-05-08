@@ -1045,17 +1045,11 @@ export async function incrementTextgridNumberUsage(selection, deps = {}) {
     .from(TEXTGRID_NUMBERS_TABLE)
     .update(payload)
     .eq("id", selected.id)
-<<<<<<< HEAD
     .select()
     .maybeSingle();
 
   if (error) throw error;
   return data || null;
-=======
-    .select();
-
-  return data?.[0] || null;
->>>>>>> bc71c17 (refactor: remove verbose inbound webhook logs, improve queue message argument handling, and update intent resolution logic.)
 }
 
 function buildSuccessMessageEvent(row, send_result, options = {}) {
@@ -2285,6 +2279,54 @@ function sanitizeSendQueuePayload(payload) {
   return sanitized;
 }
 
+function insertPayloadForGuard(row = {}, now = null) {
+  const ts = now || nowIso();
+  return {
+    queue_key: clean(row.queue_key) || `inbox:send_now:guard:${Date.now()}`,
+    queue_id: clean(row.queue_id) || clean(row.queue_key) || `inbox:send_now:guard:${Date.now()}`,
+    queue_status: "paused_invalid_queue_row",
+    scheduled_for: ts,
+    send_priority: 5,
+    is_locked: false,
+    retry_count: 0,
+    max_retries: 3,
+    message_body: clean(row.message_body || row.message_text) || "",
+    message_text: clean(row.message_text || row.message_body) || "",
+    to_phone_number: resolveQueueDestinationPhone(row).phone || null,
+    from_phone_number: normalizePhone(row.from_phone_number) || null,
+    thread_key: clean(row.thread_key || row.metadata?.thread_key) || null,
+    metadata: row.metadata || {},
+    created_at: ts,
+    updated_at: ts,
+  };
+}
+
+function isInboxSendNowRow(row = {}) {
+  const queue_key = clean(row.queue_key || row.queue_id || "");
+  return queue_key.startsWith("inbox:send_now:");
+}
+
+function metadataSourceValue(row = {}) {
+  const meta = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata
+    : {};
+  return clean(meta.source);
+}
+
+function metadataActionValue(row = {}) {
+  const meta = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata
+    : {};
+  return clean(meta.action);
+}
+
+function metadataCreatedFromValue(row = {}) {
+  const meta = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata
+    : {};
+  return clean(meta.created_from);
+}
+
 export async function insertSupabaseSendQueueRow(payload, deps = {}) {
   const now = deps.now || nowIso();
   const sanitized = sanitizeSendQueuePayload({
@@ -2298,6 +2340,64 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
   });
 
   const row = normalizeSendQueueRow(sanitized);
+
+  // ── Inbox send-now validation guard ────────────────────────────────
+  const is_inbox_send_now =
+    isInboxSendNowRow(row) ||
+    metadataSourceValue(row) === "inbox" ||
+    metadataActionValue(row) === "send_now" ||
+    metadataCreatedFromValue(row) === "leadcommand_inbox";
+
+  if (is_inbox_send_now && normalizeQueueStatusValue(row.queue_status) === "queued") {
+    const has_message_body = Boolean(clean(row.message_body || row.message_text));
+    const has_to_phone = Boolean(resolveQueueDestinationPhone(row).phone);
+    const has_from_phone = Boolean(normalizePhone(row.from_phone_number));
+    const has_thread_key = Boolean(payload.thread_key || row.thread_key);
+    const message_body = clean(row.message_body || row.message_text);
+    const is_manual = clean(row.message_type || row.use_case_template).toLowerCase() === "manual_reply";
+    const min_body_length = is_manual ? 2 : 10;
+
+    if (!has_thread_key || !has_to_phone || !has_from_phone || !has_message_body || message_body.length < min_body_length) {
+      const paused_row = {
+        ...insertPayloadForGuard(row, now),
+        queue_status: "paused_invalid_queue_row",
+        queue_key: clean(row.queue_key) || `inbox:send_now:failed:${Date.now()}`,
+        metadata: {
+          ...(row.metadata || {}),
+          source: metadataSourceValue(row) || "inbox",
+          action: metadataActionValue(row) || "send_now",
+          created_from: metadataCreatedFromValue(row) || "leadcommand_inbox",
+          guard_status: "blocked",
+          guard_reason: !has_thread_key ? "missing_thread_key"
+            : !has_to_phone ? "missing_to_phone_number"
+            : !has_from_phone ? "missing_from_phone_number"
+            : !has_message_body ? "missing_message_body"
+            : "message_too_short",
+        },
+      };
+
+      if (typeof deps.insertSupabaseSendQueueRow === "function") {
+        return deps.insertSupabaseSendQueueRow(paused_row);
+      }
+
+      const supabase = getSupabase(deps);
+      const { data } = await supabase
+        .from(SEND_QUEUE_TABLE)
+        .insert(paused_row)
+        .select()
+        .maybeSingle();
+
+      return {
+        ok: false,
+        reason: paused_row.metadata.guard_reason,
+        item_id: data?.id || null,
+        queue_row_id: data?.id || null,
+        queue_item_id: data?.id || null,
+        queue_key: paused_row.queue_key,
+        raw: data || paused_row,
+      };
+    }
+  }
 
   const insert_payload = {
     queue_key: clean(row.queue_key) || crypto.randomUUID(),
