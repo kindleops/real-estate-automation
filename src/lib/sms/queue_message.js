@@ -431,8 +431,6 @@ export async function queueMessage(params = {}) {
       cash_offer_snapshot_id: safe_params?.cash_offer_snapshot_id || null,
       // Auto-reply fields (added 2026-05-04)
       thread_key: safe_params?.context?.thread_key || null,
-      owner_id: safe_params?.links?.owner_id || safe_params?.links?.master_owner_id || null,
-      agent_id: safe_params?.links?.agent_id || null,
       template_source: safe_params?.resolution?.source || "catalog",
       rendered_message: safe_params?.rendered_text || null,
       priority: safe_params?.context?.send_priority || "normal",

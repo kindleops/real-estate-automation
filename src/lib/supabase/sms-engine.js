@@ -2238,9 +2238,56 @@ export function buildSendQueueDedupeKey({
   return parts.join(":");
 }
 
+const SEND_QUEUE_COLUMNS = [
+  "id", "queue_key", "queue_status", "scheduled_for", "send_priority", "is_locked", "locked_at", 
+  "lock_token", "retry_count", "max_retries", "next_retry_at", "message_body", "phone_number_id", 
+  "to_phone_number", "from_phone_number", "metadata", "created_at", "updated_at", "property_address", 
+  "queue_id", "queue_sequence", "property_type", "owner_type", "scheduled_for_local", 
+  "scheduled_for_utc", "timezone", "contact_window", "sent_at", "delivered_at", "failed_reason", 
+  "delivery_confirmed", "master_owner_id", "prospect_id", "property_id", "market_id", "sms_agent_id", 
+  "textgrid_number_id", "template_id", "touch_number", "dnc_check", "current_stage", "message_type", 
+  "use_case_template", "message_text", "personalization_tags_used", "character_count", 
+  "provider_message_id", "local_send_date", "local_send_hour", "paused_reason", 
+  "last_guard_checked_at", "dedupe_key", "seller_first_name", "seller_display_name", "thread_key", 
+  "template_source", "priority", "risk", "sms_eligible", "routing_allowed", "safety_status", 
+  "type", "detected_intent", "stage_before", "stage_after", "textgrid_message_id", "market", 
+  "textgrid_number", "selected_template_id"
+];
+
+function sanitizeSendQueuePayload(payload) {
+  const sanitized = {};
+  const unknown = {};
+  const metadata = { ...(payload.metadata || {}) };
+
+  for (const [key, value] of Object.entries(payload)) {
+    if (SEND_QUEUE_COLUMNS.includes(key)) {
+      sanitized[key] = value;
+    } else {
+      // Map legacy fields to metadata
+      if (key === "agent_id") {
+        metadata.agent_id = value;
+      } else if (key === "owner_id") {
+        metadata.owner_id = value;
+      } else if (key !== "metadata") {
+        unknown[key] = value;
+      }
+    }
+  }
+
+  if (Object.keys(unknown).length > 0) {
+    metadata.unknown_payload_fields = {
+      ...(metadata.unknown_payload_fields || {}),
+      ...unknown,
+    };
+  }
+
+  sanitized.metadata = metadata;
+  return sanitized;
+}
+
 export async function insertSupabaseSendQueueRow(payload, deps = {}) {
   const now = deps.now || nowIso();
-  const row = normalizeSendQueueRow({
+  const sanitized = sanitizeSendQueuePayload({
     ...payload,
     queue_status: payload.queue_status || "queued",
     scheduled_for: payload.scheduled_for || payload.scheduled_for_utc || now,
@@ -2249,6 +2296,8 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     created_at: payload.created_at || now,
     updated_at: payload.updated_at || now,
   });
+
+  const row = normalizeSendQueueRow(sanitized);
 
   const insert_payload = {
     queue_key: clean(row.queue_key) || crypto.randomUUID(),
@@ -2294,33 +2343,30 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     message_type: row.message_type || null,
     use_case_template: row.use_case_template || null,
     personalization_tags_used: row.personalization_tags_used || null,
-    character_count: row.character_count || (row.message_body ? row.message_body.length : 0),
+    character_count: asNumber(row.character_count, row.message_body ? row.message_body.length : 0),
     provider_message_id: row.provider_message_id || null,
-    // Hardening columns (added 2026-04-28)
-    dedupe_key: clean(payload.dedupe_key || row.metadata?.idempotency_key || row.queue_key) || null,
-    seller_first_name: clean(payload.seller_first_name || row.metadata?.seller_first_name || row.metadata?.queue_context?.seller_first_name) || null,
-    seller_display_name: clean(payload.seller_display_name || row.metadata?.seller_display_name) || null,
-    // Auto-queue and auto-reply fields (added 2026-05-04)
-    thread_key: clean(payload.thread_key || row.thread_key) || null,
-    owner_id: asNumber(payload.owner_id || row.owner_id, null),
-    agent_id: asNumber(payload.agent_id || row.agent_id, null),
-    template_source: clean(payload.template_source || row.template_source || "catalog") || null,
-    rendered_message: clean(payload.rendered_message || row.rendered_message || row.message_body) || null,
-    priority: clean(payload.priority || row.priority || "normal") || "normal",
-    risk: clean(payload.risk || row.risk || "low") || "low",
-    sms_eligible: typeof payload.sms_eligible === 'boolean' ? payload.sms_eligible : (typeof row.sms_eligible === 'boolean' ? row.sms_eligible : true),
-    routing_allowed: typeof payload.routing_allowed === 'boolean' ? payload.routing_allowed : (typeof row.routing_allowed === 'boolean' ? row.routing_allowed : true),
-    safety_status: clean(payload.safety_status || row.safety_status || "pending") || "pending",
-    type: clean(payload.type || row.type || "outbound") || "outbound",
-    source_event_id: payload.source_event_id || row.source_event_id || null,
-    inbound_message_id: clean(payload.inbound_message_id || row.inbound_message_id) || null,
-    detected_intent: clean(payload.detected_intent || row.detected_intent) || null,
-    stage_before: clean(payload.stage_before || row.stage_before) || null,
-    stage_after: clean(payload.stage_after || row.stage_after) || null,
-    template_selected: clean(payload.template_selected || row.template_selected) || null,
-    textgrid_message_id: clean(payload.textgrid_message_id || row.textgrid_message_id || row.provider_message_id) || null,
-    textgrid_number: clean(payload.textgrid_number || row.textgrid_number) || null,
-    market: clean(payload.market || row.market) || null,
+    dedupe_key: clean(row.dedupe_key || row.metadata?.idempotency_key || row.queue_key) || null,
+    seller_first_name: clean(row.seller_first_name || row.metadata?.seller_first_name || row.metadata?.queue_context?.seller_first_name) || null,
+    seller_display_name: clean(row.seller_display_name || row.metadata?.seller_display_name) || null,
+    thread_key: clean(row.thread_key) || null,
+    template_source: clean(row.template_source || "catalog") || null,
+    rendered_message: clean(row.rendered_message || row.message_body) || null,
+    priority: clean(row.priority || "normal") || "normal",
+    risk: clean(row.risk || "low") || "low",
+    sms_eligible: typeof row.sms_eligible === "boolean" ? row.sms_eligible : true,
+    routing_allowed: typeof row.routing_allowed === "boolean" ? row.routing_allowed : true,
+    safety_status: clean(row.safety_status || "pending") || "pending",
+    type: clean(row.type || "outbound") || "outbound",
+    source_event_id: row.source_event_id || null,
+    inbound_message_id: clean(row.inbound_message_id) || null,
+    detected_intent: clean(row.detected_intent) || null,
+    stage_before: clean(row.stage_before) || null,
+    stage_after: clean(row.stage_after) || null,
+    template_selected: clean(row.template_selected) || null,
+    textgrid_message_id: clean(row.textgrid_message_id || row.provider_message_id) || null,
+    textgrid_number: clean(row.textgrid_number) || null,
+    market: clean(row.market) || null,
+    selected_template_id: clean(row.selected_template_id || row.template_id) || null,
   };
 
   if (typeof deps.insertSupabaseSendQueueRow === "function") {

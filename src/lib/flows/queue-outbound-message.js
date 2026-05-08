@@ -908,7 +908,7 @@ export async function queueOutboundMessage({
     property_id: context?.ids?.property_id || null,
     phone_id: context?.ids?.phone_item_id || null,
     market_id: context?.ids?.market_id || null,
-    agent_id: context?.ids?.assigned_agent_id || null,
+    sms_agent_id: context?.ids?.assigned_agent_id || null,
     textgrid_number_id: resolved_textgrid_number_item_id,
   };
 

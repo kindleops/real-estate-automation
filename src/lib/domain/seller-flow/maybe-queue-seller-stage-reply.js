@@ -357,7 +357,7 @@ export async function maybeQueueSellerStageReply({
         sms_eligible: true,
         routing_allowed: extra_queue_context?.auto_reply_plan?.should_queue_reply ?? plan.should_queue_reply ?? true,
         safety_status: extra_queue_context?.auto_reply_plan?.safety_tier || plan.safety_tier || "allowed",
-        owner_id: context?.ids?.master_owner_id || null,
+        master_owner_id: context?.ids?.master_owner_id || null,
         market: context?.summary?.market || context?.summary?.market_name || null,
       },
       cash_offer_snapshot_id: cash_offer_snapshot_id || undefined,
