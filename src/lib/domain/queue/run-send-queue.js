@@ -398,26 +398,66 @@ function hasQueueSellerFirstName(row = null) {
   return Boolean(clean(resolveQueueSellerFirstName(row)));
 }
 
-function invalidQueueRowReason(row = null) {
+/**
+ * Granular validation gatekeeper for queue rows.
+ * Implements the "No Silent Failures" constitutional mandate.
+ */
+function validateQueueRowInternal(row = null) {
   const normalized = normalizeSendQueueRow(row);
+  const errors = [];
+  
+  const to_phone = clean(normalized.to_phone_number);
+  const from_phone = clean(normalized.from_phone_number);
+  const body = clean(normalized.message_body || normalized.message_text);
+  
+  // Mandatory fields
+  if (!to_phone) errors.push("missing_to_phone_number");
+  if (!from_phone) errors.push("missing_from_phone_number");
+  if (!body) errors.push("missing_message_body");
+
+  // Thread Key Construction & Validation
+  let thread_key = clean(normalized.thread_key);
+  if (!thread_key) {
+    if (to_phone && from_phone) {
+      // Robust construction fallback
+      thread_key = `${to_phone}|${from_phone}`;
+    } else {
+      errors.push("unrepairable_missing_thread_key");
+    }
+  }
+
+  // Domain specific validation (unless exempt)
   const manual_inbox_send = isManualInboxSend(normalized);
   const unknown_auto_reply = isUnknownAutoReply(normalized);
-
-  const selected_template_id = clean(
-    normalized.template_id ||
-      metadataValue(normalized, "selected_template_id") ||
-      metadataValue(normalized, "template_id")
-  );
-
   const is_exempt = manual_inbox_send || unknown_auto_reply;
 
-  if (!is_exempt && !selected_template_id) return "missing_selected_template_id";
-  if (!is_exempt && !hasCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
-  if (!clean(normalized.message_body || normalized.message_text)) return "missing_message_body";
-  if (!clean(normalized.to_phone_number)) return "missing_to_phone_number";
-  if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
-  if (!is_exempt && !hasQueueSellerFirstName(normalized)) return "missing_seller_first_name";
-  return null;
+  if (!is_exempt) {
+    const selected_template_id = clean(
+      normalized.template_id ||
+        metadataValue(normalized, "selected_template_id") ||
+        metadataValue(normalized, "template_id")
+    );
+    if (!selected_template_id) errors.push("missing_selected_template_id");
+    if (!hasCandidateSnapshot(normalized)) errors.push("missing_candidate_snapshot");
+    if (!hasQueueSellerFirstName(normalized)) errors.push("missing_seller_first_name");
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    repairable: !errors.includes("unrepairable_missing_thread_key") && 
+                errors.every(e => ["missing_thread_key", "missing_seller_first_name"].includes(e)), // Simplified for now
+    thread_key,
+    normalized_row: {
+      ...normalized,
+      thread_key: thread_key || normalized.thread_key
+    }
+  };
+}
+
+function invalidQueueRowReason(row = null) {
+  const result = validateQueueRowInternal(row);
+  return result.valid ? null : result.errors[0];
 }
 
 function finalQueueStatusForResult(result = {}) {
@@ -908,6 +948,28 @@ export async function runSendQueue(
         }
 
         try {
+          // Normalize message body (template greeting fix)
+          let body = clean(queue_row.message_body || queue_row.message_text);
+          if (body) {
+            const originalBody = body;
+            body = body.replace(/Hi \s*,/gi, 'Hi there,');
+            body = body.replace(/Hello \s*,/gi, 'Hello there,');
+            body = body.replace(/Hi \s*!/gi, 'Hi there!');
+            if (body.toLowerCase().startsWith('hi ,') || body.toLowerCase().startsWith('hello ,')) {
+              body = body.replace(/,/, ' there,');
+            }
+            
+            if (body !== originalBody) {
+              log_info("queue.run_body_sanitized", {
+                queue_item_id,
+                before: originalBody.substring(0, 20),
+                after: body.substring(0, 20)
+              });
+              queue_row.message_body = body;
+              queue_row.message_text = body;
+            }
+          }
+
           const result = await process_send_queue_item(
             legacy_mode ? queue_item_id : queue_row,
             {
