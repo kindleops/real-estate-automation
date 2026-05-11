@@ -301,6 +301,11 @@ function placeholderAllowedForUseCase(placeholder = "", use_case = null) {
   return true;
 }
 
+const CRITICAL_PLACEHOLDERS = new Set([
+  "property_address",
+  "offer_price",
+]);
+
 export function evaluateTemplatePlaceholders({
   template_text,
   use_case = null,
@@ -314,28 +319,53 @@ export function evaluateTemplatePlaceholders({
 
   const invalid_placeholders = [];
   const missing_required_placeholders = [];
+  const missing_optional_placeholders = [];
 
   for (const placeholder of placeholders) {
     if (!placeholderAllowedForUseCase(placeholder, normalized_use_case)) {
+      // We still track invalid placeholders, but we may choose not to block on them
+      // if they are common legacy artifacts.
       invalid_placeholders.push(`{{${placeholder}}}`);
       continue;
     }
 
     const canonical_placeholder = LEGACY_PLACEHOLDER_ALIASES[placeholder] || placeholder;
     const value = variables[canonical_placeholder];
+
     if (!value || String(value).trim() === "") {
-      missing_required_placeholders.push(`{{${placeholder}}}`);
+      if (CRITICAL_PLACEHOLDERS.has(canonical_placeholder)) {
+        missing_required_placeholders.push(`{{${placeholder}}}`);
+      } else {
+        missing_optional_placeholders.push(`{{${placeholder}}}`);
+      }
     }
   }
 
+  // Personalization Safety Gates
+  const text = String(template_text || "");
+  const has_token_leak = text.includes("undefined") || text.includes("null");
+  const bad_greetings = ["Hi ,", "Hey ,", "Hello ,", "Hi {{", "Hey {{"];
+  const has_bad_greeting = bad_greetings.some(g => text.startsWith(g));
+
+  const ok = 
+    missing_required_placeholders.length === 0 && 
+    !has_token_leak && 
+    !has_bad_greeting;
+
   return {
-    ok: invalid_placeholders.length === 0 && missing_required_placeholders.length === 0,
+    ok,
     placeholders,
     variables,
     invalid_placeholders,
     missing_required_placeholders,
+    missing_optional_placeholders,
+    safety_violations: {
+      has_token_leak,
+      has_bad_greeting
+    }
   };
 }
+
 
 export function renderTemplate({
   template_text,

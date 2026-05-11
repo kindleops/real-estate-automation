@@ -33,22 +33,26 @@ export function __resetQueueDeps() {
  *
  * @param {string} thread_key
  * @param {string} inbound_message_id
+ * @param {object} [options]
+ * @param {boolean} [options.dry_run=false]
  * @returns {Promise<object>} Result of the auto-reply attempt
  */
-export async function queueAutoReply(thread_key, inbound_message_id) {
+export async function queueAutoReply(thread_key, inbound_message_id, { dry_run = false } = {}) {
   // 1. Deduplication
-  const { data: existing, error: checkError } = await deps.supabase
-    .from("send_queue")
-    .select("id")
-    .eq("inbound_message_id", inbound_message_id)
-    .maybeSingle();
+  if (!dry_run) {
+    const { data: existing, error: checkError } = await deps.supabase
+      .from("send_queue")
+      .select("id")
+      .eq("inbound_message_id", inbound_message_id)
+      .maybeSingle();
 
-  if (existing) {
-    return {
-      ok: false,
-      reason: "duplicate_reply_prevented",
-      queue_id: existing.id,
-    };
+    if (existing) {
+      return {
+        ok: false,
+        reason: "duplicate_reply_prevented",
+        queue_id: existing.id,
+      };
+    }
   }
 
   // 2. Fetch Inbound Message Context
@@ -118,6 +122,22 @@ export async function queueAutoReply(thread_key, inbound_message_id) {
   const scheduled_for = windowCheck.allowed ? new Date().toISOString() : null;
 
   // 9. Queue
+  if (dry_run) {
+    return {
+      ok: true,
+      action: ACTIONS.QUEUE_REPLY,
+      queue_id: "dry_run_placeholder",
+      use_case: selection.use_case,
+      rendered_text: render.text,
+      metadata: {
+        classification_snapshot: classification,
+        template_selection_reason: template.matches,
+        personalization_context: context.variables,
+        scheduled_for,
+      }
+    };
+  }
+
   const { data: queued, error: queueError } = await deps.supabase
     .from("send_queue")
     .insert({
@@ -161,6 +181,7 @@ export async function queueAutoReply(thread_key, inbound_message_id) {
     rendered_text: render.text,
   };
 }
+
 
 export default { queueAutoReply };
 

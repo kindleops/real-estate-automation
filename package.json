@@ -16,6 +16,7 @@
     "proof:template-automation": "PODIO_CLIENT_ID=test PODIO_CLIENT_SECRET=test PODIO_USERNAME=test PODIO_PASSWORD=test node --import ./tests/register-aliases.mjs tests/automation/template-automation.proof.mjs",
     "proof:auto-reply-routing": "PODIO_CLIENT_ID=test PODIO_CLIENT_SECRET=test PODIO_USERNAME=test PODIO_PASSWORD=test node --import ./tests/register-aliases.mjs tests/automation/auto-reply-routing.proof.mjs",
     "proof:template-personalization-safety": "PODIO_CLIENT_ID=test PODIO_CLIENT_SECRET=test PODIO_USERNAME=test PODIO_PASSWORD=test node --import ./tests/register-aliases.mjs tests/automation/template-personalization-safety.proof.mjs",
+    "proof:auto-reply-live-replay": "PODIO_CLIENT_ID=test PODIO_CLIENT_SECRET=test PODIO_USERNAME=test PODIO_PASSWORD=test node --import ./tests/register-aliases.mjs scripts/proof/auto-reply-live-replay.mjs",
     "start": "next start",
     "discord:register": "node scripts/register-discord-commands.mjs"
   },

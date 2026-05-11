@@ -82,7 +82,7 @@ test("Classification Regression Suite", async (t) => {
   for (const tc of TEST_CASES) {
     await t.test(`should classify "${tc.text}" as ${tc.expected}`, async () => {
       const result = await classify(tc.text);
-      assert.strictEqual(result.detected_intent, tc.expected, `Failed for: "${tc.text}"`);
+      assert.strictEqual(result.primary_intent, tc.expected, `Failed for: "${tc.text}"`);
     });
   }
 });

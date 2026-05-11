@@ -3264,7 +3264,7 @@ function resolveIntents(
 ) {
   const text = lower(message);
   const normalized_objection = cleanMessage(objection);
-  
+
   const intents = [];
 
   // 1. OPT-OUT / COMPLIANCE (Highest Priority)
@@ -3293,22 +3293,82 @@ function resolveIntents(
       "don't own", "dont own", "no longer own", "i sold it", "sold it",
       "sold years ago", "not mine", "not my property", "never owned",
       "never lived", "wrong address", "this is not", "not this person",
-      "it sold", "its sold", "already sold",
-      // Spanish
+      "it sold", "its sold", "already sold", "never did", "never have",
+      "dont speak spanish", "don't speak spanish",
+      // Spanish / Portuguese
       "número equivocado", "equivocado", "no soy el dueño", "no es mía", "no es mia",
       "no soy el propietario", "no tengo esa casa", "no es mi casa", "no vivo",
-      "llanoesmia", "noesmia", "la mia es", "la mía es",
+      "llanoesmia", "noesmia", "la mia es", "la mía es", "mal informado",
+      "trabalho de casa", "homework",
     ])
   ) {
     intents.push("wrong_number");
   }
 
-  // 3. PRICE PROVIDED
+  // 3. HOSTILE OR LEGAL
+  if (includesAny(text, [
+    "sue", "attorney", "lawyer", "legal", "court", "harassment", "fcc", "report",
+    "fuck", "shit", "bitch", "asshole", "f***", "lawsuit", "police", "sheriff",
+    "damn business", "drop dead", "vete a", "chingaos", "mames",
+  ])) {
+    intents.push("hostile_or_legal");
+  }
+
+  // 4. NOT INTERESTED / SOFT OBJECTIONS (Capture negations before positive keywords)
+  if (
+    normalized_objection === "not_interested" ||
+    includesAny(text, [
+      "not interested", "no interest", "no thanks", "no thank you",
+      "not for sale", "not selling", "won't sell", "wont sell",
+      "keeping it", "holding onto it", "answer is no", "real estate agent",
+      "real estate broker", "realtor", "nfs", "is not on sale", "nopienso",
+      "no vendo", "not looking to sell", "not considering selling",
+      "not interested in selling", "dont want to sell", "don't want to sell",
+      // Spanish
+      "no me interesa", "no quiero vender", "no está en venta", "no esta en venta",
+    ])
+  ) {
+    // Check for "unless" or "but" which might indicate price or latent interest
+    if (includesAny(text, ["unless", "but", "except", "if you", "pero"])) {
+       if (matchesAnyPattern(text, ASKING_PRICE_PATTERNS)) {
+         intents.push("asking_price_provided");
+       } else {
+         intents.push("not_interested");
+         intents.push("latent_interest");
+       }
+    } else {
+       intents.push("not_interested");
+    }
+  }
+
+  // 5. NEED TIME / MAYBE LATER
+  if (
+    normalized_objection === "need_time" ||
+    includesAny(text, [
+      "maybe later", "sometime later", "check back", "next week",
+      "next month", "next year", "in a few months", "not ready yet",
+      "thinking about it", "still deciding", "not at this time",
+      "maybe someday", "down the road", "no sell right now",
+    ])
+  ) {
+    intents.push("need_time");
+  }
+
+  // 6. SELLER INTERESTED (Explicit)
+  // Use regex to ensure "not" or "no" doesn't precede the interest phrase
+  const positive_interest_regex = /\b(?<!not\s+|no\s+)(want to sell|interested in selling|looking to sell|ready to sell|let's talk|lets talk|i'm open|im open|i'm interested|im interested|interested in an offer|willing to sell|considering selling)\b/i;
+  if (positive_interest_regex.test(text)) {
+    if (!intents.includes("not_interested") && !intents.includes("need_time")) {
+      intents.push("seller_interested");
+    }
+  }
+
+  // 7. PRICE PROVIDED
   if (matchesAnyPattern(text, ASKING_PRICE_PATTERNS)) {
     intents.push("asking_price_provided");
   }
 
-  // 4. ASKS FOR OFFER
+  // 8. ASKS FOR OFFER
   if (
     normalized_objection === "send_offer_first" ||
     includesAny(text, [
@@ -3329,7 +3389,7 @@ function resolveIntents(
     intents.push("asks_offer");
   }
 
-  // 5. CALLBACK / TEXT REQUESTS
+  // 9. CALLBACK / TEXT REQUESTS
   if (includesAny(text, [
     "call me", "phone me", "talk on phone", "give me a call",
     "text me", "send me a text", "message me", "whatsapp",
@@ -3339,43 +3399,17 @@ function resolveIntents(
     intents.push("callback_requested");
   }
 
-  // 6. NOT INTERESTED / SOFT OBJECTIONS
-  if (
-    normalized_objection === "not_interested" ||
-    includesAny(text, [
-      "not interested", "no interest", "no thanks", "no thank you",
-      "not for sale", "not selling", "won't sell", "wont sell",
-      "keeping it", "holding onto it", "answer is no", "real estate agent",
-      "real estate broker", "realtor", "nfs", "is not on sale", "nopienso",
-      "no vendo",
-      // Spanish
-      "no me interesa", "no quiero vender", "no está en venta", "no esta en venta",
-    ])
-  ) {
-    // Check for "unless" or "but" which might indicate price or latent interest
-    if (includesAny(text, ["unless", "but", "except", "if you", "pero"])) {
-       if (!intents.includes("asking_price_provided")) {
-         intents.push("latent_interest");
-       }
-    } else {
-       intents.push("not_interested");
+  // 10. LATENT INTEREST / VAGUE NEGOTIATION
+  if (includesAny(text, [
+    "interested", "depends", "depending", "maybe", "possibly",
+    "if the price is right", "enough money", "make it worth it",
+  ])) {
+    if (!intents.includes("seller_interested") && !intents.includes("not_interested") && !intents.includes("need_time")) {
+      intents.push("latent_interest");
     }
   }
 
-  // 7. NEED TIME / MAYBE LATER
-  if (
-    normalized_objection === "need_time" ||
-    includesAny(text, [
-      "maybe later", "sometime later", "check back", "next week",
-      "next month", "next year", "in a few months", "not ready yet",
-      "thinking about it", "still deciding", "not at this time",
-      "maybe someday", "down the road", "no sell right now",
-    ])
-  ) {
-    intents.push("need_time");
-  }
-
-  // 8. OWNERSHIP CONFIRMED
+  // 11. OWNERSHIP CONFIRMED
   if (includesAny(text, [
     "yes i own it",
     "yes i do",
@@ -3398,15 +3432,7 @@ function resolveIntents(
     intents.push("ownership_confirmed");
   }
 
-  // 9. VAGUE NEGOTIATION / LATENT INTEREST
-  if (includesAny(text, [
-    "interested", "depends", "depending", "maybe", "possibly",
-    "if the price is right", "enough money", "make it worth it",
-  ])) {
-    intents.push("latent_interest");
-  }
-
-  // 10. MISC SIGNAL DRIVEN
+  // 12. MISC SIGNAL DRIVEN
   if (normalized_objection === "tenant_issue" || includesAny(text, ["tenant", "tenants", "rented", "occupied", "renting", "lease"])) {
     intents.push("tenant_occupied");
   }
@@ -3415,13 +3441,29 @@ function resolveIntents(
     intents.push("condition_disclosed");
   }
 
-  if (normalized_objection === "who_is_this" || includesAny(text, ["who is this", "who's this", "whos this", "who be this", "how do you know my name", "who are you"])) {
+  if (normalized_objection === "who_is_this" || includesAny(text, [
+    "who is this", "who's this", "whos this", "who be this", "how do you know my name", 
+    "who are you", "do i know you", "conozco", "quien es", "quien habla",
+    "how did you get my number", "where did you get my number",
+    "identification", "identify",
+  ])) {
     intents.push("who_is_this");
   }
 
-  // Final resolve
-  const primary = intents[0] ?? "unclear";
-  const secondary = intents.length > 1 ? intents[1] : null;
+  // 14. SHORT NEGATIVE FALLBACK
+  if (includesAny(text, ["no", "nope", "nah", "naw", "negative"]) && wordCount(text) <= 2) {
+    if (intents.length === 0) intents.push("not_interested");
+  }
+
+  // 15. SHORT AFFIRMATIVE FALLBACK
+  if (includesAny(text, ["yes", "si", "sí", "yeah", "yep", "yup"]) && wordCount(text) <= 2) {
+    if (intents.length === 0) intents.push("ownership_confirmed");
+  }
+
+  // Final dedupe and resolve
+  const unique_intents = [...new Set(intents)];
+  const primary = unique_intents[0] ?? "unclear";
+  const secondary = unique_intents.length > 1 ? unique_intents[1] : null;
 
   return { primary_intent: primary, secondary_intent: secondary };
 }
@@ -3539,7 +3581,7 @@ function detectStageHint(message, brain_item = null, objection = null) {
 
 function computeHeuristicConfidence({
   objection,
-  detected_intent,
+  primary_intent,
   emotion,
   compliance_flag,
   language,
@@ -3568,7 +3610,7 @@ function computeHeuristicConfidence({
     opt_out:            0.99,
   };
 
-  let confidence = FIXED_CONFIDENCE[objection] ?? FIXED_CONFIDENCE[detected_intent] ?? 0.60;
+  let confidence = FIXED_CONFIDENCE[objection] ?? FIXED_CONFIDENCE[primary_intent] ?? 0.60;
 
   // Only apply additive scoring if we didn't fix a ceiling above
   if (!(objection in FIXED_CONFIDENCE)) {
@@ -3679,7 +3721,7 @@ function classifyHeuristic(message, brain_item = null) {
   const emotion          = detectEmotion(message);
   const positive_signals = detectPositiveSignals(message);
   const stage_hint       = detectStageHint(message, brain_item, objection);
-  const detected_intent  = detectInboundIntent(message, {
+  const intents          = resolveIntents(message, {
     compliance_flag,
     objection,
     positive_signals,
@@ -3687,7 +3729,7 @@ function classifyHeuristic(message, brain_item = null) {
 
   const confidence = computeHeuristicConfidence({
     objection,
-    detected_intent,
+    primary_intent: intents.primary_intent,
     emotion,
     compliance_flag,
     language,
@@ -3706,10 +3748,28 @@ function classifyHeuristic(message, brain_item = null) {
     emotion,
     stage_hint,
     compliance_flag,
-    detected_intent,
+    primary_intent: intents.primary_intent,
+    secondary_intent: intents.secondary_intent,
+    detected_intent: intents.primary_intent, // Backward compatibility
     positive_signals,
     confidence,
     motivation_score,
+  };
+}
+
+/**
+ * detectInboundIntent(message, brain_item)
+ *
+ * Backward compatibility wrapper for old callers.
+ */
+export function detectInboundIntent(message, brain_item = null) {
+  const heuristic = classifyHeuristic(message, brain_item);
+  return {
+    detected_intent: heuristic.primary_intent,
+    primary_intent:  heuristic.primary_intent,
+    secondary_intent: heuristic.secondary_intent,
+    objection:       heuristic.objection,
+    confidence:      heuristic.confidence,
   };
 }
 
@@ -3844,7 +3904,7 @@ Return ONLY valid JSON. No markdown. No explanation outside the JSON object.
 
 {
   "language": "English|Spanish|Portuguese|...|Thai",
-  "primary_intent": "opt_out|wrong_number|asking_price_provided|asks_offer|callback_requested|not_interested|need_time|ownership_confirmed|latent_interest|tenant_occupied|condition_disclosed|who_is_this|unclear",
+  "primary_intent": "opt_out|wrong_number|hostile_or_legal|asking_price_provided|asks_offer|callback_requested|not_interested|need_time|ownership_confirmed|latent_interest|tenant_occupied|condition_disclosed|who_is_this|unclear",
   "secondary_intent": "opt_out|...|null",
   "objection": "wrong_number|...|null",
   "emotion": "calm|skeptical|guarded|frustrated|curious|motivated|tired_landlord|overwhelmed|grieving",
@@ -3921,6 +3981,7 @@ export async function classify(message, brain_item = null) {
       seller_state:    null,
       source:          "heuristic",
       notes:           "",
+      detected_intent: "unclear",
     };
   }
 
@@ -3935,6 +3996,7 @@ export async function classify(message, brain_item = null) {
       seller_state: computeSellerState({ message: text, ...heuristic, motivation_score: final_motivation }),
       source: "heuristic",
       notes:  "",
+      detected_intent: heuristic.primary_intent,
     };
   }
 
@@ -3947,6 +4009,7 @@ export async function classify(message, brain_item = null) {
       seller_state: computeSellerState({ message: text, ...heuristic, motivation_score: final_motivation }),
       source: "heuristic",
       notes:  "",
+      detected_intent: heuristic.primary_intent,
     };
   }
 
@@ -3964,6 +4027,7 @@ export async function classify(message, brain_item = null) {
       seller_state: computeSellerState({ message: text, ...heuristic, motivation_score: final_motivation }),
       source: "heuristic",
       notes:  "ai_assist_failed",
+      detected_intent: heuristic.primary_intent,
     };
   }
 
@@ -3994,6 +4058,7 @@ export async function classify(message, brain_item = null) {
     seller_state: computeSellerState({ message: text, ...merged, motivation_score: final_motivation }),
     source: "ai",
     notes:  ai_result.notes ?? "",
+    detected_intent: merged.primary_intent,
   };
 }
 

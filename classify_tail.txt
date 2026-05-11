@@ -1,0 +1,738 @@
+function resolveIntents(
+  message,
+  {
+    compliance_flag = null,
+    objection = null,
+    positive_signals = [],
+  } = {}
+) {
+  const text = lower(message);
+  const normalized_objection = cleanMessage(objection);
+  
+  const intents = [];
+
+  // 1. OPT-OUT / COMPLIANCE (Highest Priority)
+  if (compliance_flag === "stop_texting" || includesAny(text, [
+    "stop", "remove", "unsubscribe", "opt out", "opt-out", "optout",
+    "stop texting", "stop messaging", "don't text", "dont text",
+    "don't contact", "dont contact", "remove me", "take me off",
+    "get me off", "off your list", "off this list", "off that list",
+    "quit", "cancel", "end", "stopall", "unsubscribe",
+    "don't bother", "dont bother", "stop bothering",
+    "legal action", "harassing", "harassment", "spam",
+    "buzz off", "get lost", "go away",
+    // Spanish
+    "para", "detente", "basta", "cancela", "elimíname", "eliminame",
+    "no me escribas", "no me contactes", "no más", "no mas",
+  ])) {
+    return { primary_intent: "opt_out", secondary_intent: null };
+  }
+
+  // 2. WRONG NUMBER / NOT OWNER
+  if (
+    normalized_objection === "wrong_number" ||
+    includesAny(text, [
+      "wrong number", "wrong #", "wrong person", "incorrect number",
+      "not the owner", "not the property owner", "not the homeowner",
+      "don't own", "dont own", "no longer own", "i sold it", "sold it",
+      "sold years ago", "not mine", "not my property", "never owned",
+      "never lived", "wrong address", "this is not", "not this person",
+      "it sold", "its sold", "already sold",
+      // Spanish
+      "número equivocado", "equivocado", "no soy el dueño", "no es mía", "no es mia",
+      "no soy el propietario", "no tengo esa casa", "no es mi casa", "no vivo",
+      "llanoesmia", "noesmia", "la mia es", "la mía es",
+    ])
+  ) {
+    intents.push("wrong_number");
+  }
+
+  // 3. NOT INTERESTED / SOFT OBJECTIONS (Capture negations before positive keywords)
+  if (
+    normalized_objection === "not_interested" ||
+    includesAny(text, [
+      "not interested", "no interest", "no thanks", "no thank you",
+      "not for sale", "not selling", "won't sell", "wont sell",
+      "keeping it", "holding onto it", "answer is no", "real estate agent",
+      "real estate broker", "realtor", "nfs", "is not on sale", "nopienso",
+      "no vendo", "not looking to sell", "not considering selling",
+      "not interested in selling", "dont want to sell", "don't want to sell",
+      // Spanish
+      "no me interesa", "no quiero vender", "no está en venta", "no esta en venta",
+    ])
+  ) {
+    // Check for "unless" or "but" which might indicate price or latent interest
+    if (includesAny(text, ["unless", "but", "except", "if you", "pero"])) {
+       if (!matchesAnyPattern(text, ASKING_PRICE_PATTERNS)) {
+         intents.push("latent_interest");
+       }
+    } else {
+       intents.push("not_interested");
+    }
+  }
+
+  // 4. SELLER INTERESTED (Explicit)
+  if (includesAny(text, [
+    "want to sell", "interested in selling", "looking to sell",
+    "ready to sell", "let's talk", "lets talk", "i'm open", "im open",
+    "i'm interested", "im interested", "interested in an offer",
+    "willing to sell", "considering selling",
+  ])) {
+    if (!intents.includes("not_interested") && !intents.includes("latent_interest")) {
+      intents.push("seller_interested");
+    }
+  }
+
+  // 5. PRICE PROVIDED
+  if (matchesAnyPattern(text, ASKING_PRICE_PATTERNS)) {
+    intents.push("asking_price_provided");
+  }
+...
+  // Final dedupe and resolve
+  const unique_intents = [...new Set(intents)];
+  const primary = unique_intents[0] ?? "unclear";
+  const secondary = unique_intents.length > 1 ? unique_intents[1] : null;
+
+  return { primary_intent: primary, secondary_intent: secondary };
+}
+
+  // 8. NEED TIME / MAYBE LATER
+  if (
+    normalized_objection === "need_time" ||
+    includesAny(text, [
+      "maybe later", "sometime later", "check back", "next week",
+      "next month", "next year", "in a few months", "not ready yet",
+      "thinking about it", "still deciding", "not at this time",
+      "maybe someday", "down the road", "no sell right now",
+    ])
+  ) {
+    intents.push("need_time");
+  }
+
+  // 9. VAGUE NEGOTIATION / LATENT INTEREST
+  if (includesAny(text, [
+    "interested", "depends", "depending", "maybe", "possibly",
+    "if the price is right", "enough money", "make it worth it",
+  ])) {
+    if (!intents.includes("seller_interested")) {
+      intents.push("latent_interest");
+    }
+  }
+
+  // 10. OWNERSHIP CONFIRMED
+  if (includesAny(text, [
+    "yes i own it",
+    "yes i do",
+    "i own it",
+    "still own it",
+    "that's mine",
+    "thats mine",
+    "i do",
+    "it is",
+    "yes",
+    "si",
+    "sí",
+    "yea",
+    "yeah",
+    "yep",
+    "yup",
+    "so y siempre lo seré",
+    "a si es",
+  ])) {
+    intents.push("ownership_confirmed");
+  }
+
+  // 11. MISC SIGNAL DRIVEN
+  if (normalized_objection === "tenant_issue" || includesAny(text, ["tenant", "tenants", "rented", "occupied", "renting", "lease"])) {
+    intents.push("tenant_occupied");
+  }
+
+  if (normalized_objection === "condition_bad" || includesAny(text, ["needs work", "bad condition", "bad shape", "rough shape", "as is", "as-is", "needs everything"])) {
+    intents.push("condition_disclosed");
+  }
+
+  if (normalized_objection === "who_is_this" || includesAny(text, ["who is this", "who's this", "whos this", "who be this", "how do you know my name", "who are you"])) {
+    intents.push("who_is_this");
+  }
+
+  // Final dedupe and resolve
+  const unique_intents = [...new Set(intents)];
+  const primary = unique_intents[0] ?? "unclear";
+  const secondary = unique_intents.length > 1 ? unique_intents[1] : null;
+
+  return { primary_intent: primary, secondary_intent: secondary };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// STAGE HINT DETECTION
+// ══════════════════════════════════════════════════════════════════════════
+
+function detectStageHint(message, brain_item = null, objection = null) {
+  // Objection-driven overrides — highest priority
+  if (objection === "who_is_this" || objection === "wrong_number") return "Ownership";
+  if (
+    objection === "send_offer_first"  ||
+    objection === "need_more_money"   ||
+    objection === "wants_proof_of_funds"
+  ) return "Offer";
+  if (
+    objection === "needs_call"        ||
+    objection === "needs_email"       ||
+    objection === "probate"           ||
+    objection === "divorce"           ||
+    objection === "wants_written_offer"
+  ) return "Q/A";
+
+  const existing_stage = normalizeStage(
+    getCategoryValue(brain_item, "conversation-stage", "Ownership Confirmation")
+  );
+  const text = lower(message);
+
+  if (includesAny(text, [
+    "contract", "agreement", "sign", "docusign", "docu sign",
+    "send paperwork", "email the docs", "purchase agreement",
+    "psa", "send the contract", "sign the contract",
+    "send over the contract", "ready to sign",
+    "title", "title company", "escrow", "closing",
+    "close on", "closing date", "when can we close",
+    "set a closing date", "open escrow",
+    // Spanish
+    "contrato", "firmar", "papeles", "título",
+    "cierre", "fecha de cierre",
+    // Portuguese
+    "contrato", "assinar", "papéis", "título",
+    "fechamento", "data de fechamento",
+    // Italian
+    "contratto", "firmare", "documenti", "titolo",
+    "chiusura", "data di chiusura",
+    // French
+    "contrat", "signer", "documents", "titre",
+    "clôture", "date de clôture",
+    // German
+    "vertrag", "unterzeichnen", "dokumente", "titel",
+    "abschluss", "abschlussdatum",
+  ])) return "Contract";
+
+  if (includesAny(text, [
+    "offer", "price", "number", "how much", "cash offer",
+    "what will you pay", "what can you pay",
+    "give me a number", "show me a number",
+    // Spanish
+    "oferta", "precio", "número", "cuánto",
+    // Portuguese
+    "oferta", "preço", "número", "quanto",
+    // Italian
+    "offerta", "prezzo", "numero", "quanto",
+    // French
+    "offre", "prix", "numéro", "combien",
+    // German
+    "angebot", "preis", "nummer", "wie viel",
+  ])) return "Offer";
+
+  if (includesAny(text, [
+    "how does it work", "tell me more", "what's the process",
+    "how long", "any fees", "explain", "questions",
+    "want to understand", "walk me through",
+    // Spanish
+    "cómo funciona", "explícame", "preguntas", "tarifas",
+    // Portuguese
+    "como funciona", "me explica", "perguntas", "taxas",
+    // Italian
+    "come funziona", "spiegami", "domande", "costi",
+    // French
+    "comment ça marche", "expliquez", "questions", "frais",
+    // German
+    "wie funktioniert", "erklären", "fragen", "kosten",
+  ])) return "Q/A";
+
+  if (includesAny(text, [
+    "follow up", "check back", "later", "not now",
+    "next week", "next month", "in a few months",
+    "circle back", "not ready yet", "reach back out",
+    "i'm reconsidering", "changed my mind", "thought about it more",
+    // Spanish
+    "más adelante", "no ahora", "la próxima semana",
+    "lo estoy reconsiderando", "cambié de opinión",
+    // Portuguese
+    "mais tarde", "não agora", "na próxima semana",
+    "estou reconsiderando", "mudei de ideia",
+    // Italian
+    "più tardi", "non ora", "la settimana prossima",
+    "sto riconsiderando", "ho cambiato idea",
+    // French
+    "plus tard", "pas maintenant", "la semaine prochaine",
+    "je reconsidère", "j'ai changé d'avis",
+    // German
+    "später", "nicht jetzt", "nächste woche",
+    "ich überlege es mir nochmal", "ich habe meine meinung geändert",
+  ])) return "Follow-Up";
+
+  return existing_stage || "Ownership";
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// HEURISTIC CONFIDENCE SCORING
+// ══════════════════════════════════════════════════════════════════════════
+
+function computeHeuristicConfidence({
+  objection,
+  detected_intent,
+  emotion,
+  compliance_flag,
+  language,
+  positive_signals,
+}) {
+  if (compliance_flag !== null) return 0.99;
+
+  // High-certainty signals get a fixed ceiling
+  const FIXED_CONFIDENCE = {
+    // Objections
+    wrong_number:       0.97,
+    not_interested:     0.92,
+    already_listed:     0.92,
+    financial_distress: 0.91,
+    divorce:            0.91,
+    probate:            0.91,
+    // Intents
+    ownership_confirmed: 0.90,
+    seller_interested:  0.90,
+    asking_price_provided: 0.88,
+    asks_offer:         0.88,
+    who_is_this:        0.85,
+    need_time:          0.85,
+    condition_disclosed: 0.85,
+    tenant_occupied:    0.85,
+    opt_out:            0.99,
+  };
+
+  let confidence = FIXED_CONFIDENCE[objection] ?? FIXED_CONFIDENCE[detected_intent] ?? 0.60;
+
+  // Only apply additive scoring if we didn't fix a ceiling above
+  if (!(objection in FIXED_CONFIDENCE)) {
+    if (objection !== null) confidence += 0.18;
+
+    if (emotion === "motivated")     confidence += 0.15;
+    if (emotion === "frustrated")    confidence += 0.12;
+    if (emotion === "tired_landlord") confidence += 0.12;
+    if (emotion === "grieving")      confidence += 0.10;
+    if (emotion === "curious")       confidence += 0.08;
+    if (emotion === "overwhelmed")   confidence += 0.06;
+
+    confidence += 0.04 * Math.min(positive_signals.length, 3);
+  }
+
+  // Script-detected languages — only boost confidence when the heuristic
+  // actually matched meaningful signals. Without AI, a blind boost hides
+  // the fact that no objection/emotion/signal was detected.
+  const SCRIPT_LANGUAGES = new Set([
+    "Hebrew", "Mandarin", "Korean", "Arabic",
+    "Russian", "Hindi", "Thai", "Japanese", "Greek",
+  ]);
+  if (SCRIPT_LANGUAGES.has(language)) {
+    const has_meaningful_signal =
+      objection !== null ||
+      (emotion !== "calm" && emotion !== "guarded") ||
+      positive_signals.length > 0;
+    if (has_meaningful_signal) {
+      confidence = Math.max(confidence, 0.95);
+    }
+    // Without signals, keep base confidence — no blind boost
+  }
+
+  return Math.min(0.98, confidence);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// MOTIVATION SCORE
+// ══════════════════════════════════════════════════════════════════════════
+
+function estimateMotivationScore({ objection, emotion, positive_signals = [] }) {
+  if (objection === "wrong_number") return 0;
+
+  let score = 50;
+
+  // Emotion deltas
+  const EMOTION_DELTA = {
+    motivated:     +30,
+    curious:       +12,
+    tired_landlord: +20,
+    overwhelmed:   +12,
+    grieving:      +8,
+    frustrated:    -15,
+    skeptical:     -10,
+    guarded:       -5,
+  };
+  score += EMOTION_DELTA[emotion] ?? 0;
+
+  // Objection deltas
+  const OBJECTION_DELTA = {
+    need_more_money:      -5,
+    not_interested:       -30,
+    already_listed:       -15,
+    need_time:            -10,
+    wants_retail:         -20,
+    has_other_buyer:      -12,
+    need_family_ok:       -5,
+    financial_distress:   +25,
+    tenant_issue:         +15,
+    condition_bad:        +10,
+    probate:              +10,
+    divorce:              +15,
+    send_offer_first:     +8,
+    needs_call:           +5,
+    wants_written_offer:  +5,
+    wants_proof_of_funds: +5,
+  };
+  score += OBJECTION_DELTA[objection] ?? 0;
+
+  // Positive signal deltas
+  const SIGNAL_DELTA = {
+    urgency:           +15,
+    vacant_property:   +12,
+    financial_pressure: +20,
+    absentee_owner:    +10,
+    as_is_willing:     +8,
+    price_curious:     +6,
+    affirmative:       +10,
+    inherited:         +8,
+    multiple_properties: +5,
+    cash_aware:        +4,
+  };
+  for (const signal of positive_signals) {
+    score += SIGNAL_DELTA[signal] ?? 0;
+  }
+
+  return Math.max(0, Math.min(100, score));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// HEURISTIC CLASSIFICATION
+// ══════════════════════════════════════════════════════════════════════════
+
+function classifyHeuristic(message, brain_item = null) {
+  const compliance_flag  = detectComplianceFlag(message);
+  const language         = detectLanguageHeuristic(message, brain_item);
+  const objection        = compliance_flag ? null : detectObjection(message);
+  const emotion          = detectEmotion(message);
+  const positive_signals = detectPositiveSignals(message);
+  const stage_hint       = detectStageHint(message, brain_item, objection);
+  const intents          = resolveIntents(message, {
+    compliance_flag,
+    objection,
+    positive_signals,
+  });
+
+  const confidence = computeHeuristicConfidence({
+    objection,
+    primary_intent: intents.primary_intent,
+    emotion,
+    compliance_flag,
+    language,
+    positive_signals,
+  });
+
+  const motivation_score = estimateMotivationScore({
+    objection,
+    emotion,
+    positive_signals,
+  });
+
+  return {
+    language,
+    objection,
+    emotion,
+    stage_hint,
+    compliance_flag,
+    primary_intent: intents.primary_intent,
+    secondary_intent: intents.secondary_intent,
+    positive_signals,
+    confidence,
+    motivation_score,
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SELLER STATE ENGINE
+// ══════════════════════════════════════════════════════════════════════════
+
+function extractPrice(message) {
+  const text = lower(message);
+  // Match common price patterns like $500,600, 150k, 2.1 million
+  const match = text.match(/\$?\s*(\d[\d,.]*(?:\.\d+)?)\s*(k|thousand|m|mil|million|hundred|kilo)?/i);
+  if (!match) return null;
+
+  let val = parseFloat(match[1].replace(/,/g, ""));
+  const suffix = (match[2] ?? "").toLowerCase();
+
+  if (suffix.startsWith("k") || suffix.startsWith("thou")) val *= 1000;
+  if (suffix.startsWith("m")) val *= 1000000;
+  if (suffix.startsWith("h")) val *= 100;
+
+  return isNaN(val) ? null : val;
+}
+
+function computeSellerState({
+  message,
+  primary_intent,
+  secondary_intent,
+  objection,
+  emotion,
+  motivation_score,
+  positive_signals,
+  confidence,
+}) {
+  const text = lower(message);
+
+  // Interest Level
+  let seller_interest = "low";
+  if (
+    primary_intent === "seller_interested" ||
+    primary_intent === "latent_interest" ||
+    primary_intent === "asking_price_provided" ||
+    primary_intent === "asks_offer" ||
+    positive_signals.includes("affirmative")
+  ) {
+    seller_interest = "medium";
+    if (motivation_score > 75 || emotion === "motivated") {
+      seller_interest = "high";
+    }
+  }
+
+  // Motivation Level
+  let motivation_level = "low";
+  if (motivation_score > 40) motivation_level = "medium";
+  if (motivation_score > 75 || emotion === "motivated") motivation_level = "high";
+
+  // Timeline
+  let timeline = null;
+  if (includesAny(text, ["now", "asap", "immediately", "today", "this week"])) timeline = "immediate";
+  if (includesAny(text, ["30 days", "month", "next month"])) timeline = "30_days";
+  if (includesAny(text, ["flexible", "not in a rush", "whenever"])) timeline = "flexible";
+
+  // Creative Finance
+  const creative_finance_open = includesAny(text, ["terms", "payments", "owner carry", "financing", "monthly"]);
+
+  // Next Best Action
+  let next_best_action = "await_human";
+  if (primary_intent === "opt_out") next_best_action = "stop_all_outreach";
+  if (primary_intent === "wrong_number") next_best_action = "update_contact_and_archive";
+  if (seller_interest === "high") next_best_action = "immediate_call_back";
+  if (primary_intent === "asks_offer" || primary_intent === "asking_price_provided") next_best_action = "generate_offer_and_send";
+  if (primary_intent === "callback_requested") next_best_action = "schedule_call";
+
+  return {
+    ownership_confirmed: primary_intent === "ownership_confirmed" || secondary_intent === "ownership_confirmed" || !!objection,
+    seller_interest,
+    motivation_level,
+    emotional_state: emotion,
+    price_mentioned: extractPrice(message),
+    tenant_occupied: primary_intent === "tenant_occupied" || secondary_intent === "tenant_occupied" || objection === "tenant_issue",
+    timeline,
+    creative_finance_open,
+    confidence,
+    next_best_action,
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// AI ASSIST CLASSIFICATION
+// ══════════════════════════════════════════════════════════════════════════
+
+const VALID_LANGUAGES   = new Set(["English","Spanish","Portuguese","Italian","Hebrew","Mandarin","Korean","Vietnamese","Polish","Arabic","Hindi","French","Russian","Japanese","Farsi","German","Greek","Thai","Pashto"]);
+const VALID_OBJECTIONS  = new Set(["wrong_number","who_is_this","not_interested","already_listed","need_more_money","need_time","need_family_ok","send_offer_first","tenant_issue","condition_bad","probate","divorce","financial_distress","has_other_buyer","wants_retail","needs_call","needs_email","wants_written_offer","wants_proof_of_funds","null",null]);
+const VALID_EMOTIONS    = new Set(["calm","skeptical","guarded","frustrated","curious","motivated","tired_landlord","overwhelmed","grieving"]);
+const VALID_STAGES      = new Set(["Ownership","Offer","Q/A","Contract","Follow-Up"]);
+const VALID_COMPLIANCE  = new Set(["stop_texting","null",null]);
+const VALID_SIGNALS     = new Set(["affirmative","vacant_property","urgency","cash_aware","as_is_willing","financial_pressure","absentee_owner","price_curious","inherited","multiple_properties"]);
+
+function sanitizeAiResult(raw, heuristic) {
+  const language  = VALID_LANGUAGES.has(raw?.language)  ? raw.language  : heuristic.language;
+  const objection = VALID_OBJECTIONS.has(raw?.objection) ? (raw.objection === "null" ? null : raw.objection) : heuristic.objection;
+  const emotion   = VALID_EMOTIONS.has(raw?.emotion)    ? raw.emotion   : heuristic.emotion;
+  const stage_hint = VALID_STAGES.has(raw?.stage_hint)  ? raw.stage_hint : heuristic.stage_hint;
+  const compliance_flag = VALID_COMPLIANCE.has(raw?.compliance_flag)
+    ? (raw.compliance_flag === "null" ? null : raw.compliance_flag)
+    : heuristic.compliance_flag;
+
+  const positive_signals = Array.isArray(raw?.positive_signals)
+    ? raw.positive_signals.filter((s) => VALID_SIGNALS.has(s))
+    : heuristic.positive_signals;
+
+  const confidence = typeof raw?.confidence === "number"
+    ? Math.max(0, Math.min(1, raw.confidence))
+    : heuristic.confidence;
+
+  const notes = typeof raw?.notes === "string" ? raw.notes.slice(0, 200) : "";
+
+  return { language, objection, emotion, stage_hint, compliance_flag, positive_signals, confidence, notes };
+}
+
+async function aiAssistClassification({ message, heuristic_result }) {
+  const safe_message = sanitizeForPrompt(message);
+
+  const prompt = `You are classifying an inbound SMS from a real-estate property owner or contact.
+
+<message>${safe_message}</message>
+
+<heuristic_baseline>
+${JSON.stringify(heuristic_result, null, 2)}
+</heuristic_baseline>
+
+Return ONLY valid JSON. No markdown. No explanation outside the JSON object.
+
+{
+  "language": "English|Spanish|Portuguese|...|Thai",
+  "primary_intent": "opt_out|wrong_number|asking_price_provided|asks_offer|callback_requested|not_interested|need_time|ownership_confirmed|latent_interest|tenant_occupied|condition_disclosed|who_is_this|unclear",
+  "secondary_intent": "opt_out|...|null",
+  "objection": "wrong_number|...|null",
+  "emotion": "calm|skeptical|guarded|frustrated|curious|motivated|tired_landlord|overwhelmed|grieving",
+  "stage_hint": "Ownership|Offer|Q/A|Contract|Follow-Up",
+  "compliance_flag": "stop_texting|null",
+  "positive_signals": [],
+  "confidence": 0.0,
+  "notes": "one sentence explanation max"
+}
+
+Rules:
+1. Trust the heuristic baseline unless the message clearly suggests a better classification.
+2. If message is short, ambiguous, or a single word, lower confidence below 0.75.
+3. Always preserve the detected language. If message uses non-English, keep that language.
+4. compliance_flag takes absolute priority — when in any doubt, flag stop_texting.
+5. Return "null" for null fields.
+6. Never invent fields.`;
+
+  try {
+    const response = await ai({
+      model:       "gpt-4o-mini",
+      temperature: 0,
+      max_tokens:  400,
+      messages:    [{ role: "user", content: prompt }],
+    });
+
+    const text = (typeof response === "string" ? response : response?.choices?.[0]?.message?.content)?.trim() ?? "";
+
+    // Strip markdown code fences if model wraps in them
+    const json_text = text.startsWith("```")
+      ? text.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim()
+      : text;
+
+    const parsed = JSON.parse(json_text);
+    return sanitizeAiResult(parsed, heuristic_result);
+  } catch {
+    // AI failed or returned malformed JSON — fall back to heuristic silently
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// MAIN EXPORT
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * classify(message, brain_item)
+ *
+ * Returns a fully-resolved classification result. Strategy:
+ *   1. Always run heuristic synchronously — fast, zero-cost, no latency.
+ *   2. If heuristic confidence < AI_CONFIDENCE_THRESHOLD, run AI assist.
+ *   3. If AI returns a valid result, merge it; otherwise keep heuristic.
+ *   4. Re-compute motivation_score on the final merged result.
+ *   5. Build normalized seller state.
+ */
+
+const AI_CONFIDENCE_THRESHOLD = 0.82;
+
+export async function classify(message, brain_item = null) {
+  const text = cleanMessage(message);
+
+  if (!text) {
+    return {
+      language:        "English",
+      primary_intent:  "unclear",
+      secondary_intent: null,
+      objection:       null,
+      emotion:         "guarded",
+      stage_hint:      "Ownership",
+      compliance_flag: null,
+      positive_signals: [],
+      confidence:      0.50,
+      motivation_score: 50,
+      seller_state:    null,
+      source:          "heuristic",
+      notes:           "",
+    };
+  }
+
+  const heuristic = classifyHeuristic(text, brain_item);
+
+  // Compliance is absolute
+  if (heuristic.compliance_flag === "stop_texting") {
+    const final_motivation = estimateMotivationScore(heuristic);
+    return {
+      ...heuristic,
+      motivation_score: final_motivation,
+      seller_state: computeSellerState({ message: text, ...heuristic, motivation_score: final_motivation }),
+      source: "heuristic",
+      notes:  "",
+    };
+  }
+
+  // High-confidence heuristic
+  if (heuristic.confidence >= AI_CONFIDENCE_THRESHOLD) {
+    const final_motivation = estimateMotivationScore(heuristic);
+    return {
+      ...heuristic,
+      motivation_score: final_motivation,
+      seller_state: computeSellerState({ message: text, ...heuristic, motivation_score: final_motivation }),
+      source: "heuristic",
+      notes:  "",
+    };
+  }
+
+  // AI assist
+  const ai_result = await aiAssistClassification({
+    message:          text,
+    heuristic_result: heuristic,
+  });
+
+  if (!ai_result) {
+    const final_motivation = estimateMotivationScore(heuristic);
+    return {
+      ...heuristic,
+      motivation_score: final_motivation,
+      seller_state: computeSellerState({ message: text, ...heuristic, motivation_score: final_motivation }),
+      source: "heuristic",
+      notes:  "ai_assist_failed",
+    };
+  }
+
+  const final_compliance = heuristic.compliance_flag ?? ai_result.compliance_flag;
+  const final_intents = resolveIntents(text, {
+    compliance_flag: final_compliance,
+    objection: ai_result.objection,
+    positive_signals: ai_result.positive_signals,
+  });
+
+  const merged = {
+    language:         ai_result.language,
+    primary_intent:   final_intents.primary_intent,
+    secondary_intent: final_intents.secondary_intent,
+    objection:        ai_result.objection,
+    emotion:          ai_result.emotion,
+    stage_hint:       ai_result.stage_hint,
+    compliance_flag:  final_compliance,
+    positive_signals: ai_result.positive_signals,
+    confidence:       ai_result.confidence,
+  };
+
+  const final_motivation = estimateMotivationScore(merged);
+
+  return {
+    ...merged,
+    motivation_score: final_motivation,
+    seller_state: computeSellerState({ message: text, ...merged, motivation_score: final_motivation }),
+    source: "ai",
+    notes:  ai_result.notes ?? "",
+  };
+}
+
+export default classify;

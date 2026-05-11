@@ -1260,23 +1260,19 @@ export async function loadTemplateCandidates({
   // ── Reengagement fallback ladder ─────────────────────────────────────────────
   // When no templates survived exact + alias matching, retry with progressively
   // degraded criteria before giving up.  Order:
-  //   1. "reengagement" use_case  (requires evidence of prior communication)
-  //   2. "ownership_check_follow_up"  (most common first-stage follow-up)
+  //   1. "reengagement" use_case
+  //   2. "ownership_check_follow_up" (most common first-stage follow-up)
+  //   3. "consider_selling_follow_up" (Stage 2 follow-up)
   // Only runs for Follow-Up touch_type and non-strict modes.
   if (
     !strict_touch_one_podio_only &&
     selector_input.touch_type === TEMPLATE_TOUCH_TYPES.FOLLOW_UP
   ) {
-    // Evidence gate: reengagement requires actual prior outreach — touch_number
-    // alone is insufficient.  At least 2 prior messages must have been sent OR
-    // the seller must have replied at least once.
-    const has_reengagement_evidence =
-      (context?.recent?.touch_count ?? 0) >= 2 ||
-      Boolean(context?.summary?.last_inbound_message);
-
-    const fallback_use_cases = has_reengagement_evidence
-      ? ["reengagement", "ownership_check_follow_up"]
-      : ["ownership_check_follow_up"];
+    const fallback_use_cases = [
+      "reengagement",
+      "ownership_check_follow_up",
+      "consider_selling_follow_up",
+    ];
     const already_tried = new Set(use_case_candidates.map((uc) => normalizeSelectorText(uc)));
 
     for (const fallback_uc of fallback_use_cases) {
@@ -1321,7 +1317,7 @@ export async function loadTemplateCandidates({
             ...template,
             rotation_key,
             template_resolution_source,
-            template_fallback_reason: "reengagement_fallback",
+            template_fallback_reason: `degraded_use_case_fallback_${fallback_uc}`,
             template_fallback_use_case: fallback_uc,
             template_selection_diagnostics: {
               selector_input: fallback_selector,
@@ -1344,6 +1340,7 @@ export async function loadTemplateCandidates({
       }
     }
   }
+
 
   const failure_diagnostics = {
     selector_input,

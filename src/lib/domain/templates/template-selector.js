@@ -237,12 +237,32 @@ export function expandSelectorUseCases(use_case = null, variant_group = null) {
   const exact_use_case = clean(use_case) || null;
   const canonical_use_case = canonicalizeTemplateUseCase(exact_use_case, variant_group);
 
-  return uniq([
+  const candidates = [
     exact_use_case,
     canonical_use_case,
     ...(TEMPLATE_LOOKUP_USE_CASE_ALIASES[canonical_use_case] || []),
-  ]);
+  ];
+
+  // ── Resilient Fallbacks ──────────────────────────────────────────────────
+  // If we are in a follow-up or re-engagement context, always include the
+  // generic "reengagement" and "consider_selling_follow_up" buckets to ensure
+  // we have at least one valid survivor for standard seller flows.
+  const uc = normalizeSelectorText(canonical_use_case || "");
+  if (
+    uc.includes("follow up") ||
+    uc.includes("followup") ||
+    uc.includes("reengagement") ||
+    uc.includes("probe") ||
+    uc.includes("reveal")
+  ) {
+    candidates.push("reengagement");
+    candidates.push("consider_selling_follow_up");
+    candidates.push("ownership_check_follow_up");
+  }
+
+  return uniq(candidates);
 }
+
 
 export function normalizeRequestedTouchType({
   touch_type = null,
