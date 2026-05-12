@@ -106,17 +106,15 @@ export async function selectNextTemplate(context) {
     };
   }
 
-  // Fetch candidates from DB with KPI join
-  const { data: candidates, error } = await supabase
+  // Fetch candidates from DB
+  const { data: candidates, error: templatesError } = await supabase
     .from("sms_templates")
-    .select(`
-      *,
-      kpis:template_performance_kpis_v(*)
-    `)
+    .select("*")
     .eq("use_case", route.use_case)
     .eq("is_active", true);
 
-  if (error || !candidates?.length) {
+  if (templatesError || !candidates?.length) {
+    if (templatesError) console.error(`[templateSelector] DB Error for ${route.use_case}:`, templatesError.message);
     return {
       ok: false,
       action: ACTIONS.ESCALATE,
@@ -125,11 +123,21 @@ export async function selectNextTemplate(context) {
     };
   }
 
+  // Fetch KPIs separately and join in-memory
+  const template_keys = candidates.map(c => c.template_id).filter(Boolean);
+  const { data: kpiData, error: kpiError } = await supabase
+    .from("template_performance_kpis_v")
+    .select("*")
+    .in("template_key", template_keys);
+
+  const kpiMap = Object.fromEntries((kpiData || []).map(k => [k.template_key, k]));
+
   // Flatten KPI data
   const flattened = candidates.map(c => ({
     ...c,
-    ...(c.kpis?.[0] || {})
+    ...(kpiMap[c.template_id] || {})
   }));
+
 
   const ranked = rankTemplateCandidates(flattened, context);
   const best = ranked[0];

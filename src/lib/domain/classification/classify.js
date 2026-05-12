@@ -20,11 +20,10 @@ function lower(value) {
 
 function includesAny(text, phrases = []) {
   return phrases.some((p) => {
-    // If phrase contains special regex chars, we might need to escape them,
-    // but most are simple strings. For safety, we escape.
     const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Use word boundaries if it's a simple word or phrase
-    const regex = new RegExp(`\\b${escaped}\\b`, "i");
+    // Use custom boundaries to handle multilingual characters better than \b
+    // Matches start of string or non-alphanumeric before, and end of string or non-alphanumeric after.
+    const regex = new RegExp(`(?:^|[^a-zA-Z0-9\\u00C0-\\u017F])${escaped}(?:$|[^a-zA-Z0-9\\u00C0-\\u017F])`, "i");
     return regex.test(text);
   });
 }
@@ -3294,7 +3293,8 @@ function resolveIntents(
       "sold years ago", "not mine", "not my property", "never owned",
       "never lived", "wrong address", "this is not", "not this person",
       "it sold", "its sold", "already sold", "never did", "never have",
-      "dont speak spanish", "don't speak spanish",
+      "dont speak spanish", "don't speak spanish", "dont live on", "don't live on",
+      "not my house", "not my property",
       // Spanish / Portuguese
       "número equivocado", "equivocado", "no soy el dueño", "no es mía", "no es mia",
       "no soy el propietario", "no tengo esa casa", "no es mi casa", "no vivo",
@@ -3322,9 +3322,11 @@ function resolveIntents(
       "not for sale", "not selling", "won't sell", "wont sell",
       "keeping it", "holding onto it", "answer is no", "real estate agent",
       "real estate broker", "realtor", "nfs", "is not on sale", "nopienso",
-      "no vendo", "not looking to sell", "not considering selling",
+      "not looking to sell", "not considering selling",
       "not interested in selling", "dont want to sell", "don't want to sell",
+      "not for rent", "no esta d vents",
       // Spanish
+
       "no me interesa", "no quiero vender", "no está en venta", "no esta en venta",
     ])
   ) {
@@ -3441,11 +3443,24 @@ function resolveIntents(
     intents.push("condition_disclosed");
   }
 
+  // 13. REACTION / EMOJI ONLY / SYSTEM REACTION
+  const is_emoji_only = /^[\p{Emoji}\p{Emoji_Modifier}\p{Emoji_Component}\p{Emoji_Presentation}\p{Extended_Pictographic}\s?]+$/u.test(text);
+  const is_system_reaction = text.includes("to \u201c");
+  if (is_emoji_only || is_system_reaction) {
+     intents.push("reaction_only");
+  }
+
+  // 14. ACKNOWLEDGEMENT
+  if (includesAny(text, ["ok", "okay", "understood", "got it", "gotcha", "cool", "fine", "bueno", "bien", "vale", "good"])) {
+     intents.push("acknowledgement");
+  }
+
+  // 15. WHO IS THIS
   if (normalized_objection === "who_is_this" || includesAny(text, [
     "who is this", "who's this", "whos this", "who be this", "how do you know my name", 
     "who are you", "do i know you", "conozco", "quien es", "quien habla",
     "how did you get my number", "where did you get my number",
-    "identification", "identify",
+    "identification", "identify", "porque", "por que", "why", "huh",
   ])) {
     intents.push("who_is_this");
   }

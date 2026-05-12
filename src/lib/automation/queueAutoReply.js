@@ -96,22 +96,45 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
       ok: false,
       action: selection.action,
       reason: selection.reason,
+      metadata: dry_run ? {
+        classification_snapshot: classification,
+        personalization_context: context.variables,
+      } : undefined
     };
   }
+
 
   const template = selection.template;
 
   // 6. Render
   const render = deps.renderSafeTemplate(template, context.variables);
   if (!render.ok) {
-    return { ok: false, reason: "render_failed", error: render.reason };
+    return {
+      ok: false,
+      reason: "render_failed",
+      error: render.reason,
+      metadata: dry_run ? {
+        classification_snapshot: classification,
+        personalization_context: context.variables,
+      } : undefined
+    };
   }
 
   // 7. Safety Gates
   const safety = deps.validateTemplateForIntent(template, context);
   if (!safety.ok) {
-    return { ok: false, reason: "safety_gate_violation", error: safety.reason };
+    return {
+      ok: false,
+      reason: "safety_gate_violation",
+      error: safety.reason,
+      metadata: dry_run ? {
+        classification_snapshot: classification,
+        personalization_context: context.variables,
+        template_id: template.template_id,
+      } : undefined
+    };
   }
+
 
   // 8. Contact Window Check
   const windowCheck = deps.evaluateContactWindow({

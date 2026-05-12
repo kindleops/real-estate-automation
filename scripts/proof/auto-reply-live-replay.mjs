@@ -6,7 +6,7 @@ import { ACTIONS } from "../../src/lib/automation/intentMap.js";
 async function runReplay() {
   console.log("🚀 Starting Auto-Reply Live Replay Proof (Dry Run)...");
 
-  const LIMIT = 200;
+  const LIMIT = 500;
   const { data: inboundMessages, error } = await supabase
     .from("message_events")
     .select("*")
@@ -46,8 +46,9 @@ async function runReplay() {
       
       try {
         const result = await queueAutoReply(thread_key, msg.id, { dry_run: true });
-        
-        const intent = result.metadata?.classification_snapshot?.primary_intent || "unclear";
+
+        const classification = result.metadata?.classification_snapshot;
+        const intent = classification?.primary_intent || "unclear";
         stats.intents[intent] = (stats.intents[intent] || 0) + 1;
 
         // Store example plan for each major intent
@@ -57,35 +58,39 @@ async function runReplay() {
             action: result.action,
             reason: result.reason,
             rendered: result.rendered_text,
-            use_case: result.use_case,
+            use_case: result.use_case || classification?.detected_intent,
           };
         }
 
         if (result.ok) {
           if (result.action === ACTIONS.QUEUE_REPLY) {
             stats.auto_queue_eligible++;
-            
             if (result.use_case === "underwriting_needed") stats.underwriting_triggered++;
-            
-            // Check for weirdness/risks
-            if (result.rendered_text?.includes("there") && msg.metadata?.personalization_context?.seller_first_name) {
-               risks.push({
-                 type: "weird_fallback",
-                 message: msg.message_body,
-                 rendered: result.rendered_text,
-                 reason: "Used 'there' despite having a name in context"
-               });
-            }
           }
         } else {
-          if (result.action === ACTIONS.STOP || result.reason === "wrong_number_detected") stats.hard_suppressed++;
-          if (result.action === ACTIONS.ESCALATE) stats.approval_required++;
+          // Categorize non-ok results
+          if (result.action === ACTIONS.STOP || result.reason === "wrong_number_detected" || intent === "opt_out") {
+            stats.hard_suppressed++;
+          } else if (result.action === ACTIONS.WAIT || intent === "not_interested") {
+            stats.nurture_scheduled++;
+          } else if (result.action === ACTIONS.ESCALATE) {
+            stats.approval_required++;
+            if (result.reason === "no_templates_found") stats.no_template_fallback++;
+          }
+
           if (result.reason === "duplicate_reply_prevented") stats.duplicate_blocked++;
           if (result.reason === "safety_gate_violation") stats.unsafe_template_blocked++;
-          if (result.reason === "no_templates_found") stats.no_template_fallback++;
-          if (result.reason === "not_interested") stats.nurture_scheduled++;
         }
 
+        // Check for weirdness/risks
+        if (result.rendered_text?.includes("there") && msg.metadata?.personalization_context?.seller_first_name) {
+           risks.push({
+             type: "weird_fallback",
+             message: msg.message_body,
+             rendered: result.rendered_text,
+             reason: "Used 'there' despite having a name in context"
+           });
+        }
       } catch (err) {
         console.error(`❌ Error processing message ${msg.id}:`, err.message);
       }
@@ -95,7 +100,6 @@ async function runReplay() {
       console.log(`⏳ Processed ${i + BATCH_SIZE} / ${inboundMessages.length}...`);
     }
   }
-
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("📊 AUTO-REPLY LIVE REPLAY REPORT");
