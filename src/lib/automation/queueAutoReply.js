@@ -9,6 +9,15 @@ import {
 import { ACTIONS, getIntentRoute } from "./intentMap.js";
 import { evaluateContactWindow as defaultWindowCheck } from "@/lib/supabase/sms-engine.js";
 
+import {
+  upsertThread,
+  appendTurn,
+  storeSellerStateSnapshot,
+  storeRoutingDecision,
+  loadConversationMemory,
+} from "./conversationMemoryService.js";
+import { resolveNextStage, calculateTemperature } from "./negotiationEngine.js";
+
 const defaultDeps = {
   supabase: defaultSupabase,
   classify: defaultClassify,
@@ -16,6 +25,13 @@ const defaultDeps = {
   validateTemplateForIntent: defaultValidate,
   renderSafeTemplate: defaultRender,
   evaluateContactWindow: defaultWindowCheck,
+  memory: {
+    upsertThread,
+    appendTurn,
+    storeSellerStateSnapshot,
+    storeRoutingDecision,
+    loadConversationMemory,
+  },
 };
 
 let deps = { ...defaultDeps };
@@ -35,9 +51,10 @@ export function __resetQueueDeps() {
  * @param {string} inbound_message_id
  * @param {object} [options]
  * @param {boolean} [options.dry_run=false]
+ * @param {boolean} [options.write_memory=false] - If true, write to conversation memory tables
  * @returns {Promise<object>} Result of the auto-reply attempt
  */
-export async function queueAutoReply(thread_key, inbound_message_id, { dry_run = false } = {}) {
+export async function queueAutoReply(thread_key, inbound_message_id, { dry_run = false, write_memory = false } = {}) {
   // 1. Deduplication
   if (!dry_run) {
     const { data: existing, error: checkError } = await deps.supabase
@@ -73,10 +90,58 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
     language_preference: inbound.language || "English",
   });
 
-  const route = getIntentRoute(classification.primary_intent);
+  // ─── Conversational Memory (Phase 3) ──────────────────────────────────────
+  const memory = await deps.memory.loadConversationMemory(thread_key);
+  const seller_temperature = calculateTemperature(classification, memory);
+  const stage_after = resolveNextStage(inbound.current_stage, classification, memory);
 
-  // 4. Update Conversation State (Internal DB or Podio)
-  // Logic to update brain stage goes here...
+  let thread_id = memory.thread?.id;
+  let turn_id = null;
+
+  if (write_memory || (process.env.MEMORY_WRITE_DRY_RUN === 'true' && dry_run)) {
+    if (!thread_id) {
+      thread_id = await deps.memory.upsertThread({
+        seller_id: inbound.metadata?.master_owner_id || inbound.from_phone_number,
+        status: 'active',
+        metadata: {
+          thread_key,
+          last_inbound_id: inbound_message_id,
+        }
+      });
+    }
+
+    if (thread_id) {
+      // 2. Append Turn
+      turn_id = await deps.memory.appendTurn({
+        thread_id,
+        direction: 'inbound',
+        content: inbound.message_body,
+        intent_detected: classification.primary_intent,
+        confidence_score: classification.confidence,
+        metadata: {
+          inbound_message_id,
+          classification_snapshot: classification,
+          seller_temperature,
+          stage_after,
+        }
+      });
+
+      // 3. Store Seller State Snapshot
+      if (classification.seller_state) {
+        await deps.memory.storeSellerStateSnapshot({
+          seller_id: inbound.metadata?.master_owner_id || inbound.from_phone_number,
+          thread_id,
+          state_data: {
+            ...classification.seller_state,
+            seller_temperature,
+            current_stage: stage_after,
+          },
+          capture_reason: 'inbound_classification',
+        });
+      }
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────────
 
   // 5. Select Template
   const context = {
@@ -87,11 +152,24 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
     property_type_scope: null,
     deal_strategy: null,
     variables: inbound.metadata?.personalization_context || {},
+    memory,
+    seller_temperature,
   };
 
   const selection = await deps.selectNextTemplate(context);
 
   if (!selection.ok) {
+    if (thread_id && turn_id) {
+      await deps.memory.storeRoutingDecision({
+        turn_id,
+        thread_id,
+        decision_type: 'auto_reply_blocked',
+        routed_to: 'none',
+        confidence: classification.confidence,
+        rules_triggered: [selection.reason],
+      });
+    }
+
     return {
       ok: false,
       action: selection.action,
@@ -99,6 +177,10 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
       metadata: dry_run ? {
         classification_snapshot: classification,
         personalization_context: context.variables,
+        seller_temperature,
+        stage_before: inbound.current_stage,
+        stage_after,
+        memory_used: memory.found,
       } : undefined
     };
   }
@@ -116,6 +198,10 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
       metadata: dry_run ? {
         classification_snapshot: classification,
         personalization_context: context.variables,
+        seller_temperature,
+        stage_before: inbound.current_stage,
+        stage_after,
+        memory_used: memory.found,
       } : undefined
     };
   }
@@ -131,9 +217,25 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
         classification_snapshot: classification,
         personalization_context: context.variables,
         template_id: template.template_id,
+        seller_temperature,
+        stage_before: inbound.current_stage,
+        stage_after,
+        memory_used: memory.found,
       } : undefined
     };
   }
+
+  if (thread_id && turn_id) {
+    await deps.memory.storeRoutingDecision({
+      turn_id,
+      thread_id,
+      decision_type: 'auto_reply_queued',
+      routed_to: template.template_id,
+      confidence: classification.confidence,
+      rules_triggered: template.matches,
+    });
+  }
+
 
 
   // 8. Contact Window Check
@@ -157,6 +259,10 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
         template_selection_reason: template.matches,
         personalization_context: context.variables,
         scheduled_for,
+        seller_temperature,
+        stage_before: inbound.current_stage,
+        stage_after,
+        memory_used: memory.found,
       }
     };
   }
@@ -176,13 +282,15 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
       sms_agent_id: inbound.sms_agent_id,
       current_stage: selection.stage_code,
       stage_before: inbound.current_stage,
-      stage_after: selection.stage_code,
+      stage_after,
       detected_intent: classification.primary_intent,
       ai_confidence: classification.confidence,
       metadata: {
         classification_snapshot: classification,
         template_selection_reason: template.matches,
         personalization_context: context.variables,
+        seller_temperature,
+        memory_used: memory.found,
       },
     })
     .select()
@@ -207,4 +315,3 @@ export async function queueAutoReply(thread_key, inbound_message_id, { dry_run =
 
 
 export default { queueAutoReply };
-

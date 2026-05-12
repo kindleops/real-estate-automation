@@ -3,6 +3,7 @@ import { supabase } from "@/lib/supabase/client.js";
 import { personalizeTemplate } from "@/lib/sms/personalize_template.js";
 import { getIntentRoute, ACTIONS } from "./intentMap.js";
 import crypto from "node:crypto";
+import { isQuestionRedundant } from "./negotiationEngine.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // UTILITIES
@@ -36,6 +37,8 @@ export function rankTemplateCandidates(candidates, context) {
     property_type_scope,
     deal_strategy,
     touch_number = 1,
+    seller_temperature = "warming",
+    memory = {},
   } = context;
 
   return candidates.map(tpl => {
@@ -72,7 +75,13 @@ export function rankTemplateCandidates(candidates, context) {
       matches.push("deal_strategy");
     }
 
-    // 6. KPI Performance Weighting
+    // 6. Temperature Alignment
+    if (seller_temperature === 'hot' && tpl.tone === 'Direct') {
+      score += 50;
+      matches.push("temp_direct_boost");
+    }
+
+    // 7. KPI Performance Weighting
     // Boost based on success rate if we have enough samples
     const sample_size = tpl.sample_size || 0;
     if (sample_size >= 20) {
@@ -96,12 +105,24 @@ export function rankTemplateCandidates(candidates, context) {
 export async function selectNextTemplate(context) {
   const { primary_intent, seller_state, confidence } = context.classification;
   const route = getIntentRoute(primary_intent);
+  const memory = context.memory || {};
 
   if (route.action !== ACTIONS.QUEUE_REPLY) {
     return {
       ok: false,
       action: route.action,
       reason: route.reason || "no_reply_needed",
+      template: null,
+    };
+  }
+
+  // Prevent Redundant Questions
+  if (isQuestionRedundant(route.use_case, memory)) {
+    return {
+      ok: false,
+      action: ACTIONS.ESCALATE,
+      reason: "redundant_question_prevented",
+      use_case: route.use_case,
       template: null,
     };
   }
