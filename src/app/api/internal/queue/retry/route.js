@@ -8,7 +8,7 @@ import {
   serializePodioError,
 } from "@/lib/providers/podio.js";
 import { runRetryRunner } from "@/lib/workers/retry-runner.js";
-import { requireCronAuth } from "@/lib/security/cron-auth.js";
+import { requireCronOrEngineAuth } from "@/lib/security/cron-auth.js";
 import { buildDisabledResponse, getSystemFlag } from "@/lib/system-control.js";
 
 export const runtime = "nodejs";
@@ -29,7 +29,7 @@ function statusForResult(result) {
 
 export async function GET(request) {
   try {
-    const auth = requireCronAuth(request, logger);
+    const auth = await requireCronOrEngineAuth(request, logger);
     if (!auth.authorized) return auth.response;
 
     const retry_enabled = await getSystemFlag("retry_enabled");
@@ -133,7 +133,7 @@ export async function GET(request) {
 
 export async function POST(request) {
   try {
-    const auth = requireCronAuth(request, logger);
+    const auth = await requireCronOrEngineAuth(request, logger);
     if (!auth.authorized) return auth.response;
 
     const retry_enabled = await getSystemFlag("retry_enabled");

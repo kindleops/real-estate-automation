@@ -28,7 +28,7 @@ export function statusForResult(result) {
 export async function handleQueueForceDueRequest(request, method, deps = {}) {
   const require_cron_auth =
     deps.requireCronAuth ||
-    (await import("@/lib/security/cron-auth.js")).requireCronAuth;
+    (await import("@/lib/security/cron-auth.js")).requireCronOrEngineAuth;
   const force_due_queued_items =
     deps.forceDueQueuedItems ||
     (await import("@/lib/domain/queue/force-due-queued-items.js"))
@@ -41,7 +41,7 @@ export async function handleQueueForceDueRequest(request, method, deps = {}) {
   route_logger?.info?.("queue_force_due.route_enter", { method });
 
   try {
-    const auth = require_cron_auth(request, route_logger);
+    const auth = await require_cron_auth(request, route_logger);
     if (!auth.authorized) return auth.response;
 
     const { searchParams } = new URL(request.url);

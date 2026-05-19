@@ -7,7 +7,7 @@ import {
   isPodioRateLimitError,
   serializePodioError,
 } from "@/lib/providers/podio.js";
-import { requireCronAuth } from "@/lib/security/cron-auth.js";
+import { requireCronOrEngineAuth } from "@/lib/security/cron-auth.js";
 import { runQueueReconcileRunner } from "@/lib/workers/queue-reconcile-runner.js";
 import { reconcileSupabaseDeliveryStatuses } from "@/lib/domain/events/normalize-delivery-status.js";
 import { buildDisabledResponse, getSystemFlag } from "@/lib/system-control.js";
@@ -30,7 +30,7 @@ function statusForResult(result) {
 
 export async function GET(request) {
   try {
-    const auth = requireCronAuth(request, logger);
+    const auth = await requireCronOrEngineAuth(request, logger);
     if (!auth.authorized) return auth.response;
 
     const reconcile_enabled = await getSystemFlag("reconcile_enabled");
@@ -145,7 +145,7 @@ export async function GET(request) {
 
 export async function POST(request) {
   try {
-    const auth = requireCronAuth(request, logger);
+    const auth = await requireCronOrEngineAuth(request, logger);
     if (!auth.authorized) return auth.response;
 
     const reconcile_enabled = await getSystemFlag("reconcile_enabled");

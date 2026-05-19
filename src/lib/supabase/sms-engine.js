@@ -296,11 +296,12 @@ export function shouldRunSendQueueRow(row, now = nowIso()) {
   const normalized = normalizeSendQueueRow(row);
   const destination = resolveQueueDestinationPhone(normalized);
   const now_ts = toTimestamp(now) ?? Date.now();
-  const scheduled_ts = toTimestamp(normalized.scheduled_for);
+  const scheduled_ts = toTimestamp(normalized.scheduled_for_utc || normalized.scheduled_for || normalized.created_at);
   const next_retry_ts = toTimestamp(normalized.next_retry_at);
   const queue_status_value = normalizeQueueStatusValue(normalized.queue_status);
 
-  if (queue_status_value !== "queued") {
+  const allowed_statuses = new Set(["queued", "pending", "approved", "ready", "scheduled"]);
+  if (!allowed_statuses.has(queue_status_value)) {
     return {
       ok: false,
       reason: "queue_status_not_queued",
@@ -397,7 +398,8 @@ function preclaimInvalidQueueRowReason(row = null) {
   if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
 
   // Manual inbox sends and unknown auto replies are allowed to omit template/candidate snapshot/seller name.
-  if (manual_inbox_send || unknown_auto_reply) return null;
+  // Also any row that already has a rendered body is allowed to skip these.
+  if (manual_inbox_send || unknown_auto_reply || clean(normalized.message_body || normalized.message_text)) return null;
 
   if (!hasSelectedTemplateReference(normalized)) return "missing_selected_template_id";
   if (!getCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
@@ -501,8 +503,7 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   let query = supabase
     .from(SEND_QUEUE_TABLE)
     .select("*")
-    .or(`queue_status.eq.queued,queue_status.eq.ready,queue_status.eq.scheduled`)
-    .or(`scheduled_for.is.null,scheduled_for.lte.${now}`)
+    .in("queue_status", ["queued", "pending", "approved", "ready", "scheduled"])
     .not("is_locked", "is", "true");
 
   if (Array.isArray(deps.queue_types) && deps.queue_types.length) {
@@ -525,6 +526,8 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
   let preclaim_paused_name_missing_count = 0;
   let preclaim_paused_invalid_count = 0;
   let preclaim_paused_max_retries_count = 0;
+  let skipped_invalid_phone_count = 0;
+  let skipped_missing_body_count = 0;
 
   const recordPaused = async (row, reason, status) => {
     const normalized = normalizeSendQueueRow(row);
@@ -632,6 +635,8 @@ export async function loadRunnableSendQueueRows(limit = 50, deps = {}) {
     preclaim_paused_invalid_count,
     preclaim_paused_max_retries_count,
     preclaim_scanned_count,
+    skipped_invalid_phone_count,
+    skipped_missing_body_count,
     eligible_claim_count: Math.min(runnable.length, requested_limit),
     preclaim_scan_limit,
   };
@@ -2090,6 +2095,11 @@ export async function logInboundMessageEvent(payload, options = {}) {
       last_intent: event.detected_intent,
       automation_state: event.routing_allowed ? "running" : "paused",
       is_read: false,
+      latest_message_body: event.message_body,
+      latest_message_at: event.created_at || new Date().toISOString(),
+      latest_direction: "inbound",
+      latest_delivery_status: "delivered",
+      last_inbound_at: event.created_at || new Date().toISOString(),
     }, options);
   } catch (syncErr) {
     console.error("FAILED TO SYNC THREAD STATE ON INBOUND", syncErr);
@@ -2164,6 +2174,20 @@ export async function syncDeliveryEvent(payload, options = {}) {
     .select();
 
   if (message_events_error) throw message_events_error;
+
+  if (Array.isArray(message_events_data) && message_events_data.length > 0) {
+    const thread_key = message_events_data[0].thread_key;
+    if (thread_key) {
+      try {
+        await supabase
+          .from("inbox_thread_state")
+          .update({ latest_delivery_status: delivery_status })
+          .eq("thread_key", thread_key);
+      } catch (err) {
+        console.error("FAILED TO UPDATE THREAD STATE DELIVERY STATUS", err);
+      }
+    }
+  }
 
   const queue_payload = {
     updated_at: now,
@@ -2548,6 +2572,13 @@ export async function upsertInboxThreadState(payload, deps = {}) {
       last_sync_at: now,
     }
   };
+
+  if (payload.latest_message_body !== undefined) insert_payload.latest_message_body = clean(payload.latest_message_body);
+  if (payload.latest_message_at !== undefined) insert_payload.latest_message_at = payload.latest_message_at;
+  if (payload.latest_direction !== undefined) insert_payload.latest_direction = clean(payload.latest_direction);
+  if (payload.latest_delivery_status !== undefined) insert_payload.latest_delivery_status = clean(payload.latest_delivery_status);
+  if (payload.last_inbound_at !== undefined) insert_payload.last_inbound_at = payload.last_inbound_at;
+  if (payload.last_outbound_at !== undefined) insert_payload.last_outbound_at = payload.last_outbound_at;
 
   // Remove empty strings/nulls for key fields if they might break constraints
   if (!insert_payload.thread_key) return { ok: false, reason: "missing_thread_key" };

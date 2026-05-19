@@ -287,6 +287,167 @@ test("statusForResult prefers result.status, else 500 for ok=false and 200 other
   assert.equal(statusForResult(undefined), 200);
 });
 
+// ─── QUEUE_ENGINE_SHARED_SECRET auth tests ────────────────────────────────────
+
+test("handleQueueRunRequest warns and returns cron 401 when QUEUE_ENGINE_SHARED_SECRET is not configured and cron auth fails", async () => {
+  const { calls, logger } = makeLogger();
+  const run_calls = [];
+  const sentinel_response = { sentinel: "cron_401" };
+
+  const result = await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: () => ({
+      authorized: false,
+      auth: { authenticated: false, is_vercel_cron: false },
+      response: sentinel_response,
+    }),
+    runSendQueue: async () => { run_calls.push(1); return { ok: true }; },
+    logger,
+    jsonResponse: () => {},
+    // queueEngineSecret intentionally absent
+  });
+
+  assert.equal(result, sentinel_response, "returns cron auth sentinel response");
+  assert.equal(run_calls.length, 0, "runSendQueue must not be called");
+  const warn = calls.find((c) => c.event === "queue_engine_secret.not_configured");
+  assert.ok(warn, "queue_engine_secret.not_configured must be warned");
+  assert.equal(warn.level, "warn");
+});
+
+test("handleQueueRunRequest allows when QUEUE_ENGINE_SHARED_SECRET is set and x-queue-engine-secret header is valid", async () => {
+  const { calls, logger } = makeLogger();
+  const { responses, fn } = makeJsonResponse();
+  const run_calls = [];
+
+  const stub_result = {
+    ok: true, skipped: false, partial: false, dry_run: false,
+    attempted_count: 0, claimed_count: 0, started_count: 0,
+    processed_count: 0, sent_count: 0, failed_count: 0,
+    blocked_count: 0, skipped_count: 0, duplicate_locked_count: 0,
+    first_failing_queue_item_id: null, first_failing_reason: null,
+    first_failure_queue_item_id: null, first_failure_reason: null,
+    batch_duration_ms: 0, due_rows: 0, future_rows: 0,
+    total_rows_loaded: 0, run_started_at: "2026-05-18T00:00:00.000Z",
+    results: [],
+  };
+
+  await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: () => ({
+      authorized: false,
+      auth: { authenticated: false, is_vercel_cron: false },
+      response: null,
+    }),
+    runSendQueue: async (opts) => { run_calls.push(opts); return stub_result; },
+    getSharedSecretAuthResult: () => ({
+      ok: true, status: 200, reason: "authorized",
+      required: true, authenticated: true,
+      via: "header:x-queue-engine-secret",
+    }),
+    queueEngineSecret: "test-shared-secret-abc",
+    logger,
+    jsonResponse: fn,
+  });
+
+  assert.equal(run_calls.length, 1, "runSendQueue must be called");
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].status, 200);
+  assert.equal(responses[0].body.ok, true);
+  assert.equal(calls.find((c) => c.event === "queue_engine_secret.not_configured"), undefined, "no not_configured warning");
+  assert.equal(calls.find((c) => c.event === "queue_engine_secret.rejected"), undefined, "no rejected warning");
+});
+
+test("handleQueueRunRequest returns 401 when QUEUE_ENGINE_SHARED_SECRET is set and x-queue-engine-secret header is missing", async () => {
+  const { calls, logger } = makeLogger();
+  const { responses, fn } = makeJsonResponse();
+  const run_calls = [];
+
+  await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: () => ({
+      authorized: false,
+      auth: { authenticated: false, is_vercel_cron: false },
+      response: null,
+    }),
+    runSendQueue: async () => { run_calls.push(1); return { ok: true }; },
+    getSharedSecretAuthResult: () => ({
+      ok: false, status: 401,
+      reason: "missing_queue_engine_shared_secret_token",
+      authenticated: false, via: null,
+    }),
+    queueEngineSecret: "test-shared-secret-abc",
+    logger,
+    jsonResponse: fn,
+  });
+
+  assert.equal(run_calls.length, 0, "runSendQueue must not be called");
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].status, 401);
+  assert.equal(responses[0].body.ok, false);
+  assert.equal(responses[0].body.error, "unauthorized");
+  const rejected = calls.find((c) => c.event === "queue_engine_secret.rejected");
+  assert.ok(rejected, "queue_engine_secret.rejected must be logged");
+  assert.equal(rejected.level, "warn");
+  assert.equal(rejected.meta.reason, "missing_queue_engine_shared_secret_token");
+});
+
+test("handleQueueRunRequest returns 401 when QUEUE_ENGINE_SHARED_SECRET is set and x-queue-engine-secret header value is wrong", async () => {
+  const { calls, logger } = makeLogger();
+  const { responses, fn } = makeJsonResponse();
+  const run_calls = [];
+
+  await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: () => ({
+      authorized: false,
+      auth: { authenticated: false, is_vercel_cron: false },
+      response: null,
+    }),
+    runSendQueue: async () => { run_calls.push(1); return { ok: true }; },
+    getSharedSecretAuthResult: () => ({
+      ok: false, status: 401,
+      reason: "invalid_queue_engine_shared_secret_token",
+      authenticated: false, via: "header:x-queue-engine-secret",
+    }),
+    queueEngineSecret: "test-shared-secret-abc",
+    logger,
+    jsonResponse: fn,
+  });
+
+  assert.equal(run_calls.length, 0, "runSendQueue must not be called");
+  assert.equal(responses[0].status, 401);
+  assert.equal(responses[0].body.error, "unauthorized");
+  const rejected = calls.find((c) => c.event === "queue_engine_secret.rejected");
+  assert.ok(rejected, "queue_engine_secret.rejected must be logged");
+  assert.equal(rejected.meta.reason, "invalid_queue_engine_shared_secret_token");
+  assert.equal(rejected.meta.via, "header:x-queue-engine-secret");
+});
+
+test("handleQueueRunRequest does not check QUEUE_ENGINE_SHARED_SECRET when cron auth passes", async () => {
+  const { logger } = makeLogger();
+  const { fn } = makeJsonResponse();
+  let engine_auth_called = false;
+
+  const stub_result = {
+    ok: true, skipped: false, partial: false, dry_run: false,
+    attempted_count: 0, claimed_count: 0, started_count: 0,
+    processed_count: 0, sent_count: 0, failed_count: 0,
+    blocked_count: 0, skipped_count: 0, duplicate_locked_count: 0,
+    first_failing_queue_item_id: null, first_failing_reason: null,
+    first_failure_queue_item_id: null, first_failure_reason: null,
+    batch_duration_ms: 0, due_rows: 0, future_rows: 0,
+    total_rows_loaded: 0, run_started_at: "2026-05-18T00:00:00.000Z",
+    results: [],
+  };
+
+  await handleQueueRunRequest(makeRequest(), "GET", {
+    requireCronAuth: makeAuth(true),
+    runSendQueue: async () => stub_result,
+    getSharedSecretAuthResult: () => { engine_auth_called = true; return { ok: true }; },
+    queueEngineSecret: "test-shared-secret-abc",
+    logger,
+    jsonResponse: fn,
+  });
+
+  assert.equal(engine_auth_called, false, "engine secret auth must not be checked when cron auth passes");
+});
+
 test("handleQueueRunRequest converts Podio cooldown errors into a safe skipped response", async () => {
   const { calls, logger } = makeLogger();
   const { responses, fn } = makeJsonResponse();

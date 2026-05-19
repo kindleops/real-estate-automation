@@ -11,13 +11,15 @@ function getBearerToken(request) {
 export function requireInternalSecret(request) {
   const internal_secret = clean(process.env.INTERNAL_API_SECRET);
   const cron_secret = clean(process.env.CRON_SECRET);
+  const queue_engine_secret = clean(process.env.QUEUE_ENGINE_SHARED_SECRET);
 
   const provided_internal =
     clean(request?.headers?.get?.("x-internal-api-secret")) ||
     clean(request?.headers?.get?.("x-cron-secret")) ||
+    clean(request?.headers?.get?.("x-queue-engine-secret")) ||
     getBearerToken(request);
 
-  const allowed = [internal_secret, cron_secret].filter(Boolean);
+  const allowed = [internal_secret, cron_secret, queue_engine_secret].filter(Boolean);
 
   if (!allowed.length) {
     return {

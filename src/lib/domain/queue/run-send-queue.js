@@ -431,7 +431,7 @@ function validateQueueRowInternal(row = null) {
   const unknown_auto_reply = isUnknownAutoReply(normalized);
   const is_exempt = manual_inbox_send || unknown_auto_reply;
 
-  if (!is_exempt) {
+  if (!is_exempt && !body) {
     const selected_template_id = clean(
       normalized.template_id ||
         metadataValue(normalized, "selected_template_id") ||
@@ -652,6 +652,12 @@ export async function runSendQueue(
       let preclaim_paused_max_retries_count = Number(
         candidate_summary.preclaim_paused_max_retries_count || 0
       );
+      let skipped_invalid_phone_count = Number(
+        candidate_summary.skipped_invalid_phone_count || 0
+      );
+      let skipped_missing_body_count = Number(
+        candidate_summary.skipped_missing_body_count || 0
+      );
       let preclaim_outside_window_excluded_count = Number(
         candidate_summary.preclaim_outside_window_excluded_count || 0
       );
@@ -686,6 +692,8 @@ export async function runSendQueue(
         preclaim_paused_name_missing_count,
         preclaim_paused_invalid_count,
         preclaim_paused_max_retries_count,
+        skipped_invalid_phone_count,
+        skipped_missing_body_count,
         preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
         eligible_claim_count: candidate_summary.eligible_claim_count,
         now_utc: now,
@@ -863,6 +871,12 @@ export async function runSendQueue(
 
           if (invalid_reason === "missing_seller_first_name") {
             preclaim_paused_name_missing_count += 1;
+          } else if (invalid_reason === "missing_to_phone_number") {
+            skipped_invalid_phone_count += 1;
+            preclaim_paused_invalid_count += 1;
+          } else if (invalid_reason === "missing_message_body") {
+            skipped_missing_body_count += 1;
+            preclaim_paused_invalid_count += 1;
           } else {
             preclaim_paused_invalid_count += 1;
           }
@@ -1228,6 +1242,8 @@ export async function runSendQueue(
         preclaim_paused_name_missing_count,
         preclaim_paused_invalid_count,
         preclaim_paused_max_retries_count,
+        skipped_invalid_phone_count,
+        skipped_missing_body_count,
         preclaim_scanned_count: candidate_summary.preclaim_scanned_count,
         eligible_claim_count: rows.length,
         first_failing_queue_item_id,
@@ -1279,6 +1295,8 @@ export async function runSendQueue(
           summary.preclaim_paused_invalid_count,
         preclaim_paused_max_retries_count:
           summary.preclaim_paused_max_retries_count,
+        skipped_invalid_phone_count: summary.skipped_invalid_phone_count,
+        skipped_missing_body_count: summary.skipped_missing_body_count,
         preclaim_scanned_count: summary.preclaim_scanned_count,
         eligible_claim_count: summary.eligible_claim_count,
         batch_duration_ms: summary.batch_duration_ms,

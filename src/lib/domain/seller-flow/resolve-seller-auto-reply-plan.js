@@ -180,9 +180,13 @@ export function resolveAutoReplyUseCase(input) {
 export function shouldSuppressSellerAutoReply(input) {
   const intent = normalizeSellerInboundIntent(input);
   const next_stage = resolveNextSellerStage(input);
+  const confidence = input?.classification?.confidence ?? 1;
+  const automation_state = input?.conversation_context?.summary?.automation_state || "running";
   
   if (!input.auto_reply_enabled && !input.force_queue_reply) return { suppress: true, reason: "auto_reply_disabled" };
   
+  if (automation_state === "paused" || automation_state === "manual") return { suppress: true, reason: "manual_pause" };
+  if (confidence < 0.5) return { suppress: true, reason: "confidence_too_low" };
   if (intent === "hostile_or_legal") return { suppress: true, reason: "hostile_or_legal_intent" };
   if (intent === "timing_complaint") return { suppress: true, reason: "timing_complaint_manual_review" };
   if (intent === "opt_out" && !input.system_only) return { suppress: true, reason: "opt_out_intent_no_marketing" };

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getSharedSecretAuthResult } from "./shared-secret.js";
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -80,6 +81,38 @@ export function requireCronAuth(request, logger = null) {
       { status: auth.status || 401 }
     ),
   };
+}
+
+export async function requireCronOrEngineAuth(request, logger = null) {
+  const cron_result = requireCronAuth(request, logger);
+  if (cron_result.authorized) return cron_result;
+
+  const queue_secret = String(process.env.QUEUE_ENGINE_SHARED_SECRET ?? "").trim();
+  if (!queue_secret) return cron_result;
+
+  const engine_result = getSharedSecretAuthResult(request, {
+    env_name: "QUEUE_ENGINE_SHARED_SECRET",
+    header_names: ["x-queue-engine-secret"],
+    expected_token: queue_secret,
+  });
+
+  if (engine_result.ok) {
+    return {
+      authorized: true,
+      auth: {
+        authenticated: true,
+        is_vercel_cron: false,
+        via: engine_result.via || "x-queue-engine-secret",
+      },
+      response: null,
+    };
+  }
+
+  logger?.warn?.("queue_engine_secret.rejected", {
+    reason: engine_result.reason,
+    via: engine_result.via || null,
+  });
+  return cron_result;
 }
 
 export default requireCronAuth;

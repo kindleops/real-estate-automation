@@ -56,6 +56,7 @@ export function normalizeFeedCandidatesInput(input = {}) {
     schedule_end_local: clean(input.schedule_end_local) || "20:00",
     schedule_interval_seconds_min: asPositiveInteger(input.schedule_interval_seconds_min, 45),
     schedule_interval_seconds_max: asPositiveInteger(input.schedule_interval_seconds_max, 180),
+    timezone_filter: clean(input.timezone_filter) || null,
   };
 }
 
@@ -86,6 +87,7 @@ function mergeBodyAndQuery(request, method, body = {}) {
     "schedule_end_local",
     "schedule_interval_seconds_min",
     "schedule_interval_seconds_max",
+    "timezone_filter",
   ]) {
     const value = search_params.get(key);
     if (value !== null) merged[key] = value;
@@ -102,16 +104,55 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
   const route = clean(options.route) || "internal/outbound/feed-candidates";
   const route_logger = options.logger || logger;
   const json_response = options.jsonResponse || ((payload, init = {}) => Response.json(payload, init));
+  let feeder_request_meta = null;
   const require_cron_auth =
     options.requireCronAuth ||
     (await import("@/lib/security/cron-auth.js")).requireCronAuth;
 
   try {
-    const auth = require_cron_auth(request, route_logger);
-    if (!auth.authorized) return auth.response;
+    let auth = require_cron_auth(request, route_logger);
+
+    if (!auth.authorized) {
+      const queue_secret = String(process.env.QUEUE_ENGINE_SHARED_SECRET ?? "").trim();
+      if (!queue_secret) {
+        route_logger?.warn?.("queue_engine_secret.not_configured", {
+          hint: "Set QUEUE_ENGINE_SHARED_SECRET to protect this endpoint from non-cron callers",
+        });
+        return auth.response;
+      }
+
+      const { getSharedSecretAuthResult } = await import("@/lib/security/shared-secret.js");
+      const engine_result = getSharedSecretAuthResult(request, {
+        env_name: "QUEUE_ENGINE_SHARED_SECRET",
+        header_names: ["x-queue-engine-secret"],
+        expected_token: queue_secret,
+      });
+      if (!engine_result.ok) {
+        route_logger?.warn?.("queue_engine_secret.rejected", {
+          reason: engine_result.reason,
+          via: engine_result.via || null,
+        });
+        return json_response({ ok: false, error: "unauthorized" }, { status: 401 });
+      }
+      auth = {
+        authorized: true,
+        auth: {
+          authenticated: true,
+          is_vercel_cron: false,
+          via: engine_result.via || "x-queue-engine-secret",
+        },
+        response: null,
+      };
+    }
 
     const body = method === "POST" ? await request.json().catch(() => ({})) : {};
     const normalized = normalizeFeedCandidatesInput(mergeBodyAndQuery(request, method, body));
+    feeder_request_meta = {
+      route,
+      dry_run: normalized.dry_run,
+      limit: normalized.limit,
+      scan_limit: normalized.scan_limit,
+    };
 
     await notifyDiscordOps({
       event_type: "feed_candidates_started",
@@ -162,10 +203,20 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
       { status: statusForResult(diagnostics) }
     );
   } catch (error) {
+    route_logger?.error?.("feed_candidates_request.failed", {
+      route: feeder_request_meta?.route || route,
+      method,
+      dry_run: feeder_request_meta?.dry_run ?? null,
+      limit: feeder_request_meta?.limit ?? null,
+      scan_limit: feeder_request_meta?.scan_limit ?? null,
+      error: error?.message || "feed_candidates_failed",
+      stack: error?.stack || null,
+    });
+
     captureRouteException(error, {
       route,
       subsystem: "outbound_feeder",
-      context: { method },
+      context: { method, ...(feeder_request_meta || {}) },
     });
 
     await notifyDiscordOps({
@@ -174,7 +225,7 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
       domain: "feeder",
       title: "Feed Candidates Request Failed",
       summary: clean(error?.message) || "feed_candidates_failed",
-      metadata: { route, method },
+      metadata: { route, method, ...(feeder_request_meta || {}) },
       should_alert_critical: true,
     });
 
@@ -182,7 +233,7 @@ export async function handleFeedCandidatesRequest(request, method = "GET", optio
       {
         ok: false,
         route,
-        error: "feed_candidates_failed",
+        error: error?.message || "feed_candidates_failed",
         message: error?.message || "feed_candidates_failed",
       },
       { status: 500 }

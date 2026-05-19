@@ -1503,6 +1503,22 @@ function createSpreadScheduler({
   };
 }
 
+function matchesTimezoneFilter(candidate_timezone, filter) {
+  if (!filter) return true;
+  const tz = lower(clean(candidate_timezone));
+  const f = lower(clean(filter));
+  if (f === "eastern" || f === "et" || f === "est" || f === "edt") {
+    return tz.includes("new_york") || tz.includes("eastern") ||
+      tz === "america/detroit" ||
+      tz.startsWith("america/indiana/") ||
+      tz.startsWith("america/kentucky/");
+  }
+  if (f === "central" || f === "ct" || f === "cst" || f === "cdt") {
+    return tz === "america/chicago" || tz.includes("central");
+  }
+  return tz === f || tz.includes(f);
+}
+
 export async function getSupabaseFeederCandidates(
   {
     limit = 25,
@@ -1514,6 +1530,7 @@ export async function getSupabaseFeederCandidates(
     template_use_case = null,
     touch_number = 1,
     campaign_session_id = null,
+    timezone_filter = null,
   } = {},
   deps = {}
 ) {
@@ -1581,6 +1598,7 @@ export async function getSupabaseFeederCandidates(
     .filter((row) => {
       if (market && normalizeMarket(row.market) !== normalizeMarket(market)) return false;
       if (state && lower(row.state) !== lower(state)) return false;
+      if (timezone_filter && !matchesTimezoneFilter(row.timezone, timezone_filter)) return false;
       return true;
     });
 
@@ -2867,6 +2885,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     schedule_end_local: clean(input.schedule_end_local) || "20:00",
     schedule_interval_seconds_min: asPositiveInteger(input.schedule_interval_seconds_min, 45),
     schedule_interval_seconds_max: asPositiveInteger(input.schedule_interval_seconds_max, 180),
+    timezone_filter: clean(input.timezone_filter) || null,
     now,
   };
 

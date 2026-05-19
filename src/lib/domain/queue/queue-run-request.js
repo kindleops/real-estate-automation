@@ -47,7 +47,44 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
   route_logger?.info?.("queue_run.route_enter", { method });
 
   try {
-    const auth = require_cron_auth(request, route_logger);
+    const cron_auth = require_cron_auth(request, route_logger);
+    let auth = cron_auth;
+
+    if (!cron_auth.authorized) {
+      const queue_secret = String(
+        deps.queueEngineSecret ?? process.env.QUEUE_ENGINE_SHARED_SECRET ?? ""
+      ).trim();
+      if (!queue_secret) {
+        route_logger?.warn?.("queue_engine_secret.not_configured", {
+          hint: "Set QUEUE_ENGINE_SHARED_SECRET to protect this endpoint from non-cron callers",
+        });
+      } else {
+        const get_secret_auth = deps.getSharedSecretAuthResult ||
+          (await import("@/lib/security/shared-secret.js")).getSharedSecretAuthResult;
+        const engine_result = get_secret_auth(request, {
+          env_name: "QUEUE_ENGINE_SHARED_SECRET",
+          header_names: ["x-queue-engine-secret"],
+          expected_token: queue_secret,
+        });
+        if (!engine_result.ok) {
+          route_logger?.warn?.("queue_engine_secret.rejected", {
+            reason: engine_result.reason,
+            via: engine_result.via || null,
+          });
+          return json_response({ ok: false, error: "unauthorized" }, { status: 401 });
+        }
+        auth = {
+          authorized: true,
+          auth: {
+            authenticated: true,
+            is_vercel_cron: false,
+            via: engine_result.via || "x-queue-engine-secret",
+          },
+          response: null,
+        };
+      }
+    }
+
     if (!auth.authorized) return auth.response;
 
     const body =
@@ -185,6 +222,17 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
     return json_response(
       {
         ok: result?.ok !== false,
+        dry_run: Boolean(dry_run),
+        selected_count: result?.eligible_claim_count ?? 0,
+        due_scheduled_count: result?.due_rows ?? 0,
+        skipped_future_scheduled_count: result?.future_rows ?? 0,
+        skipped_guard_count: result?.blocked_count ?? 0,
+        skipped_suppression_count: result?.preclaim_outside_window_excluded_count ?? 0,
+        skipped_invalid_phone_count: result?.skipped_invalid_phone_count ?? 0,
+        skipped_missing_body_count: result?.skipped_missing_body_count ?? 0,
+        sent_count: result?.sent_count ?? 0,
+        failed_count: result?.failed_count ?? 0,
+        results: result?.results ?? [],
         route: "internal/queue/run",
         result,
       },
