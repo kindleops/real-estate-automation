@@ -2268,8 +2268,11 @@ const SEND_QUEUE_COLUMNS = [
   "provider_message_id", "local_send_date", "local_send_hour", "paused_reason", 
   "last_guard_checked_at", "dedupe_key", "seller_first_name", "seller_display_name", "thread_key", 
   "template_source", "priority", "risk", "sms_eligible", "routing_allowed", "safety_status", 
-  "type", "detected_intent", "stage_before", "stage_after", "textgrid_message_id", "market", 
-  "textgrid_number", "selected_template_id"
+  "type", "detected_intent", "stage_before", "stage_after", "textgrid_message_id", "market",
+  "textgrid_number", "selected_template_id",
+  "property_address_state", "language", "routing_tier",
+  "property_address_city", "property_address_zip", "seller_status",
+  "pipeline_stage", "agent_name", "template_key"
 ];
 
 function sanitizeSendQueuePayload(payload) {
@@ -2491,6 +2494,15 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     textgrid_number: clean(row.textgrid_number) || null,
     market: clean(row.market) || null,
     selected_template_id: clean(row.selected_template_id || row.template_id) || null,
+    property_address_state: clean(row.property_address_state || row.seller_state) || null,
+    language: clean(row.language) || null,
+    routing_tier: asNumber(row.routing_tier, null),
+    property_address_city: clean(row.property_address_city) || null,
+    property_address_zip: clean(row.property_address_zip) || null,
+    seller_status: clean(row.seller_status || row.contact_status || row.activity_status) || null,
+    pipeline_stage: clean(row.pipeline_stage || row.stage_code || row.conversation_stage) || null,
+    agent_name: clean(row.agent_name || row.agent_first_name) || null,
+    template_key: clean(row.template_key || row.template_id || row.selected_template_id) || null,
   };
 
   if (typeof deps.insertSupabaseSendQueueRow === "function") {

@@ -1115,6 +1115,16 @@ export async function buildSendQueueItem({
         ? personalization_tags_used
         : null,
       character_count: message_text ? countCharacters(message_text) : 0,
+      // Top-level visibility columns
+      market: market_name || null,
+      thread_key: normalized_target || null,
+      agent_name: agent_name || null,
+      template_key: String(
+        template_reference.selected_template_id ??
+        template_reference.selected_template_item_id ??
+        template_id ?? ""
+      ) || null,
+      pipeline_stage: resolved_current_stage || null,
       metadata: {
         source: "build_send_queue_item",
         phone_item_id,
