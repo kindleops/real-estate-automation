@@ -46,6 +46,7 @@ import {
 } from "@/lib/discord/inbound-autopilot-queue.js";
 import { getDefaultSupabaseClient } from "@/lib/supabase/default-client.js";
 import { info, warn } from "@/lib/logging/logger.js";
+import { getSystemFlags } from "@/lib/system-control.js";
 
 const defaultDeps = {
   loadContext,
@@ -669,7 +670,13 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
     asBoolean(process.env.AUTO_REPLY_DRY_RUN, null)
   );
 
-  const inbound_autopilot_enabled = auto_reply_enabled_final && auto_reply_live_enabled_final;
+  // system_control gates — fail-closed: missing flag = disabled.
+  // auto_reply_enabled must be true in system_control before any auto-reply is queued.
+  // followup_enabled must be true in system_control before any follow-up is queued.
+  const { auto_reply_enabled: system_auto_reply_enabled, followup_enabled: system_followup_enabled } =
+    await getSystemFlags(["auto_reply_enabled", "followup_enabled"]);
+
+  const inbound_autopilot_enabled = auto_reply_enabled_final && auto_reply_live_enabled_final && system_auto_reply_enabled;
   const inbound_autopilot_post_discord_card = asBoolean(
     auto_post_discord_card,
     asBoolean(process.env.INBOUND_AUTOPILOT_POST_DISCORD_CARD, true)
@@ -1564,6 +1571,8 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
 
       underwriting_follow_up = !inbound_autopilot_enabled
         ? { ok: true, queued: false, reason: "manual_review_required" }
+        : !system_followup_enabled
+        ? { ok: true, queued: false, reason: "system_control_disabled" }
         : auto_reply_plan?.should_queue_reply
         ? { ok: true, queued: false, reason: "suppressed_by_auto_reply_plan" }
         : await runtimeDeps.maybeQueueUnderwritingFollowUp({
@@ -1573,7 +1582,6 @@ export async function handleTextgridInboundWebhook(payload = {}, opts = {}) {
             route,
             context,
             message: message_body,
-            dry_run: true // Never queue separate reply, just get the preview/offer_ready state
           });
 
       const underwriting_offer_ready =

@@ -4,9 +4,13 @@ function clean(value) { return String(value ?? "").trim(); }
 function pickFirst(...values) { for (const v of values) { if (v !== null && v !== undefined && clean(v) !== "") return v; } return null; }
 function object(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }
 function nowIso() { return new Date().toISOString(); }
-function threadKeyFor(from, to, propertyId = null, ownerId = null) {
-  const phones = [normalizePhone(from), normalizePhone(to)].filter(Boolean).sort().join(":");
-  return [clean(propertyId) || clean(ownerId) || "unknown", phones || "no_phone"].join(":");
+function threadKeyFor(direction, from, to) {
+  const dir = clean(direction).toLowerCase();
+  const from_norm = normalizePhone(from);
+  const to_norm = normalizePhone(to);
+  if (dir === "inbound") return from_norm || to_norm || null;
+  if (dir === "outbound") return to_norm || from_norm || null;
+  return from_norm || to_norm || null;
 }
 
 async function maybeSingle(query) {
@@ -108,7 +112,10 @@ export async function enrichMessageEventContext(eventOrPayload = {}, supabase) {
     if (owner) enriched = merge(enriched, { seller_display_name: owner.seller_display_name || owner.owner_display_name || owner.name, owner_display_name: owner.owner_display_name || owner.name, owner_type: owner.owner_type });
   }
 
-  enriched.thread_key = pickFirst(enriched.thread_key, threadKeyFor(from, to, enriched.property_id, enriched.master_owner_id));
+  // Force canonical thread_key: outbound = normalizePhone(to), inbound = normalizePhone(from).
+  // Never inherit null/composite/pipe thread keys from legacy enrichment sources.
+  const canonical_thread_key = threadKeyFor(event.direction, from, to);
+  enriched.thread_key = canonical_thread_key || null;
   enriched.enrichment_source = source;
   enriched.enriched_at = nowIso();
   enriched.metadata = {
@@ -117,7 +124,7 @@ export async function enrichMessageEventContext(eventOrPayload = {}, supabase) {
       ...(object(metadata.enrichment)),
       source,
       enriched_at: enriched.enriched_at,
-      thread_key: enriched.thread_key,
+      thread_key: canonical_thread_key || null,
       property_id: enriched.property_id || null,
       master_owner_id: enriched.master_owner_id || null,
       seller_name: pickFirst(enriched.seller_display_name, enriched.owner_display_name, enriched.seller_first_name),

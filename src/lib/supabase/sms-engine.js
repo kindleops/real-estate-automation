@@ -189,6 +189,13 @@ export function normalizeSendQueueRow(row) {
   );
   const body = clean(safe_row.message_body || safe_row.message_text || "");
 
+  const normalized_to_phone = normalizePhone(safe_row.to_phone_number || null) || null;
+  const normalized_from_phone = normalizePhone(safe_row.from_phone_number || null) || null;
+  const canonical_thread_key =
+    normalized_to_phone ||
+    normalizePhone(safe_row.thread_key || safe_row.metadata?.thread_key || null) ||
+    null;
+
   return {
     id: row_id,
     queue_row_id: row_id,
@@ -212,8 +219,8 @@ export function normalizeSendQueueRow(row) {
     next_retry_at: safe_row.next_retry_at || null,
     message_body: body,
     message_text: safe_row.message_text || safe_row.message_body || "",
-    to_phone_number: safe_row.to_phone_number || null,
-    from_phone_number: safe_row.from_phone_number || null,
+    to_phone_number: normalized_to_phone,
+    from_phone_number: normalized_from_phone,
     provider_message_id: safe_row.provider_message_id || null,
     master_owner_id: safe_row.master_owner_id || null,
     prospect_id: safe_row.prospect_id || null,
@@ -251,7 +258,7 @@ export function normalizeSendQueueRow(row) {
     // Offer record sync tracking (added 2026-04-22)
     cash_offer_snapshot_id:    safe_row.cash_offer_snapshot_id    || null,
     type: safe_row.type || null,
-    thread_key: safe_row.thread_key || safe_row.metadata?.thread_key || null,
+    thread_key: canonical_thread_key,
     owner_id: safe_row.owner_id || null,
     agent_id: safe_row.agent_id || null,
     template_source: safe_row.template_source || null,
@@ -290,6 +297,15 @@ export function resolveQueueDestinationPhone(row = null) {
     source: null,
     raw: null,
   };
+}
+
+function canonicalThreadKeyForDirection(direction, from_phone_number, to_phone_number) {
+  const dir = clean(direction).toLowerCase();
+  const from = normalizePhone(from_phone_number) || null;
+  const to = normalizePhone(to_phone_number) || null;
+  if (dir === "inbound") return from || to || null;
+  if (dir === "outbound") return to || from || null;
+  return to || from || null;
 }
 
 export function shouldRunSendQueueRow(row, now = nowIso()) {
@@ -397,9 +413,18 @@ function preclaimInvalidQueueRowReason(row = null) {
   if (!clean(resolveQueueDestinationPhone(normalized).phone)) return "missing_to_phone_number";
   if (!clean(normalized.from_phone_number)) return "missing_from_phone_number";
 
-  // Manual inbox sends and unknown auto replies are allowed to omit template/candidate snapshot/seller name.
-  // Also any row that already has a rendered body is allowed to skip these.
-  if (manual_inbox_send || unknown_auto_reply || clean(normalized.message_body || normalized.message_text)) return null;
+  // paused_review rows must never be runnable — they require human intervention.
+  if (lower(normalized.queue_status) === "paused_review") return "paused_review_not_runnable";
+
+  // Enforce canonical thread_key: outbound thread_key must match to_phone_number.
+  const to_phone = normalizePhone(resolveQueueDestinationPhone(normalized).phone) || null;
+  const thread_key_value = clean(normalized.thread_key);
+  if (thread_key_value && to_phone && normalizePhone(thread_key_value) !== to_phone) {
+    return "noncanonical_thread_key";
+  }
+
+  // Manual inbox sends and unknown auto replies may omit template/snapshot/seller checks.
+  if (manual_inbox_send || unknown_auto_reply) return null;
 
   if (!hasSelectedTemplateReference(normalized)) return "missing_selected_template_id";
   if (!getCandidateSnapshot(normalized)) return "missing_candidate_snapshot";
@@ -1061,6 +1086,11 @@ function buildSuccessMessageEvent(row, send_result, options = {}) {
   const normalized = normalizeSendQueueRow(row);
   const event_timestamp = options.now || nowIso();
   const queue_key = clean(normalized.queue_key) || clean(normalized.queue_id) || String(normalized.id);
+  const thread_key = canonicalThreadKeyForDirection(
+    "outbound",
+    normalized.from_phone_number,
+    normalized.to_phone_number
+  );
 
   const sid = clean(
     options.provider_message_sid ||
@@ -1094,7 +1124,7 @@ function buildSuccessMessageEvent(row, send_result, options = {}) {
     template_id: normalized.template_id,
     property_address: normalized.property_address,
     market: normalized.market || null,
-    thread_key: normalized.thread_key || null,
+    thread_key,
     auto_reply_status: normalized.type === "auto_reply" ? "sent" : null,
     auto_reply_queue_id: normalized.type === "auto_reply" ? String(normalized.id || "") : null,
     detected_intent: normalized.detected_intent || null,
@@ -1110,7 +1140,7 @@ function buildSuccessMessageEvent(row, send_result, options = {}) {
       queue_key,
       send_result,
       enrichment: {
-        thread_key: normalized.thread_key || null,
+        thread_key,
         property_id: normalized.property_id || null,
         master_owner_id: normalized.master_owner_id || null,
         seller_name: normalized.seller_display_name || normalized.seller_first_name || null,
@@ -1132,6 +1162,11 @@ function buildFailureMessageEvent(row, error, options = {}) {
   const event_timestamp = options.now || nowIso();
   const queue_key = clean(normalized.queue_key) || clean(normalized.queue_id) || String(normalized.id);
   const timestamp_key = event_timestamp.replace(/[^0-9]/g, "").slice(0, 14);
+  const thread_key = canonicalThreadKeyForDirection(
+    "outbound",
+    normalized.from_phone_number,
+    normalized.to_phone_number
+  );
   const failure_result =
     ensureObject(options.send_result).error_message || ensureObject(options.send_result).error_status
       ? options.send_result
@@ -1164,7 +1199,7 @@ function buildFailureMessageEvent(row, error, options = {}) {
     textgrid_number_id: normalized.textgrid_number_id,
     template_id: normalized.template_id,
     property_address: normalized.property_address,
-    thread_key: normalized.thread_key || null,
+    thread_key,
     detected_intent: normalized.detected_intent || null,
     stage_before: normalized.stage_before || normalized.current_stage || null,
     stage_after: normalized.stage_after || normalized.current_stage || null,
@@ -1234,6 +1269,7 @@ export async function writeOutboundSuccessMessageEvent(row, send_result, options
       last_intent: payload.detected_intent,
       latest_reply_template_id: payload.template_id,
       is_read: true,
+      increment_direction: "outbound",
     }, options);
   } catch (syncErr) {
     console.error("FAILED TO SYNC THREAD STATE ON OUTBOUND SUCCESS", syncErr);
@@ -1949,10 +1985,6 @@ export async function logInboundMessageEvent(payload, options = {}) {
     payload?.needs_human_review ?? classificationFields?.needs_human_review,
     null
   );
-  const is_hot_lead = asNullableBoolean(
-    payload?.is_hot_lead ?? classificationFields?.is_hot_lead,
-    null
-  );
   const is_dnc = asNullableBoolean(payload?.is_dnc ?? classificationFields?.is_dnc, null);
   const is_wrong_number = asNullableBoolean(
     payload?.is_wrong_number ?? classificationFields?.is_wrong_number,
@@ -1962,6 +1994,14 @@ export async function logInboundMessageEvent(payload, options = {}) {
     payload?.is_not_interested ?? classificationFields?.is_not_interested,
     null
   );
+  // Classification veto: negative signals override any positive hot-lead token.
+  // "No / No I do not own that / No wrong number / Not interested / STOP" must never be hot.
+  const is_hot_lead_raw = asNullableBoolean(
+    payload?.is_hot_lead ?? classificationFields?.is_hot_lead,
+    null
+  );
+  const negative_veto = is_wrong_number === true || is_not_interested === true || is_dnc === true;
+  const is_hot_lead = negative_veto ? false : is_hot_lead_raw;
   const language = clean(payload?.language || classificationFields?.language) || null;
   const next_action = clean(payload?.next_action || classificationFields?.next_action) || null;
   const priority = clean(payload?.priority || classificationFields?.priority) || null;
@@ -2029,6 +2069,7 @@ export async function logInboundMessageEvent(payload, options = {}) {
     classification_confidence: classification_confidence ?? 0,
     stage_before: clean(payload?.stage_before || payload?.metadata?.stage_before) || null,
     stage_after: clean(payload?.stage_after || payload?.metadata?.stage_after) || null,
+    thread_key: canonicalThreadKeyForDirection("inbound", from_phone_number, to_phone_number),
     metadata: {
       ...ensureObject(existing_row?.metadata),
       source: "textgrid_inbound_webhook",
@@ -2062,6 +2103,9 @@ export async function logInboundMessageEvent(payload, options = {}) {
   try {
     const enrichment = await enrichMessageEventContext(event, getSupabase(options));
     event = { ...event, ...buildMessageEventEnrichmentUpdate(enrichment) };
+    event.thread_key =
+      canonicalThreadKeyForDirection("inbound", event.from_phone_number, event.to_phone_number) ||
+      event.thread_key;
   } catch (_) {
     event.metadata = { ...event.metadata, enrichment: { source: "inbound_enrichment_failed", enriched_at: now } };
   }
@@ -2100,6 +2144,7 @@ export async function logInboundMessageEvent(payload, options = {}) {
       latest_direction: "inbound",
       latest_delivery_status: "delivered",
       last_inbound_at: event.created_at || new Date().toISOString(),
+      increment_direction: "inbound",
     }, options);
   } catch (syncErr) {
     console.error("FAILED TO SYNC THREAD STATE ON INBOUND", syncErr);
@@ -2475,7 +2520,7 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
     dedupe_key: clean(row.dedupe_key || row.metadata?.idempotency_key || row.queue_key) || null,
     seller_first_name: clean(row.seller_first_name || row.metadata?.seller_first_name || row.metadata?.queue_context?.seller_first_name) || null,
     seller_display_name: clean(row.seller_display_name || row.metadata?.seller_display_name) || null,
-    thread_key: clean(row.thread_key) || null,
+    thread_key: normalizePhone(row.to_phone_number) || clean(row.thread_key) || null,
     template_source: clean(row.template_source || "catalog") || null,
     rendered_message: clean(row.rendered_message || row.message_body) || null,
     priority: clean(row.priority || "normal") || "normal",
@@ -2560,11 +2605,33 @@ export async function insertSupabaseSendQueueRow(payload, deps = {}) {
 export async function upsertInboxThreadState(payload, deps = {}) {
   const supabase = getSupabase(deps);
   const now = new Date().toISOString();
+  const canonical_seller_phone =
+    normalizePhone(payload.seller_phone) ||
+    normalizePhone(payload.canonical_e164) ||
+    normalizePhone(payload.thread_key) ||
+    null;
+  const thread_key = canonical_seller_phone || clean(payload.thread_key);
+  if (!thread_key) return { ok: false, reason: "missing_thread_key" };
+
+  let prior = null;
+  const { data: existing_state } = await supabase
+    .from('inbox_thread_state')
+    .select('inbound_count,outbound_count')
+    .eq('thread_key', thread_key)
+    .limit(1)
+    .maybeSingle();
+  prior = existing_state || null;
+
+  const prior_inbound_count = Number(prior?.inbound_count || 0);
+  const prior_outbound_count = Number(prior?.outbound_count || 0);
+  const increment_direction = clean(payload.increment_direction).toLowerCase();
+  const inbound_count = increment_direction === "inbound" ? prior_inbound_count + 1 : prior_inbound_count;
+  const outbound_count = increment_direction === "outbound" ? prior_outbound_count + 1 : prior_outbound_count;
 
   const insert_payload = {
-    thread_key: payload.thread_key,
-    seller_phone: clean(payload.seller_phone),
-    canonical_e164: clean(payload.canonical_e164),
+    thread_key,
+    seller_phone: canonical_seller_phone || clean(payload.seller_phone),
+    canonical_e164: canonical_seller_phone || clean(payload.canonical_e164),
     our_number: clean(payload.our_number),
     master_owner_id: clean(payload.master_owner_id),
     prospect_id: clean(payload.prospect_id),
@@ -2577,6 +2644,8 @@ export async function upsertInboxThreadState(payload, deps = {}) {
     next_action: clean(payload.next_action),
     automation_state: clean(payload.automation_state),
     latest_reply_template_id: clean(payload.latest_reply_template_id),
+    inbound_count,
+    outbound_count,
     is_read: typeof payload.is_read === 'boolean' ? payload.is_read : false,
     updated_at: now,
     metadata: {
@@ -2591,9 +2660,6 @@ export async function upsertInboxThreadState(payload, deps = {}) {
   if (payload.latest_delivery_status !== undefined) insert_payload.latest_delivery_status = clean(payload.latest_delivery_status);
   if (payload.last_inbound_at !== undefined) insert_payload.last_inbound_at = payload.last_inbound_at;
   if (payload.last_outbound_at !== undefined) insert_payload.last_outbound_at = payload.last_outbound_at;
-
-  // Remove empty strings/nulls for key fields if they might break constraints
-  if (!insert_payload.thread_key) return { ok: false, reason: "missing_thread_key" };
 
   const { data, error } = await supabase
     .from('inbox_thread_state')

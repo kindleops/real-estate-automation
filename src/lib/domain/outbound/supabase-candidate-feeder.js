@@ -140,7 +140,7 @@ function titleCaseNameToken(value) {
     .replace(/(^|[-'\s])([a-z])/g, (_, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
 }
 
-function extractFirstName(value) {
+function extractFirstName(value, { allow_single_token = true } = {}) {
   const raw = clean(value);
   if (isInvalidSellerNameValue(raw)) return "";
 
@@ -148,6 +148,11 @@ function extractFirstName(value) {
     .replace(/\s+/g, " ")
     .replace(/[,;|].*$/g, "")
     .trim();
+
+  if (!allow_single_token) {
+    const token_count = stripped.split(/\s+/).filter(Boolean).length;
+    if (token_count < 2) return "";
+  }
 
   const first = stripped.split(/\s+/).find(Boolean) || "";
   if (isInvalidSellerNameValue(first)) return "";
@@ -159,20 +164,28 @@ function extractFirstName(value) {
 
 export function resolveSellerIdentity(candidate = {}) {
   const sources = [
-    ["seller_first_name", candidate.seller_first_name],
-    ["prospect_first_name", candidate.prospect_first_name],
-    ["phone_first_name", candidate.phone_first_name],
-    ["owner_first_name", candidate.owner_first_name],
-    ["seller_full_name", candidate.seller_full_name],
-    ["phone_full_name", candidate.phone_full_name],
-    ["owner_display_name", candidate.owner_display_name],
-    ["display_name", candidate.display_name],
-    ["property_owner_name", candidate.property_owner_name],
-    ["master_owner_display_name", candidate.master_owner_display_name],
+    { source: "seller_first_name", value: candidate.seller_first_name, allow_single_token: true },
+    { source: "prospect_first_name", value: candidate.prospect_first_name, allow_single_token: true },
+    // phone_first_name is CNAM-derived and may contain a last-name or entity fragment.
+    // Only trust it when phone_full_name has 2+ tokens, proving it parsed a real first+last name.
+    {
+      source: "phone_first_name",
+      value: candidate.phone_first_name,
+      allow_single_token: true,
+      guard: () => hasMultipleNameTokens(candidate.phone_full_name || ""),
+    },
+    { source: "owner_first_name", value: candidate.owner_first_name, allow_single_token: true },
+    { source: "seller_full_name", value: candidate.seller_full_name, allow_single_token: false },
+    { source: "phone_full_name", value: candidate.phone_full_name, allow_single_token: false },
+    { source: "owner_display_name", value: candidate.owner_display_name, allow_single_token: false },
+    { source: "display_name", value: candidate.display_name, allow_single_token: false },
+    { source: "property_owner_name", value: candidate.property_owner_name, allow_single_token: false },
+    { source: "master_owner_display_name", value: candidate.master_owner_display_name, allow_single_token: false },
   ];
 
-  for (const [source, value] of sources) {
-    const first_name = extractFirstName(value);
+  for (const { source, value, allow_single_token, guard } of sources) {
+    if (guard && !guard()) continue;
+    const first_name = extractFirstName(value, { allow_single_token });
     if (first_name) {
       return {
         seller_first_name: first_name,
@@ -728,6 +741,69 @@ function hasBlankLocationPattern(text = "") {
 function hasBlankSellerGreeting(text = "") {
   const normalized = clean(text).replace(/\s+/g, " ");
   return /^(hi|hey|hello|hola)\s+,/i.test(normalized);
+}
+
+/**
+ * Final production blocker called immediately before createSendQueueItem().
+ * Catches issues that must never reach the DB insert:
+ *  - batch-level phone/owner/owner+phone+touch duplicates
+ *  - unsafe seller name that would produce a blank greeting
+ *  - schedule_spread requested but scheduler is null (window full or inactive)
+ *
+ * Items 1–3 are defense-in-depth; the primary batch checks happen earlier in the loop.
+ * Items 4–5 are the new enforcement gates not covered elsewhere.
+ */
+function runOutboundSafetyGate(candidate, rendered, options, batchState = {}) {
+  const { seenPhones, seenOwnerPhoneTouch, seenOwners, allow_multiple_per_owner, spread_scheduler } = batchState;
+
+  const phoneKey = clean(candidate.canonical_e164 || "");
+  const ownerKey = clean(candidate.master_owner_id);
+  const ownerPhoneTouchKey = `${ownerKey}:${phoneKey}:${options.touch_number}`;
+
+  // 1. Duplicate phone in current batch
+  if (phoneKey && seenPhones && seenPhones.has(phoneKey)) {
+    return { ok: false, reason: "outbound_gate_batch_duplicate_phone", reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM, gate_block_type: "batch_duplicate" };
+  }
+  // 2. Duplicate master_owner_id + to_phone_number + touch_number in current batch
+  if (ownerPhoneTouchKey && seenOwnerPhoneTouch && seenOwnerPhoneTouch.has(ownerPhoneTouchKey)) {
+    return { ok: false, reason: "outbound_gate_batch_duplicate_owner_phone_touch", reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM, gate_block_type: "batch_duplicate" };
+  }
+  // 3. Duplicate master_owner_id in current batch (unless multi-property mode)
+  if (!allow_multiple_per_owner && ownerKey && seenOwners && seenOwners.has(ownerKey)) {
+    return { ok: false, reason: "outbound_gate_batch_duplicate_owner", reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM, gate_block_type: "batch_duplicate" };
+  }
+  // 4. Unsafe seller name — rendered body must not produce a blank greeting ("Hey ,", "Hi ,")
+  const msg_body = rendered?.rendered_message_body || "";
+  if (hasBlankSellerGreeting(msg_body)) {
+    return { ok: false, reason: "outbound_gate_unsafe_seller_name_blank_greeting", reason_code: REASON_CODES.TEMPLATE_RENDER_FAILED, gate_block_type: "unsafe_name" };
+  }
+  // 5. schedule_spread requested but scheduler was not activated (overflow or window closed)
+  if (options.schedule_spread && !spread_scheduler) {
+    return { ok: false, reason: "outbound_gate_schedule_spread_inactive", reason_code: REASON_CODES.SCHEDULE_OVERFLOW_BLOCKED, gate_block_type: "schedule" };
+  }
+
+  return { ok: true };
+}
+
+function buildNeutralGreetingMessage(variable_payload = {}) {
+  const agent = clean(
+    pick(
+      variable_payload.agent_name,
+      variable_payload.agent_first_name,
+      variable_payload.sms_agent_name,
+      variable_payload.sender_name,
+      "Alex"
+    )
+  ) || "Alex";
+  const address = clean(
+    pick(
+      variable_payload.property_street_address,
+      variable_payload.property_address,
+      variable_payload.property_address_full,
+      "this property"
+    )
+  ) || "this property";
+  return `Hi, this is ${agent}. Quick question - do you still own ${address}?`;
 }
 
 function buildTemplateVariablePayload(candidate = {}) {
@@ -1443,10 +1519,12 @@ function createSpreadScheduler({
   schedule_start_local = "09:00",
   schedule_end_local = "20:00",
   schedule_interval_seconds_min = 45,
+  schedule_interval_seconds_max = 180,
 } = {}) {
   const start_minutes = parseTimeLocal(schedule_start_local) ?? (9 * 60);
   const end_minutes = parseTimeLocal(schedule_end_local) ?? (20 * 60);
-  const interval_ms = Math.max(1, Number(schedule_interval_seconds_min) || 45) * 1000;
+  const min_seconds = Math.max(1, Number(schedule_interval_seconds_min) || 45);
+  const max_seconds = Math.max(min_seconds, Number(schedule_interval_seconds_max) || min_seconds);
   const now_ms = new Date(now_iso).getTime();
   const overflow_guard_ms = now_ms + 18 * 60 * 60 * 1000;
   const cursors_by_timezone = new Map();
@@ -1492,6 +1570,7 @@ function createSpreadScheduler({
       }
 
       const previous_cursor = cursors_by_timezone.get(window.timezone);
+      const interval_ms = (Math.floor(Math.random() * (max_seconds - min_seconds + 1)) + min_seconds) * 1000;
       const cursor_ms = previous_cursor === undefined
         ? Math.max(now_ms + 10 * 60 * 1000, window.start_utc)
         : previous_cursor + interval_ms;
@@ -2456,6 +2535,20 @@ export async function renderOutboundTemplate(candidate = {}, options = {}, deps 
   const NAME_REQUIRED_VARIABLES = new Set(["seller_first_name", "first_name", "owner_first_name", "seller_name"]);
   const missing_name_vars = rendered.missing_variables.filter((v) => NAME_REQUIRED_VARIABLES.has(v));
   if (missing_name_vars.length > 0) {
+    const neutral_message = buildNeutralGreetingMessage(variable_payload);
+    if (neutral_message) {
+      return {
+        ok: true,
+        rendered_message_body: neutral_message,
+        template: selected_template_with_source,
+        template_use_case: selector.use_case,
+        stage_code: selector.stage_code,
+        language: selector.preferred_language,
+        variable_payload_preview: variable_payload,
+        missing_variables: rendered.missing_variables,
+        template_rotation,
+      };
+    }
     logger.warn("feeder.missing_required_variable", {
         master_owner_id: candidate.master_owner_id,
         property_id: candidate.property_id,
@@ -2707,7 +2800,7 @@ export async function createSendQueueItem(candidate = {}, options = {}, deps = {
     seller_display_name: clean(seller_identity.seller_display_name || candidate.owner_display_name || candidate.seller_full_name || "") || null,
     // Top-level visibility fields — populated from candidate so Queue/Inbox/Pipeline/Map filters work
     market: clean(candidate.market) || null,
-    thread_key: candidate.canonical_e164 || null,
+    thread_key: normalizePhone(candidate.canonical_e164) || null,
     property_type: clean(pick(candidate.property_type, candidate.raw?.property_type, candidate.raw?.property_class)) || null,
     property_address_state: clean(pick(candidate.state, candidate.property_state, candidate.state_code)) || null,
     property_address_city: clean(pick(candidate.property_city, candidate.raw?.property_address_city, candidate.raw?.property_city)) || null,
@@ -2889,6 +2982,7 @@ export function buildFeederDiagnostics(summary = {}) {
     contact_window_block_count: Number(summary.contact_window_block_count || 0),
     pending_prior_touch_block_count: Number(summary.pending_prior_touch_block_count || 0),
     duplicate_queue_block_count: Number(summary.duplicate_queue_block_count || 0),
+    batch_duplicate_block_count: Number(summary.batch_duplicate_block_count || 0),
     template_block_count: Number(summary.template_block_count || 0),
     no_template_count: Number(summary.no_template_count || 0),
     template_render_failed_count: Number(summary.template_render_failed_count || 0),
@@ -2978,10 +3072,11 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
       contact_window_block_count: 0,
       pending_prior_touch_block_count: 0,
       duplicate_queue_block_count: 0,
+      batch_duplicate_block_count: 0,
       template_block_count: 0,
       no_template_count: 0,
       template_render_failed_count: 0,
-      schedule_spread_enabled: options.schedule_spread && !options.within_contact_window_now,
+      schedule_spread_enabled: options.schedule_spread,
       schedule_start_local: options.schedule_start_local || null,
       schedule_end_local: options.schedule_end_local || null,
       schedule_interval_seconds: options.schedule_interval_seconds_min || 0,
@@ -3006,6 +3101,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
         schedule_start_local: options.schedule_start_local,
         schedule_end_local: options.schedule_end_local,
         schedule_interval_seconds_min: options.schedule_interval_seconds_min,
+        schedule_interval_seconds_max: options.schedule_interval_seconds_max,
       })
     : null;
 
@@ -3028,6 +3124,7 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     contact_window_block_count: 0,
     pending_prior_touch_block_count: 0,
     duplicate_queue_block_count: 0,
+    batch_duplicate_block_count: 0,
     template_block_count: 0,
     no_template_count: 0,
     template_render_failed_count: 0,
@@ -3046,27 +3143,55 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
   };
 
   
-  const seenContacts = new Set();
+  const seenPhones = new Set();
+  const seenOwnerPhoneTouch = new Set();
+  const seenOwners = new Set();
+  const allow_multiple_per_owner = asBoolean(input.allow_multiple_per_owner, false);
   for (const candidate of source.rows) {
     if (summary.queued_count >= options.limit) {
       summary.skipped_count += 1;
       continue;
     }
 
-    // Batch deduplication: One per owner+phone per batch
-    const contactKey = candidate.master_owner_id + ":" + (candidate.canonical_e164 || candidate.phone_number || candidate.best_phone_id);
-    if (seenContacts.has(contactKey)) {
+    const phoneKey = clean(candidate.canonical_e164 || candidate.phone_number || candidate.best_phone_id || "");
+    const ownerKey = clean(candidate.master_owner_id);
+    const ownerPhoneTouchKey = `${ownerKey}:${phoneKey}:${options.touch_number}`;
+    if (phoneKey && seenPhones.has(phoneKey)) {
         summary.skipped_count += 1;
-        summary.duplicate_queue_block_count += 1;
+        summary.batch_duplicate_block_count += 1;
         summary.sample_skips.push({
             reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM,
-            reason: "batch_duplicate_suppressed",
+            reason: "batch_duplicate_phone_suppressed",
             master_owner_id: candidate.master_owner_id,
             property_id: candidate.property_id,
         });
         continue;
     }
-    seenContacts.add(contactKey);
+    if (ownerPhoneTouchKey && seenOwnerPhoneTouch.has(ownerPhoneTouchKey)) {
+      summary.skipped_count += 1;
+      summary.batch_duplicate_block_count += 1;
+      summary.sample_skips.push({
+        reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM,
+        reason: "batch_duplicate_owner_phone_touch_suppressed",
+        master_owner_id: candidate.master_owner_id,
+        property_id: candidate.property_id,
+      });
+      continue;
+    }
+    if (!allow_multiple_per_owner && ownerKey && seenOwners.has(ownerKey)) {
+      summary.skipped_count += 1;
+      summary.batch_duplicate_block_count += 1;
+      summary.sample_skips.push({
+        reason_code: REASON_CODES.DUPLICATE_QUEUE_ITEM,
+        reason: "batch_duplicate_owner_suppressed",
+        master_owner_id: candidate.master_owner_id,
+        property_id: candidate.property_id,
+      });
+      continue;
+    }
+    if (phoneKey) seenPhones.add(phoneKey);
+    if (ownerPhoneTouchKey) seenOwnerPhoneTouch.add(ownerPhoneTouchKey);
+    if (ownerKey) seenOwners.add(ownerKey);
     if (summary.queued_count >= options.limit) {
       summary.skipped_count += 1;
       summary.sample_skips.push({
@@ -3206,6 +3331,41 @@ export async function runSupabaseCandidateFeeder(input = {}, deps = {}) {
     } else {
       scheduled_for = eligibility.scheduled_for;
     }
+
+    // ── Final OutboundSafetyGate ──────────────────────────────────────────────
+    // Must run BEFORE createSendQueueItem. Gates: batch duplicate (defense-in-depth),
+    // unsafe seller name, schedule_spread inactive.
+    const gate_result = runOutboundSafetyGate(candidate, rendered, options, {
+      seenPhones,
+      seenOwnerPhoneTouch,
+      seenOwners,
+      allow_multiple_per_owner,
+      spread_scheduler,
+    });
+    if (!gate_result.ok) {
+      summary.skipped_count += 1;
+      if (gate_result.gate_block_type === "batch_duplicate") {
+        summary.batch_duplicate_block_count += 1;
+      } else if (gate_result.reason_code === REASON_CODES.TEMPLATE_RENDER_FAILED) {
+        summary.template_block_count += 1;
+        summary.template_render_failed_count += 1;
+      } else if (
+        gate_result.reason_code === REASON_CODES.SCHEDULE_OVERFLOW_BLOCKED ||
+        gate_result.reason_code === REASON_CODES.SCHEDULE_WINDOW_FULL
+      ) {
+        const counter = mapReasonToDiagnosticCounter(gate_result.reason_code);
+        if (counter) summary[counter] += 1;
+      }
+      summary.sample_skips.push({
+        reason_code: gate_result.reason_code,
+        reason: gate_result.reason,
+        gate_block_type: gate_result.gate_block_type,
+        master_owner_id: candidate.master_owner_id,
+        property_id: candidate.property_id,
+      });
+      continue;
+    }
+    // ── End OutboundSafetyGate ────────────────────────────────────────────────
 
     const queue_result = await createSendQueueItem(
       candidate,
