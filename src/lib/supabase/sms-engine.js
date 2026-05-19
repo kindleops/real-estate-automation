@@ -682,7 +682,7 @@ export async function claimSendQueueRow(row, deps = {}) {
     .from(SEND_QUEUE_TABLE)
     .update(payload)
     .eq("id", normalized.id)
-    .in("queue_status", ["queued", "Queued"])
+    .in("queue_status", ["queued", "Queued", "scheduled", "pending", "approved", "ready"])
     .is("lock_token", null)
     .select()
     .maybeSingle();
