@@ -1425,12 +1425,23 @@ async function processSupabaseQueueItem(resolved_queue_row, deps = {}) {
         provider_message_sid,
       });
     } catch (message_event_error) {
+      const me_err_msg = message_event_error?.message || "unknown_error";
+      const me_err_code = message_event_error?.code || null;
       bookkeeping_errors.push(
-        `message_event_write_failed:${message_event_error?.message || "unknown_error"}`
+        `message_event_write_failed:${me_err_msg}`
       );
       warn("queue.success_message_event_write_failed", {
         queue_row_id,
-        message: message_event_error?.message || "Unknown message event error",
+        error_code: me_err_code,
+        error_message: me_err_msg,
+        hint: me_err_code === "PGRST204"
+          ? "schema drift: payload column missing from message_events table"
+          : null,
+      });
+      console.error("MESSAGE EVENT WRITE FAILED", {
+        queue_row_id,
+        error_code: me_err_code,
+        error_message: me_err_msg,
       });
     }
 
