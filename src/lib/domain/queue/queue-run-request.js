@@ -105,6 +105,14 @@ export async function handleQueueRunRequest(request, method, deps = {}) {
       false
     );
 
+    // Hard safety: if caller explicitly requested dry_run, never allow a live send through
+    const body_dry_run_explicit = method === "POST" && body?.dry_run === true;
+    const query_dry_run_explicit = search_params.get("dry_run") === "true" || search_params.get("dry_run") === "1";
+    if ((body_dry_run_explicit || query_dry_run_explicit) && !dry_run) {
+      route_logger?.error?.("queue_run.dry_run_safety_violation", { method, body_dry_run_explicit, query_dry_run_explicit });
+      return json_response({ ok: false, error: "dry_run_safety_violation", message: "dry_run was requested but resolved false — refusing to execute" }, { status: 500 });
+    }
+
     route_logger?.info?.("queue_run.requested", {
       method,
       limit,

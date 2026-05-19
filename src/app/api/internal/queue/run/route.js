@@ -25,5 +25,13 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  return GET(request);
+  try {
+    return await handleQueueRunRequest(request, "POST", {
+      logger,
+      jsonResponse: NextResponse.json,
+    });
+  } catch (error) {
+    captureRouteException(error, { route: "internal/queue/run", subsystem: "queue_runner" });
+    throw error;
+  }
 }
